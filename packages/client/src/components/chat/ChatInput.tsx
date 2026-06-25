@@ -37,6 +37,7 @@ import { parseChatMetadata } from "../../lib/chat-display";
 import { cn, getAvatarCropStyle, type AvatarCropValue } from "../../lib/utils";
 import { applyTextareaQuoteFormat } from "../../lib/textarea-quotes";
 import { translateDraftText } from "../../lib/draft-translation";
+import { translateInputMessageIfEnabled } from "../../lib/translate-text";
 import { prepareImageAttachment } from "../../lib/chat-attachment-images";
 import { CARD_ASSET_INSERT_EVENT, type CardAssetInsertDetail } from "../../lib/card-asset-links";
 import { requestChatScrollToBottom } from "../../lib/chat-scroll-events";
@@ -725,15 +726,10 @@ export const ChatInput = memo(function ChatInput({
     });
 
     // Input translation: translate user's message before sending
-    if (chatMeta.translateInput && message.trim()) {
-      try {
-        const { translateText } = await import("../../lib/translate-text");
-        const translated = await translateText(message);
-        if (translated.trim()) message = translated;
-      } catch {
-        toast.error("Failed to translate message — sending original");
-      }
-    }
+    message = await translateInputMessageIfEnabled(
+      message,
+      chatMeta.translationInputBehavior === "auto",
+    );
 
     message = resolveInputMacros(message);
 
@@ -910,15 +906,7 @@ export const ChatInput = memo(function ChatInput({
       scopedMode: chatMeta.scopedRegexMode,
     });
 
-    if (chatMeta.translateInput && message.trim()) {
-      try {
-        const { translateText } = await import("../../lib/translate-text");
-        const translated = await translateText(message);
-        if (translated.trim()) message = translated;
-      } catch {
-        toast.error("Failed to translate message; posting original");
-      }
-    }
+    message = await translateInputMessageIfEnabled(message, chatMeta.translationInputBehavior === "auto");
 
     message = resolveInputMacros(message);
     const submittedDraft = raw;
@@ -1272,7 +1260,7 @@ export const ChatInput = memo(function ChatInput({
   }, [charPickerOpen]);
 
   const showCharPicker = !!activeChatCharacters && activeChatCharacters.length > 1 && !!groupResponseOrder;
-  const showDraftTranslateButton = chatMetadata.showInputTranslateButton === true;
+  const showDraftTranslateButton = chatMetadata.translationInputBehavior === "draft";
 
   const handleTranslateDraft = useCallback(async () => {
     if (!activeChatId || isTranslatingDraft) return;

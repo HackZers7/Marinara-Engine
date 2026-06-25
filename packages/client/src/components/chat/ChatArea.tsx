@@ -65,7 +65,11 @@ import { Modal } from "../ui/Modal";
 import { useEncounter } from "../../hooks/use-encounter";
 import { useScene } from "../../hooks/use-scene";
 import { useEncounterStore } from "../../stores/encounter.store";
-import { useTranslationStore } from "../../stores/translation.store";
+import {
+  useTranslationStore,
+  buildTranslationConfigsFromMeta,
+  type TranslationChannelConfig,
+} from "../../stores/translation.store";
 import { ttsService } from "../../lib/tts-service";
 import { useTTSConfig } from "../../hooks/use-tts";
 import { achievementKeys, trackAchievementEvent } from "../../hooks/use-achievements";
@@ -108,6 +112,21 @@ const BUILT_IN_AGENT_ID_SET = new Set(BUILT_IN_AGENTS.map((agent) => agent.id));
 const BUILT_IN_TRACKER_AGENT_ID_SET = new Set(
   BUILT_IN_AGENTS.filter((agent) => agent.category === "tracker" && !agent.libraryHidden).map((agent) => agent.id),
 );
+
+function shallowEqualTranslationConfig(
+  a: TranslationChannelConfig | null,
+  b: TranslationChannelConfig | null,
+): boolean {
+  if (a === b) return true;
+  if (a === null || b === null) return false;
+  return (
+    a.provider === b.provider &&
+    a.targetLanguage === b.targetLanguage &&
+    a.connectionId === b.connectionId &&
+    a.deeplApiKey === b.deeplApiKey &&
+    a.deeplxUrl === b.deeplxUrl
+  );
+}
 
 function compareMessagesByCursor(left: MessageWithSwipes, right: MessageWithSwipes): number {
   const createdAtCompare = left.createdAt.localeCompare(right.createdAt);
@@ -881,24 +900,36 @@ export function ChatArea() {
     />
   );
 
-  // Sync translation config from chat metadata to the translation store
+  // Sync translation config from chat metadata to the translation store.
+  // We depend on individual fields (not chatMeta itself) so a metadata edit
+  // unrelated to translation does not rebuild the configs and re-sync the store.
+  const translationConfigs = useMemo(
+    () => buildTranslationConfigsFromMeta(chatMeta as Record<string, unknown>),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [
+      chatMeta.translationProvider,
+      chatMeta.translationTargetLang,
+      chatMeta.translationConnectionId,
+      chatMeta.translationDeeplApiKey,
+      chatMeta.translationDeeplxUrl,
+      chatMeta.translationInputConfigured,
+      chatMeta.translationInputProvider,
+      chatMeta.translationInputTargetLang,
+      chatMeta.translationInputConnectionId,
+      chatMeta.translationInputDeeplApiKey,
+      chatMeta.translationInputDeeplxUrl,
+    ],
+  );
   useEffect(() => {
     if (!chat?.id) return;
-    useTranslationStore.getState().setConfig({
-      provider: chatMeta.translationProvider ?? "google",
-      targetLanguage: chatMeta.translationTargetLang ?? "en",
-      connectionId: chatMeta.translationConnectionId,
-      deeplApiKey: chatMeta.translationDeeplApiKey,
-      deeplxUrl: chatMeta.translationDeeplxUrl,
-    });
-  }, [
-    chat?.id,
-    chatMeta.translationProvider,
-    chatMeta.translationTargetLang,
-    chatMeta.translationConnectionId,
-    chatMeta.translationDeeplApiKey,
-    chatMeta.translationDeeplxUrl,
-  ]);
+    const store = useTranslationStore.getState();
+    if (!shallowEqualTranslationConfig(store.config, translationConfigs.chat)) {
+      store.setConfig(translationConfigs.chat);
+    }
+    if (!shallowEqualTranslationConfig(store.inputConfig, translationConfigs.input)) {
+      store.setInputConfig(translationConfigs.input);
+    }
+  }, [chat?.id, translationConfigs]);
 
   // On chat switch, clear in-memory translations and seed from persisted extras.
   // Also re-seed when new pages are fetched (pagination) so older persisted

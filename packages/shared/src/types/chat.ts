@@ -339,8 +339,8 @@ export interface ChatMetadata {
   appliedChatPresetId?: string | null;
   /** Custom prompt prefix used by the /impersonate slash command. */
   impersonatePrompt?: string | null;
-  /** Show a manual draft translation button beside the send control. */
-  showInputTranslateButton?: boolean;
+  /** How outgoing user messages are translated: not at all, automatically before send, or on-demand via a draft button. */
+  translationInputBehavior?: "off" | "auto" | "draft";
   /** Allow roleplay characters to create direct-message conversation chats with hidden [dm] commands. */
   roleplayDmCommandsEnabled?: boolean;
   /** Chat-scoped Intiface Central WebSocket URL for haptic manual and auto-connect. */

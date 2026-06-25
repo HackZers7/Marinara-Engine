@@ -40,6 +40,7 @@ import { parseChatMetadata } from "../../lib/chat-display";
 import { cn, getAvatarCropStyle, type AvatarCropValue } from "../../lib/utils";
 import { applyTextareaQuoteFormat } from "../../lib/textarea-quotes";
 import { translateDraftText } from "../../lib/draft-translation";
+import { translateInputMessageIfEnabled } from "../../lib/translate-text";
 import { prepareImageAttachment } from "../../lib/chat-attachment-images";
 import { CARD_ASSET_INSERT_EVENT, type CardAssetInsertDetail } from "../../lib/card-asset-links";
 import { QuickConnectionSwitcher } from "./QuickConnectionSwitcher";
@@ -771,15 +772,10 @@ export function ConversationInput({
         scopedMode: streamMeta.scopedRegexMode,
       });
       // Input translation for streaming path too
-      if (streamMeta.translateInput && message.trim()) {
-        try {
-          const { translateText } = await import("../../lib/translate-text");
-          const translated = await translateText(message);
-          if (translated.trim()) message = translated;
-        } catch {
-          toast.error("Failed to translate message — sending original");
-        }
-      }
+      message = await translateInputMessageIfEnabled(
+        message,
+        streamMeta.translationInputBehavior === "auto",
+      );
       // Final pass: resolve macros introduced by translation while {{input}} still points to raw.
       message = resolveInputMacros(message);
       if (textareaRef.current) {
@@ -897,15 +893,10 @@ export function ConversationInput({
     });
 
     // Input translation: translate user's message before sending
-    if (chatMeta.translateInput && message.trim()) {
-      try {
-        const { translateText } = await import("../../lib/translate-text");
-        const translated = await translateText(message);
-        if (translated.trim()) message = translated;
-      } catch {
-        toast.error("Failed to translate message — sending original");
-      }
-    }
+    message = await translateInputMessageIfEnabled(
+      message,
+      chatMeta.translationInputBehavior === "auto",
+    );
 
     // Final pass: resolve macros introduced by translation while {{input}} still points to raw.
     message = resolveInputMacros(message);
@@ -1091,15 +1082,10 @@ export function ConversationInput({
       scopedMode: chatMeta.scopedRegexMode,
     });
 
-    if (chatMeta.translateInput && message.trim()) {
-      try {
-        const { translateText } = await import("../../lib/translate-text");
-        const translated = await translateText(message);
-        if (translated.trim()) message = translated;
-      } catch {
-        toast.error("Failed to translate message; posting original");
-      }
-    }
+    message = await translateInputMessageIfEnabled(
+      message,
+      chatMeta.translationInputBehavior === "auto",
+    );
 
     message = resolveInputMacros(message);
     const submittedDraft = raw;
@@ -1639,7 +1625,7 @@ export function ConversationInput({
   }, [charPickerOpen]);
 
   const showCharPicker = groupResponseOrder === "manual" && !!activeChatCharacters && activeChatCharacters.length > 1;
-  const showDraftTranslateButton = chatMetadata.showInputTranslateButton === true;
+  const showDraftTranslateButton = chatMetadata.translationInputBehavior === "draft";
 
   const handleTranslateDraft = useCallback(async () => {
     if (!activeChatId || isTranslatingDraft) return;
