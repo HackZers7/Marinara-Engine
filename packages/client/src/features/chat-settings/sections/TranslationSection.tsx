@@ -1,4 +1,5 @@
-import { Languages } from "lucide-react";
+import { Languages, RotateCcw } from "lucide-react";
+import { DEFAULT_TRANSLATION_SYSTEM_PROMPT } from "@marinara-engine/shared";
 import { HelpTooltip } from "../../../components/ui/HelpTooltip";
 import { SettingsSwitch } from "../../../components/panels/settings/SettingControls";
 import { ChatSettingsSection } from "../ChatSettingsSection";
@@ -61,6 +62,7 @@ export function TranslationSection({ metadata, textConnections, onMetadataChange
             provider={metadata.translationProvider as string | undefined}
             targetLang={metadata.translationTargetLang as string | undefined}
             connectionId={metadata.translationConnectionId as string | undefined}
+            systemPrompt={metadata.translationPrompt as string | undefined}
             deeplApiKey={metadata.translationDeeplApiKey as string | undefined}
             deeplxUrl={metadata.translationDeeplxUrl as string | undefined}
             textConnections={textConnections}
@@ -99,6 +101,7 @@ export function TranslationSection({ metadata, textConnections, onMetadataChange
               provider={metadata.translationInputProvider as string | undefined}
               targetLang={metadata.translationInputTargetLang as string | undefined}
               connectionId={metadata.translationInputConnectionId as string | undefined}
+              systemPrompt={undefined}
               deeplApiKey={metadata.translationInputDeeplApiKey as string | undefined}
               deeplxUrl={metadata.translationInputDeeplxUrl as string | undefined}
               textConnections={textConnections}
@@ -169,6 +172,7 @@ interface TranslationChannelFieldsProps {
   provider: string | undefined;
   targetLang: string | undefined;
   connectionId: string | undefined;
+  systemPrompt: string | undefined;
   deeplApiKey: string | undefined;
   deeplxUrl: string | undefined;
   textConnections: ChatConnectionOption[];
@@ -180,12 +184,17 @@ function TranslationChannelFields({
   provider: providerRaw,
   targetLang,
   connectionId,
+  systemPrompt,
   deeplApiKey,
   deeplxUrl,
   textConnections,
   onMetadataChange,
 }: TranslationChannelFieldsProps) {
   const provider = providerRaw ?? "google";
+  const storedPrompt = typeof systemPrompt === "string" ? systemPrompt : "";
+  const customPrompt = storedPrompt.trim().length > 0 ? storedPrompt : "";
+  const promptValue = customPrompt || DEFAULT_TRANSLATION_SYSTEM_PROMPT;
+  const hasCustomPrompt = customPrompt.length > 0;
 
   return (
     <div className="space-y-2">
@@ -227,26 +236,63 @@ function TranslationChannelFields({
         />
       </div>
 
-      {/* AI Connection */}
+      {/* AI Connection & Prompt */}
       {provider === "ai" && (
-        <div>
-          <label className="text-[0.6875rem] font-medium text-[var(--muted-foreground)]">
-            Connection
-            <HelpTooltip text="Which AI connection to use for translation" size="0.625rem" />
-          </label>
-          <select
-            value={connectionId ?? ""}
-            onChange={(e) => onMetadataChange({ [`${prefix}ConnectionId`]: e.target.value })}
-            className="mt-0.5 w-full rounded-lg bg-[var(--secondary)] px-3 py-2 text-xs outline-none ring-1 ring-transparent transition-shadow focus:ring-[var(--primary)]/40"
-          >
-            <option value="">Select connection…</option>
-            {textConnections.map((conn) => (
-              <option key={conn.id} value={conn.id}>
-                {conn.name}
-              </option>
-            ))}
-          </select>
-        </div>
+        <>
+          <div>
+            <label className="text-[0.6875rem] font-medium text-[var(--muted-foreground)]">
+              Connection
+              <HelpTooltip text="Which AI connection to use for translation" size="0.625rem" />
+            </label>
+            <select
+              value={connectionId ?? ""}
+              onChange={(e) => onMetadataChange({ [`${prefix}ConnectionId`]: e.target.value })}
+              className="mt-0.5 w-full rounded-lg bg-[var(--secondary)] px-3 py-2 text-xs outline-none ring-1 ring-transparent transition-shadow focus:ring-[var(--primary)]/40"
+            >
+              <option value="">Select connection…</option>
+              {textConnections.map((conn) => (
+                <option key={conn.id} value={conn.id}>
+                  {conn.name}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div className="space-y-1">
+            <div className="flex items-center justify-between gap-2">
+              <label className="text-[0.6875rem] font-medium text-[var(--muted-foreground)]">
+                AI Prompt
+                <HelpTooltip
+                  text="System prompt used by AI translation. Restoring uses Marinara's built-in default."
+                  size="0.625rem"
+                />
+              </label>
+              {hasCustomPrompt && (
+                <button
+                  type="button"
+                  onClick={() => onMetadataChange({ [`${prefix}Prompt`]: null })}
+                  className="flex shrink-0 items-center gap-1 rounded-md bg-[var(--secondary)] px-2 py-0.5 text-[0.625rem] text-[var(--muted-foreground)] ring-1 ring-[var(--border)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)]"
+                  title="Restore default prompt"
+                >
+                  <RotateCcw size="0.625rem" />
+                  Restore
+                </button>
+              )}
+            </div>
+            <textarea
+              value={promptValue}
+              onChange={(e) => {
+                const nextPrompt =
+                  !e.target.value.trim() || e.target.value.trim() === DEFAULT_TRANSLATION_SYSTEM_PROMPT.trim()
+                    ? null
+                    : e.target.value;
+                onMetadataChange({ [`${prefix}Prompt`]: nextPrompt });
+              }}
+              rows={5}
+              className="min-h-28 w-full resize-y rounded-lg bg-[var(--secondary)] px-3 py-2 font-mono text-xs leading-relaxed outline-none ring-1 ring-transparent transition-shadow focus:ring-[var(--primary)]/40"
+            />
+          </div>
+        </>
       )}
 
       {/* DeepL API Key */}

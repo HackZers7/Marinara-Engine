@@ -5,6 +5,7 @@ export interface TranslationChannelConfig {
   provider: "ai" | "deeplx" | "deepl" | "google";
   targetLanguage: string;
   connectionId?: string;
+  systemPrompt?: string;
   deeplApiKey?: string;
   deeplxUrl?: string;
 }
@@ -38,6 +39,7 @@ export function buildTranslationConfigsFromMeta(meta: Record<string, unknown>): 
     provider: coerceTranslationProvider(meta.translationProvider),
     targetLanguage: toOptionalString(meta.translationTargetLang) ?? "en",
     connectionId: toOptionalString(meta.translationConnectionId),
+    systemPrompt: toOptionalString(meta.translationPrompt),
     deeplApiKey: toOptionalString(meta.translationDeeplApiKey),
     deeplxUrl: toOptionalString(meta.translationDeeplxUrl),
   };
