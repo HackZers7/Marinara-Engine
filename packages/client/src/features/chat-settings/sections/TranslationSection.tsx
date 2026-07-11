@@ -63,6 +63,7 @@ export function TranslationSection({ metadata, textConnections, onMetadataChange
             targetLang={metadata.translationTargetLang as string | undefined}
             connectionId={metadata.translationConnectionId as string | undefined}
             systemPrompt={metadata.translationPrompt as string | undefined}
+            maxTokens={metadata.translationMaxTokens as number | undefined}
             deeplApiKey={metadata.translationDeeplApiKey as string | undefined}
             deeplxUrl={metadata.translationDeeplxUrl as string | undefined}
             textConnections={textConnections}
@@ -101,7 +102,8 @@ export function TranslationSection({ metadata, textConnections, onMetadataChange
               provider={metadata.translationInputProvider as string | undefined}
               targetLang={metadata.translationInputTargetLang as string | undefined}
               connectionId={metadata.translationInputConnectionId as string | undefined}
-              systemPrompt={undefined}
+              systemPrompt={metadata.translationInputPrompt as string | undefined}
+              maxTokens={metadata.translationInputMaxTokens as number | undefined}
               deeplApiKey={metadata.translationInputDeeplApiKey as string | undefined}
               deeplxUrl={metadata.translationInputDeeplxUrl as string | undefined}
               textConnections={textConnections}
@@ -173,6 +175,7 @@ interface TranslationChannelFieldsProps {
   targetLang: string | undefined;
   connectionId: string | undefined;
   systemPrompt: string | undefined;
+  maxTokens: number | undefined;
   deeplApiKey: string | undefined;
   deeplxUrl: string | undefined;
   textConnections: ChatConnectionOption[];
@@ -185,6 +188,7 @@ function TranslationChannelFields({
   targetLang,
   connectionId,
   systemPrompt,
+  maxTokens: maxTokensRaw,
   deeplApiKey,
   deeplxUrl,
   textConnections,
@@ -290,6 +294,28 @@ function TranslationChannelFields({
               }}
               rows={5}
               className="min-h-28 w-full resize-y rounded-lg bg-[var(--secondary)] px-3 py-2 font-mono text-xs leading-relaxed outline-none ring-1 ring-transparent transition-shadow focus:ring-[var(--primary)]/40"
+            />
+          </div>
+
+          <div>
+            <label className="text-[0.6875rem] font-medium text-[var(--muted-foreground)]">
+              Max Tokens
+              <HelpTooltip
+                text="Maximum tokens for AI translation. Leave empty for default (4096). Set to 0 for provider's maximum."
+                size="0.625rem"
+              />
+            </label>
+            <input
+              type="number"
+              min={0}
+              step={1}
+              value={maxTokensRaw ?? ""}
+              onChange={(e) => {
+                const val = e.target.value;
+                onMetadataChange({ [`${prefix}MaxTokens`]: val === "" ? null : Number(val) });
+              }}
+              placeholder="4096"
+              className="mt-0.5 w-full rounded-lg bg-[var(--secondary)] px-3 py-2 text-xs outline-none ring-1 ring-transparent transition-shadow focus:ring-[var(--primary)]/40"
             />
           </div>
         </>

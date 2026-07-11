@@ -19,6 +19,7 @@ export async function translateText(text: string, channel: "chat" | "input" = "c
     targetLanguage: cfg.targetLanguage,
     connectionId: cfg.connectionId,
     systemPrompt: cfg.systemPrompt,
+    maxTokens: cfg.maxTokens,
     deeplApiKey: cfg.deeplApiKey,
     deeplxUrl: cfg.deeplxUrl,
   });

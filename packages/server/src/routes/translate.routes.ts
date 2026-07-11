@@ -17,6 +17,7 @@ const translateSchema = z.object({
   targetLanguage: z.string().min(1),
   connectionId: z.string().optional(),
   systemPrompt: z.string().max(5000).optional().nullable(),
+  maxTokens: z.number().int().min(0).optional().nullable(),
   deeplApiKey: z.string().optional(),
   deeplxUrl: z
     .string()
@@ -87,6 +88,13 @@ async function translateWithAI(
     conn.maxTokensOverride,
   );
   const systemPrompt = input.systemPrompt?.trim() || DEFAULT_TRANSLATION_SYSTEM_PROMPT;
+  const chatOptions: { model: string; temperature: number; maxTokens?: number } = {
+    model: conn.model,
+    temperature: 0.3,
+  };
+  if (input.maxTokens && input.maxTokens > 0) {
+    chatOptions.maxTokens = input.maxTokens;
+  }
   const result = await provider.chatComplete(
     [
       {
@@ -98,7 +106,7 @@ async function translateWithAI(
         content: `Translate the following text to ${input.targetLanguage}:\n\n${input.text}`,
       },
     ],
-    { model: conn.model, temperature: 0.3 },
+    chatOptions,
   );
 
   return { translatedText: (result.content ?? "").trim() };

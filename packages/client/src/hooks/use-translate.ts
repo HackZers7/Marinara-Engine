@@ -35,6 +35,7 @@ export function useTranslate() {
         targetLanguage: store.config.targetLanguage,
         connectionId: store.config.connectionId,
         systemPrompt: store.config.systemPrompt,
+        maxTokens: store.config.maxTokens,
         deeplApiKey: store.config.deeplApiKey,
         deeplxUrl: store.config.deeplxUrl,
       });

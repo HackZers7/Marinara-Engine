@@ -2451,6 +2451,10 @@ export function useGenerate() {
                 typeof meta.translationPrompt === "string" && meta.translationPrompt.trim().length > 0
                   ? meta.translationPrompt
                   : store.config.systemPrompt;
+              const chatMaxTokens =
+                typeof meta.translationMaxTokens === "number" && meta.translationMaxTokens > 0
+                  ? meta.translationMaxTokens
+                  : store.config.maxTokens;
               for (const [id, msg] of persistedMessages) {
                 const textToTranslate =
                   chatData?.mode === "game" ? stripGmTagsKeepReadables(msg.content ?? "").trim() : (msg.content ?? "");
@@ -2468,6 +2472,7 @@ export function useGenerate() {
                       targetLanguage: store.config.targetLanguage,
                       connectionId: store.config.connectionId,
                       systemPrompt: chatSystemPrompt,
+                      maxTokens: chatMaxTokens,
                       deeplApiKey: store.config.deeplApiKey,
                       deeplxUrl: store.config.deeplxUrl,
                     })

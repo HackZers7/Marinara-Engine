@@ -6,6 +6,7 @@ export interface TranslationChannelConfig {
   targetLanguage: string;
   connectionId?: string;
   systemPrompt?: string;
+  maxTokens?: number;
   deeplApiKey?: string;
   deeplxUrl?: string;
 }
@@ -30,6 +31,10 @@ function toOptionalString(value: unknown): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
+function toOptionalNumber(value: unknown): number | undefined {
+  return typeof value === "number" && value > 0 ? value : undefined;
+}
+
 /** Convert raw chat metadata into the chat- and input-channel configs the store consumes. */
 export function buildTranslationConfigsFromMeta(meta: Record<string, unknown>): {
   chat: TranslationChannelConfig;
@@ -40,6 +45,7 @@ export function buildTranslationConfigsFromMeta(meta: Record<string, unknown>): 
     targetLanguage: toOptionalString(meta.translationTargetLang) ?? "en",
     connectionId: toOptionalString(meta.translationConnectionId),
     systemPrompt: toOptionalString(meta.translationPrompt),
+    maxTokens: toOptionalNumber(meta.translationMaxTokens),
     deeplApiKey: toOptionalString(meta.translationDeeplApiKey),
     deeplxUrl: toOptionalString(meta.translationDeeplxUrl),
   };
@@ -49,6 +55,8 @@ export function buildTranslationConfigsFromMeta(meta: Record<string, unknown>): 
           provider: coerceTranslationProvider(meta.translationInputProvider),
           targetLanguage: toOptionalString(meta.translationInputTargetLang) ?? "en",
           connectionId: toOptionalString(meta.translationInputConnectionId),
+          systemPrompt: toOptionalString(meta.translationInputPrompt),
+          maxTokens: toOptionalNumber(meta.translationInputMaxTokens),
           deeplApiKey: toOptionalString(meta.translationInputDeeplApiKey),
           deeplxUrl: toOptionalString(meta.translationInputDeeplxUrl),
         }
