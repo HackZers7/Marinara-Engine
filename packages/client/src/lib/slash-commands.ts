@@ -6,9 +6,11 @@ import { useChatStore } from "../stores/chat.store";
 import { useUIStore } from "../stores/ui.store";
 import { useUnoGameStore } from "../stores/uno-game.store";
 import { useChessGameStore } from "../stores/chess-game.store";
+import { useGalleryStore } from "../stores/gallery.store";
 import { toast } from "sonner";
 import {
   SUPPORTED_MACROS,
+  buildGuidedGenerationInstructionMessage,
   buildNarratorInstructionMessage,
   normalizeTextForMatch,
   type SceneCreateResponse,
@@ -37,6 +39,8 @@ export interface SlashCommandContext {
     generationGuide?: string;
     generationGuideSource?: "narrator" | "guide" | "game_start";
     continueMessageId?: string;
+    mentionedCharacterNames?: string[];
+    forCharacterId?: string;
     impersonate?: boolean;
     attachments?: { type: string; data: string }[];
     impersonatePresetId?: string;
@@ -45,13 +49,22 @@ export interface SlashCommandContext {
     impersonatePromptTemplate?: string;
   }) => Promise<boolean | void>;
   /** Insert a message directly into the chat (no LLM) */
-  createMessage: (data: { role: string; content: string; characterId?: string | null }) => void;
+  createMessage: (data: {
+    role: string;
+    content: string;
+    characterId?: string | null;
+    extra?: Record<string, unknown>;
+  }) => void | Promise<void>;
   /** Invalidate chat queries to refresh the UI */
   invalidate: () => void;
   /** Character names in the current chat */
   characterNames: string[];
   /** Characters available in the current roleplay scene */
   characters?: Array<{ id: string; name: string }>;
+  /** Manual individual group replies need a target character instead of an auto-selected responder. */
+  requiresManualGuideTarget?: boolean;
+  /** Clears a pending smart-response badge for a character after an explicit targeted command. */
+  removeQueuedResponse?: (characterId: string) => void;
   /** Latest assistant message, used when /continue appends to an unfinished reply */
   latestAssistantMessageId?: string | null;
   /** Role of the last message in the chat. /continue only appends to a trailing
@@ -59,6 +72,8 @@ export interface SlashCommandContext {
   lastMessageRole?: string | null;
   /** Apply a manual sprite expression override */
   setSpriteExpression?: (characterId: string, expression: string) => void | Promise<void>;
+  /** Trigger the same image illustration action exposed in the chat Gallery. */
+  illustrate?: () => void | Promise<void>;
 }
 
 function quoteCommandArgument(value: string): string {
@@ -68,7 +83,7 @@ function quoteCommandArgument(value: string): string {
   return `"${trimmed.replace(/["\\]/g, "\\$&")}"`;
 }
 
-function formatAvailableCharacterList(characters: Array<{ id: string; name: string }>): string {
+function formatAvailableCharacterList(characters: Array<{ name: string }>): string {
   return characters.map((character) => character.name).join(", ");
 }
 
@@ -85,6 +100,64 @@ function buildStatusCommandHelp(characters: Array<{ id: string; name: string }>)
   ]
     .filter(Boolean)
     .join("\n");
+}
+
+function formatGuidedTargetHelp(characters: Array<{ name: string }>): string {
+  const available = formatAvailableCharacterList(characters);
+  return `Use /guided respond for <character> <direction>${available ? `\nAvailable: ${available}` : ""}`;
+}
+
+function trimGuideSeparator(value: string): string {
+  return value.replace(/^\s*[:;,-]\s*/u, "").trim();
+}
+
+function guidedTargetRemainder(args: string): string | null {
+  const trimmed = args.trim();
+  const match =
+    trimmed.match(/^(?:respond|reply|answer)\s+(?:for|as|from)\s+/iu) ?? trimmed.match(/^(?:for|as|from)\s+/iu);
+  return match ? trimmed.slice(match[0].length).trim() : null;
+}
+
+function splitLeadingQuotedTarget(value: string): { targetName: string; rest: string } | null {
+  const match = value.match(/^["']([^"']+)["']([\s\S]*)$/u);
+  if (!match) return null;
+  return { targetName: match[1]!.trim(), rest: match[2] ?? "" };
+}
+
+function resolveGuidedCharacterTarget(
+  args: string,
+  characters: Array<{ id: string; name: string }> = [],
+): { character: { id: string; name: string }; guideText: string } | null {
+  const remainder = guidedTargetRemainder(args);
+  if (!remainder) return null;
+
+  const quotedTarget = splitLeadingQuotedTarget(remainder);
+  if (quotedTarget) {
+    const quotedName = normalizeTextForMatch(quotedTarget.targetName);
+    const character = characters.find((candidate) => normalizeTextForMatch(candidate.name) === quotedName);
+    return character ? { character, guideText: trimGuideSeparator(quotedTarget.rest) } : null;
+  }
+
+  const sortedCharacters = [...characters].sort(
+    (a, b) => normalizeTextForMatch(b.name).length - normalizeTextForMatch(a.name).length,
+  );
+  for (const character of sortedCharacters) {
+    const normalizedName = normalizeTextForMatch(character.name);
+    if (!normalizedName) continue;
+
+    const words = Array.from(remainder.matchAll(/\S+/gu));
+    for (const word of words) {
+      const end = (word.index ?? 0) + word[0].length;
+      const prefix = remainder.slice(0, end);
+      const normalizedPrefix = normalizeTextForMatch(prefix.replace(/[:;,-]+$/u, ""));
+      if (normalizedPrefix === normalizedName) {
+        return { character, guideText: trimGuideSeparator(remainder.slice(end)) };
+      }
+      if (!normalizedName.startsWith(normalizedPrefix)) break;
+    }
+  }
+
+  return null;
 }
 
 export interface SlashCommandResult {
@@ -165,6 +238,17 @@ function buildMacroHelpText(): string {
 }
 
 const MACRO_HELP_TEXT = buildMacroHelpText();
+const ILLUSTRATE_SLASH_TIMEOUT_MS = 1_800_000;
+
+function withSlashCommandTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  let timeout: ReturnType<typeof setTimeout> | null = null;
+  const deadline = new Promise<never>((_, reject) => {
+    timeout = setTimeout(() => reject(new Error(message)), timeoutMs);
+  });
+  return Promise.race([promise, deadline]).finally(() => {
+    if (timeout) clearTimeout(timeout);
+  });
+}
 
 function buildSlashHelpText(): string {
   return ["Available Commands:", "", ...COMMANDS.map((command) => `${command.usage} - ${command.description}`)].join(
@@ -222,10 +306,7 @@ function isAllEmoteTarget(value: string): boolean {
   return normalized === "all" || normalized === "*";
 }
 
-function findSceneCharacter(
-  characters: Array<{ id: string; name: string }>,
-  name: string,
-): { id: string; name: string } | null {
+function findSceneCharacter<T extends { name: string }>(characters: T[], name: string): T | null {
   const normalized = normalizeLookup(name);
   if (!normalized) return null;
   return (
@@ -233,6 +314,120 @@ function findSceneCharacter(
     characters.find((character) => normalizeLookup(character.name).includes(normalized)) ??
     null
   );
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function unescapeCommandQuotedText(value: string): string {
+  return value.replace(/\\(["'\u201c\u201d\u2018\u2019\\])/g, "$1");
+}
+
+function parseLeadingQuotedSegment(input: string): { value: string; rest: string } | null {
+  const trimmed = input.trimStart();
+  const quotePairs: Record<string, string> = {
+    '"': '"',
+    "'": "'",
+    "\u201c": "\u201d",
+    "\u2018": "\u2019",
+  };
+  const quote = trimmed[0];
+  const closingQuote = quote ? quotePairs[quote] : undefined;
+  if (!quote || !closingQuote) return null;
+
+  let escaped = false;
+  for (let i = 1; i < trimmed.length; i += 1) {
+    const char = trimmed[i];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (char === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (char === closingQuote) {
+      return {
+        value: unescapeCommandQuotedText(trimmed.slice(1, i)),
+        rest: trimmed.slice(i + 1).trim(),
+      };
+    }
+  }
+
+  return null;
+}
+
+function stripSingleWrappingQuotePair(input: string): string {
+  const trimmed = input.trim();
+  const quotePairs: Record<string, string> = {
+    '"': '"',
+    "'": "'",
+    "\u201c": "\u201d",
+    "\u2018": "\u2019",
+  };
+  const opening = trimmed[0];
+  const closing = opening ? quotePairs[opening] : undefined;
+  if (opening && closing && trimmed.endsWith(closing) && trimmed.length >= 2) {
+    return unescapeCommandQuotedText(trimmed.slice(1, -1)).trim();
+  }
+  return trimmed;
+}
+
+function resolveAsCommandTarget(
+  args: string,
+  characters: Array<{ id: string | null; name: string }>,
+): { target: { id: string | null; name: string } | null; requestedName: string; message: string } {
+  const trimmed = args.trim();
+  if (!trimmed) return { target: null, requestedName: "", message: "" };
+
+  const quotedTarget = parseLeadingQuotedSegment(trimmed);
+  if (quotedTarget) {
+    const target = findSceneCharacter(characters, quotedTarget.value);
+    return {
+      target,
+      requestedName: quotedTarget.value,
+      message: stripSingleWrappingQuotePair(quotedTarget.rest),
+    };
+  }
+
+  const sortedCharacters = [...characters].sort((a, b) => b.name.length - a.name.length);
+  for (const character of sortedCharacters) {
+    const pattern = new RegExp(`^${escapeRegExp(character.name)}(?:\\s+|$)`, "iu");
+    const match = trimmed.match(pattern);
+    if (match) {
+      return {
+        target: character,
+        requestedName: character.name,
+        message: stripSingleWrappingQuotePair(trimmed.slice(match[0].length).trim()),
+      };
+    }
+  }
+
+  const tokens = parseCommandTokens(trimmed);
+  for (let length = tokens.length; length >= 1; length -= 1) {
+    const requestedName = tokens
+      .slice(0, length)
+      .map((token) => token.value)
+      .join(" ")
+      .trim();
+    const target = findSceneCharacter(characters, requestedName);
+    if (target) {
+      return {
+        target,
+        requestedName,
+        message: stripSingleWrappingQuotePair(
+          tokens
+            .slice(length)
+            .map((token) => token.value)
+            .join(" "),
+        ),
+      };
+    }
+  }
+
+  const fallbackName = tokens[0]?.value ?? trimmed;
+  return { target: null, requestedName: fallbackName, message: "" };
 }
 
 async function listSpriteExpressions(characterId: string): Promise<string[]> {
@@ -349,7 +544,11 @@ const COMMANDS: SlashCommand[] = [
       const modStr = parsed.modifier > 0 ? `+${parsed.modifier}` : parsed.modifier < 0 ? `${parsed.modifier}` : "";
       const detail = parsed.count > 1 ? ` [${rolls.join(", ")}]${modStr}` : modStr ? ` (${rolls[0]}${modStr})` : "";
       const text = `🎲 **${notation}** → **${sum}**${detail}`;
-      ctx.createMessage({ role: "narrator", content: text });
+      await ctx.createMessage({
+        role: "narrator",
+        content: text,
+        extra: { diceRollResult: { notation, rolls, modifier: parsed.modifier, total: sum } },
+      });
       return { handled: true };
     },
   },
@@ -387,7 +586,7 @@ const COMMANDS: SlashCommand[] = [
     local: true,
     async execute(args, ctx) {
       if (!args.trim()) return { handled: true, feedback: "Usage: /sys <message text>" };
-      ctx.createMessage({ role: "system", content: args.trim() });
+      await ctx.createMessage({ role: "system", content: args.trim() });
       return { handled: true };
     },
   },
@@ -395,9 +594,30 @@ const COMMANDS: SlashCommand[] = [
     name: "guided",
     aliases: ["narrator", "narrate", "nar"],
     description: "Steer the narrative — the AI will narrate events in the direction you describe",
-    usage: "/guided <direction>",
+    usage: "/guided [respond for <character>] <direction>",
     async execute(args, ctx) {
       if (!args.trim()) return { handled: true, feedback: "Usage: /guided <direction to steer the narrative>" };
+      const characters = ctx.characters ?? [];
+      const targetedResponse = resolveGuidedCharacterTarget(args, characters);
+      if (targetedResponse) {
+        const generationGuide = targetedResponse.guideText
+          ? buildGuidedGenerationInstructionMessage(targetedResponse.guideText)
+          : undefined;
+        ctx.removeQueuedResponse?.(targetedResponse.character.id);
+        await ctx.generate({
+          chatId: ctx.chatId,
+          connectionId: null,
+          forCharacterId: targetedResponse.character.id,
+          mentionedCharacterNames: [targetedResponse.character.name],
+          ...(generationGuide ? { generationGuide, generationGuideSource: "guide" as const } : {}),
+        });
+        return { handled: true };
+      }
+
+      if (guidedTargetRemainder(args) !== null || ctx.requiresManualGuideTarget) {
+        return { handled: true, feedback: formatGuidedTargetHelp(characters) };
+      }
+
       await ctx.generate({
         chatId: ctx.chatId,
         connectionId: null,
@@ -432,23 +652,43 @@ const COMMANDS: SlashCommand[] = [
   {
     name: "as",
     aliases: ["respond"],
-    description: "Generate a response as a specific character",
-    usage: "/as <character name>",
+    description: "Post a message as a character, or generate that character's next response",
+    usage: '/as <character name> "message" | /as <character name>',
     async execute(args, ctx) {
-      const name = args.trim();
-      if (!name) return { handled: true, feedback: "Usage: /as <character name>" };
-      const match = ctx.characterNames.find((n) => normalizeLookup(n) === normalizeLookup(name));
-      if (!match) {
+      const characters: Array<{ id: string | null; name: string }> = [...(ctx.characters ?? [])];
+      for (const name of ctx.characterNames) {
+        if (!characters.some((character) => normalizeLookup(character.name) === normalizeLookup(name))) {
+          characters.push({ id: null, name });
+        }
+      }
+      const { target, requestedName, message } = resolveAsCommandTarget(args, characters);
+      if (!args.trim()) return { handled: true, feedback: 'Usage: /as <character name> "message"' };
+      if (!target) {
         return {
           handled: true,
-          feedback: `Character "${name}" not found. Available: ${ctx.characterNames.join(", ")}`,
+          feedback: `Character "${requestedName || args.trim()}" not found. Available: ${
+            characters.length > 0 ? formatAvailableCharacterList(characters) : ctx.characterNames.join(", ")
+          }`,
         };
       }
-      // Inject instruction to respond as the specific character
+
+      if (message) {
+        if (!target.id) {
+          return {
+            handled: true,
+            feedback: `Character metadata for "${target.name}" is still loading. Try again in a moment.`,
+          };
+        }
+        await ctx.createMessage({ role: "assistant", characterId: target.id, content: message });
+        return { handled: true };
+      }
+
+      // No explicit text: preserve the existing shortcut that asks the model to
+      // continue as the named character.
       await ctx.generate({
         chatId: ctx.chatId,
         connectionId: null,
-        userMessage: `[Respond as ${match}]`,
+        userMessage: `[Respond as ${target.name}]`,
       });
       return { handled: true };
     },
@@ -893,6 +1133,35 @@ const COMMANDS: SlashCommand[] = [
         return { handled: true, feedback: "Usage: /goto <positive message number> (e.g. /goto 27)" };
       }
       useChatStore.getState().requestGotoMessage(ctx.chatId, n);
+      return { handled: true };
+    },
+  },
+  {
+    name: "illustrate",
+    aliases: ["ill"],
+    description: "Generate a gallery illustration for the current chat",
+    usage: "/illustrate",
+    local: true,
+    async execute(_args, ctx) {
+      if (!ctx.illustrate) {
+        return { handled: true, feedback: "Illustrate is not available in this chat." };
+      }
+      if (useGalleryStore.getState().illustratingChatIds.has(ctx.chatId)) {
+        return { handled: true, feedback: "Illustration generation is already running for this chat." };
+      }
+
+      useGalleryStore.getState().setChatIllustrating(ctx.chatId, true);
+      try {
+        await withSlashCommandTimeout(
+          Promise.resolve(ctx.illustrate()),
+          ILLUSTRATE_SLASH_TIMEOUT_MS,
+          "Illustration generation timed out.",
+        );
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : "Image generation failed.");
+      } finally {
+        useGalleryStore.getState().setChatIllustrating(ctx.chatId, false);
+      }
       return { handled: true };
     },
   },

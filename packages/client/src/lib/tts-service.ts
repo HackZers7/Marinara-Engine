@@ -15,6 +15,8 @@ export interface TTSSpeakOptions {
   throwOnError?: boolean;
   cacheKey?: string;
   cacheAliases?: string[];
+  volume?: number;
+  muted?: boolean;
 }
 
 export interface TTSSpeakRequest {
@@ -24,10 +26,18 @@ export interface TTSSpeakRequest {
   voice?: string;
   cacheKey?: string;
   cacheAliases?: string[];
+  activeId?: string | null;
 }
 
-export interface TTSSpeakSequenceOptions extends Pick<TTSSpeakOptions, "signal" | "throwOnError"> {
+export interface TTSSpeakSequenceOptions extends Pick<TTSSpeakOptions, "signal" | "throwOnError" | "volume" | "muted"> {
   progressive?: boolean;
+  onChunkStart?: (request: TTSSpeakRequest, index: number) => void;
+  onChunkEnd?: (request: TTSSpeakRequest, index: number) => void;
+}
+
+function clampPlaybackVolume(volume: number | undefined): number {
+  if (typeof volume !== "number" || !Number.isFinite(volume)) return 1;
+  return Math.max(0, Math.min(1, volume));
 }
 
 function waitForBlobWithAbort(promise: Promise<Blob>, signal?: AbortSignal): Promise<Blob> {
@@ -63,6 +73,8 @@ class TTSService {
   /** ID of the entity (e.g. message id) currently being spoken */
   private activeId: string | null = null;
   private listeners = new Set<StateListener>();
+  private livePlaybackVolume: number | null = null;
+  private livePlaybackMuted: boolean | null = null;
 
   // ── Listeners ─────────────────────────────────
 
@@ -111,6 +123,29 @@ class TTSService {
 
   // ── Playback ──────────────────────────────────
 
+  private beginPlaybackOptions(options: Pick<TTSSpeakOptions, "volume" | "muted">): void {
+    this.livePlaybackVolume = typeof options.volume === "number" ? clampPlaybackVolume(options.volume) : null;
+    this.livePlaybackMuted = typeof options.muted === "boolean" ? options.muted : null;
+  }
+
+  private clearPlaybackOptions(): void {
+    this.livePlaybackVolume = null;
+    this.livePlaybackMuted = null;
+  }
+
+  private applyPlaybackOptions(audio: HTMLAudioElement, options: Pick<TTSSpeakOptions, "volume" | "muted">): void {
+    const volume = this.livePlaybackVolume ?? clampPlaybackVolume(options.volume);
+    audio.volume = volume;
+    audio.muted = (this.livePlaybackMuted ?? options.muted) === true || volume <= 0;
+  }
+
+  setCurrentPlaybackVolume(volume: number, muted = false): void {
+    this.livePlaybackVolume = clampPlaybackVolume(volume);
+    this.livePlaybackMuted = muted;
+    if (!this.audio) return;
+    this.applyPlaybackOptions(this.audio, { volume, muted });
+  }
+
   async generateAudio(text: string, options: TTSSpeakOptions = {}): Promise<Blob> {
     const res = await fetch("/api/tts/speak", {
       method: "POST",
@@ -144,6 +179,7 @@ class TTSService {
   /** Speak the given text. `id` is an optional caller-supplied key (e.g. message id) so callers can track which item is active. */
   async speak(text: string, id?: string, options: TTSSpeakOptions = {}): Promise<void> {
     this.stop();
+    this.beginPlaybackOptions(options);
     const sequence = ++this.sequence;
     this.lastError = null;
 
@@ -180,6 +216,7 @@ class TTSService {
     this.currentObjectUrl = objectUrl;
 
     const audio = new Audio(objectUrl);
+    this.applyPlaybackOptions(audio, options);
     this.audio = audio;
 
     audio.onended = () => {
@@ -219,6 +256,7 @@ class TTSService {
     if (playableRequests.length === 0) return;
 
     this.stop();
+    this.beginPlaybackOptions(options);
     const sequence = ++this.sequence;
     this.lastError = null;
 
@@ -234,10 +272,12 @@ class TTSService {
       options.signal?.addEventListener("abort", abortFromCaller, { once: true });
     }
 
-    type ChunkResult = { ok: true; blob: Blob } | { ok: false; error: Error };
+    type ChunkResult =
+      | { ok: true; blob: Blob; request: TTSSpeakRequest; index: number }
+      | { ok: false; error: Error; request: TTSSpeakRequest; index: number };
     const toError = (err: unknown, fallback: string) => (err instanceof Error ? err : new Error(fallback));
     const isAbortError = (error: Error) => error.name === "AbortError";
-    const fetchChunk = async (request: TTSSpeakRequest): Promise<ChunkResult> => {
+    const fetchChunk = async (request: TTSSpeakRequest, index: number): Promise<ChunkResult> => {
       try {
         const blob = await this.getAudioBlob(request.text, {
           speaker: request.speaker,
@@ -247,13 +287,13 @@ class TTSService {
           cacheKey: request.cacheKey,
           cacheAliases: request.cacheAliases,
         });
-        return { ok: true, blob };
+        return { ok: true, blob, request, index };
       } catch (err) {
-        return { ok: false, error: toError(err, "TTS request failed") };
+        return { ok: false, error: toError(err, "TTS request failed"), request, index };
       }
     };
 
-    const playBlob = async (blob: Blob): Promise<void> => {
+    const playBlob = async (blob: Blob, request: TTSSpeakRequest, index: number): Promise<void> => {
       if (!this.isCurrentSequence(sequence)) return;
       this.cleanup();
 
@@ -265,25 +305,71 @@ class TTSService {
       this.currentObjectUrl = objectUrl;
 
       const audio = new Audio(objectUrl);
+      this.applyPlaybackOptions(audio, options);
       this.audio = audio;
+      const runChunkStart = () => {
+        try {
+          options.onChunkStart?.(request, index);
+        } catch (err) {
+          console.warn("[TTS] Chunk start callback failed:", err);
+        }
+      };
+      const runChunkEnd = () => {
+        try {
+          options.onChunkEnd?.(request, index);
+        } catch (err) {
+          console.warn("[TTS] Chunk end callback failed:", err);
+        }
+      };
 
       await new Promise<void>((resolve, reject) => {
+        let settled = false;
+        const finish = (callback: () => void) => {
+          if (settled) return;
+          settled = true;
+          abortController.signal.removeEventListener("abort", onAbort);
+          callback();
+        };
+        const onAbort = () => {
+          try {
+            audio.pause();
+          } catch {
+            /* ignore interrupted playback cleanup */
+          }
+          finish(resolve);
+        };
         const fail = (error: Error) => {
           if (!this.isCurrentSequence(sequence) || this.audio !== audio) return;
-          this.cleanup();
-          this.lastError = error.message;
-          this.setState("error");
-          reject(error);
+          finish(() => {
+            this.cleanup();
+            this.lastError = error.message;
+            this.setState("error");
+            reject(error);
+          });
         };
 
+        abortController.signal.addEventListener("abort", onAbort, { once: true });
         audio.onended = () => {
           if (!this.isCurrentSequence(sequence) || this.audio !== audio) return;
-          this.cleanup();
-          resolve();
+          finish(() => {
+            try {
+              runChunkEnd();
+            } finally {
+              this.cleanup();
+              resolve();
+            }
+          });
         };
-        audio.onerror = () => fail(new Error("Audio playback failed"));
+        audio.onerror = () => {
+          try {
+            runChunkEnd();
+          } finally {
+            fail(new Error("Audio playback failed"));
+          }
+        };
 
-        this.setState("playing", id ?? null);
+        runChunkStart();
+        this.setState("playing", request.activeId ?? id ?? null);
         void audio.play().catch((err) => fail(toError(err, "Browser blocked audio playback")));
       });
     };
@@ -297,13 +383,13 @@ class TTSService {
     };
 
     if (options.progressive) {
-      let nextFetch: Promise<ChunkResult> | null = fetchChunk(playableRequests[0]!);
+      let nextFetch: Promise<ChunkResult> | null = fetchChunk(playableRequests[0]!, 0);
       let played = 0;
       const fetchErrors: Error[] = [];
 
       for (let index = 0; index < playableRequests.length; index += 1) {
         const result = await nextFetch!;
-        nextFetch = index + 1 < playableRequests.length ? fetchChunk(playableRequests[index + 1]!) : null;
+        nextFetch = index + 1 < playableRequests.length ? fetchChunk(playableRequests[index + 1]!, index + 1) : null;
         if (!this.isCurrentSequence(sequence)) return;
 
         if (!result.ok) {
@@ -317,7 +403,7 @@ class TTSService {
         }
 
         try {
-          await playBlob(result.blob);
+          await playBlob(result.blob, result.request, result.index);
           played += 1;
           if (nextFetch && this.isCurrentSequence(sequence)) {
             this.setState("loading", id ?? null);
@@ -344,7 +430,7 @@ class TTSService {
       return;
     }
 
-    const results = await Promise.all(playableRequests.map(fetchChunk));
+    const results = await Promise.all(playableRequests.map((request, index) => fetchChunk(request, index)));
     detachAbortSignal();
     if (!this.isCurrentSequence(sequence)) return;
     if (this.abortController === abortController) {
@@ -356,10 +442,10 @@ class TTSService {
       return;
     }
 
-    const blobs = results.flatMap((result) => (result.ok ? [result.blob] : []));
+    const playableChunks = results.flatMap((result) => (result.ok ? [result] : []));
     const fetchErrors = results.flatMap((result) => (result.ok ? [] : [result.error]));
     handleFetchFailures(fetchErrors);
-    if (blobs.length === 0) {
+    if (playableChunks.length === 0) {
       const error = fetchErrors[0] ?? new Error("TTS request failed");
       this.lastError = error.message;
       this.setState("error");
@@ -367,9 +453,9 @@ class TTSService {
       return;
     }
 
-    for (const blob of blobs) {
+    for (const chunk of playableChunks) {
       try {
-        await playBlob(blob);
+        await playBlob(chunk.blob, chunk.request, chunk.index);
       } catch (err) {
         if (options.throwOnError) throw err;
         return;
@@ -384,6 +470,7 @@ class TTSService {
     this.sequence += 1;
     this.abortController?.abort();
     this.abortController = null;
+    this.clearPlaybackOptions();
 
     if (this.audio) {
       this.audio.pause();

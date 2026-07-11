@@ -38,13 +38,23 @@ import React, { useRef, useState, useCallback, useEffect, useMemo } from "react"
 import { toast } from "sonner";
 import {
   APP_VERSION,
+  CONVERSATION_CALL_CHARACTER_VIDEO_CLIP_KINDS,
   DEFAULT_IMAGE_STYLE_PROFILES,
+  VIDEO_ANIMATED_EXPRESSION_CLIP_DURATION_MAX,
+  VIDEO_ANIMATED_EXPRESSION_CLIP_DURATION_MIN,
+  VIDEO_CALL_CLIP_DURATION_MAX,
+  VIDEO_CALL_CLIP_DURATION_MIN,
+  VIDEO_GENERATION_SETTINGS_KEY,
+  VIDEO_SCENE_DURATION_MAX,
+  VIDEO_SCENE_DURATION_MIN,
   compileImagePrompt,
   normalizeImageStyleProfileSettings,
+  normalizeVideoGenerationUserSettings,
   createFolderEntry,
   getFolderImportEntries,
   getFolderManifestConfig,
   isJsonRecord,
+  type ConversationCallCharacterVideoClipKind,
   type ImagePromptKind,
   type ImagePromptMode,
   type ImageStyleProfile,
@@ -52,6 +62,7 @@ import {
   type InstalledExtension,
   type QuoteFormat,
   type Theme,
+  type VideoGenerationUserSettings,
 } from "@marinara-engine/shared";
 import {
   findDuplicateTheme,
@@ -100,6 +111,7 @@ import {
   UserCheck,
   WandSparkles,
   Terminal,
+  Film,
 } from "lucide-react";
 import { useClearAllData, useExpungeData, useUpdateChatMetadata, type ExpungeScope } from "../../hooks/use-chats";
 import { useChatStore } from "../../stores/chat.store";
@@ -153,9 +165,9 @@ type CustomFontFace = {
 const TABS = [
   { id: "general", label: "General" },
   { id: "appearance", label: "Appearance" },
-  { id: "themes", label: "Themes" },
-  { id: "extensions", label: "Extensions" },
-  { id: "import", label: "Import" },
+  { id: "generations", label: "Generations" },
+  { id: "addons", label: "Addons" },
+  { id: "import", label: "Imports" },
   { id: "advanced", label: "Advanced" },
 ] as const;
 
@@ -205,11 +217,17 @@ function getNativeConsoleShortcutHelp(): string {
 const SETTINGS_COMPONENTS: Record<(typeof TABS)[number]["id"], React.FC> = {
   general: React.memo(GeneralSettings),
   appearance: React.memo(AppearanceSettings),
-  themes: React.memo(ThemesSettings),
-  extensions: React.memo(ExtensionsSettings),
+  generations: React.memo(GenerationsSettings),
+  addons: React.memo(AddonsSettings),
   import: React.memo(ImportSettings),
   advanced: React.memo(AdvancedSettings),
 };
+
+function normalizeSettingsTab(tab: string): (typeof TABS)[number]["id"] {
+  if (tab === "themes") return "addons";
+  if (tab === "extensions") return "addons";
+  return TABS.some((entry) => entry.id === tab) ? (tab as (typeof TABS)[number]["id"]) : "general";
+}
 
 type SettingsArtPreviewSize = { width: number; height: number };
 
@@ -256,7 +274,7 @@ const EXPUNGE_SCOPE_OPTIONS: Array<{ id: ExpungeScope; label: string; descriptio
   { id: "connections", label: "Connections", description: "API connections and model endpoints." },
   {
     id: "automation",
-    label: "Automation & Themes",
+    label: "Automation & Addons",
     description: "Agents, tools, regex scripts, synced themes, and automation state.",
   },
   {
@@ -419,7 +437,26 @@ const GAME_ASSET_CATEGORIES = [
   },
 ] as const;
 
-const GAME_IMAGE_PROMPT_TEMPLATE_KEYS = ["game.npcPortrait", "game.background", "game.sceneIllustration"] as const;
+const VIDEO_PROMPT_TEMPLATE_KEYS = [
+  "game.video",
+  "conversation.callVideo.idle",
+  "conversation.callVideo.talking",
+  "conversation.callVideo.laughing",
+  "conversation.callVideo.angry",
+  "conversation.callVideo.crying",
+  "conversation.callVideo.sighing",
+  "conversation.callVideo.custom",
+  "sprites.animatedPortrait",
+] as const;
+
+const CONVERSATION_CALL_VIDEO_CLIP_LABELS: Record<ConversationCallCharacterVideoClipKind, string> = {
+  idle: "Idle loop",
+  talking: "Talking loop",
+  laughing: "Laughing",
+  angry: "Angry",
+  crying: "Crying",
+  sighing: "Sighing",
+};
 
 type GameAssetCategoryId = (typeof GAME_ASSET_CATEGORIES)[number]["id"];
 const GAME_ASSET_CATEGORY_BY_ID = new Map(GAME_ASSET_CATEGORIES.map((category) => [category.id, category]));
@@ -642,7 +679,7 @@ function ImageStyleProfilesEditor({
             type="button"
             onClick={deleteSelected}
             disabled={selected.builtIn || settings.profiles.length <= 1}
-            className="inline-flex h-8 items-center gap-1 rounded-md bg-[var(--secondary)] px-2.5 text-xs text-[var(--destructive)] ring-1 ring-[var(--border)] transition-colors hover:bg-[var(--accent)] disabled:cursor-not-allowed disabled:opacity-45"
+            className="inline-flex h-8 items-center gap-1 rounded-md bg-[var(--secondary)] px-2.5 text-xs text-[var(--muted-foreground)] ring-1 ring-[var(--border)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)] disabled:cursor-not-allowed disabled:opacity-45"
           >
             <Trash2 size="0.75rem" />
             Delete
@@ -721,7 +758,7 @@ function ImageStyleProfilesEditor({
         </div>
       </details>
 
-      <details className="mt-2 rounded-md bg-[var(--secondary)]/55 p-2 ring-1 ring-[var(--border)]" open>
+      <details className="mt-2 rounded-md bg-[var(--secondary)]/55 p-2 ring-1 ring-[var(--border)]">
         <summary className="cursor-pointer text-xs font-medium text-[var(--foreground)]">Test bench</summary>
         <div className="mt-2 grid gap-2 lg:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)]">
           <div className="space-y-2">
@@ -1122,8 +1159,16 @@ function TrackerPanelAppearanceDrawer({
 }
 
 export function SettingsPanel() {
-  const settingsTab = useUIStore((s) => s.settingsTab);
+  const rawSettingsTab = useUIStore((s) => s.settingsTab);
   const setSettingsTab = useUIStore((s) => s.setSettingsTab);
+  const settingsTab = normalizeSettingsTab(rawSettingsTab);
+
+  useEffect(() => {
+    if (rawSettingsTab !== settingsTab) {
+      setSettingsTab(settingsTab);
+    }
+  }, [rawSettingsTab, setSettingsTab, settingsTab]);
+
   mountedSettingsTabs.add(settingsTab);
 
   return (
@@ -1624,6 +1669,199 @@ function ImageGenerationSettings() {
           <ImageStyleProfilesEditor value={imageStyleProfiles} onChange={setImageStyleProfiles} />
         </div>
       </div>
+    </SettingsSection>
+  );
+}
+
+type AppSettingsValueResponse = { value: string | null };
+
+const VIDEO_GENERATION_SETTINGS_QUERY_KEY = ["app-settings", VIDEO_GENERATION_SETTINGS_KEY] as const;
+
+function serializeVideoGenerationSettings(settings: VideoGenerationUserSettings): string {
+  return JSON.stringify(normalizeVideoGenerationUserSettings(settings));
+}
+
+function VideoGenerationSettings() {
+  const qc = useQueryClient();
+  const videoSettingsQuery = useQuery<AppSettingsValueResponse>({
+    queryKey: VIDEO_GENERATION_SETTINGS_QUERY_KEY,
+    queryFn: () => api.get(`/app-settings/${VIDEO_GENERATION_SETTINGS_KEY}`),
+    staleTime: 60_000,
+  });
+  const savedSettings = useMemo(
+    () => normalizeVideoGenerationUserSettings(videoSettingsQuery.data?.value ?? null),
+    [videoSettingsQuery.data?.value],
+  );
+  const [draft, setDraft] = useState<VideoGenerationUserSettings>(savedSettings);
+
+  useEffect(() => {
+    setDraft(savedSettings);
+  }, [savedSettings]);
+
+  const saveVideoSettings = useMutation<AppSettingsValueResponse, Error, VideoGenerationUserSettings>({
+    mutationFn: (next) =>
+      api.put<AppSettingsValueResponse>(`/app-settings/${VIDEO_GENERATION_SETTINGS_KEY}`, {
+        value: serializeVideoGenerationSettings(next),
+      }),
+    onSuccess: (data) => {
+      qc.setQueryData(VIDEO_GENERATION_SETTINGS_QUERY_KEY, data);
+    },
+    onError: (err) => {
+      setDraft(savedSettings);
+      toast.error(err.message || "Failed to save video generation settings.");
+    },
+  });
+
+  const commitSettings = useCallback(
+    (next: VideoGenerationUserSettings) => {
+      const normalized = normalizeVideoGenerationUserSettings(next);
+      setDraft(normalized);
+      saveVideoSettings.mutate(normalized);
+    },
+    [saveVideoSettings],
+  );
+
+  const handleSceneDurationChange = (duration: number) => {
+    commitSettings({ ...draft, sceneVideoDurationSeconds: duration });
+  };
+
+  const handleCallClipDurationChange = (kind: ConversationCallCharacterVideoClipKind, duration: number) => {
+    commitSettings({
+      ...draft,
+      callClipDurations: {
+        ...draft.callClipDurations,
+        [kind]: duration,
+      },
+    });
+  };
+
+  const handleCustomClipDurationChange = (duration: number) => {
+    commitSettings({ ...draft, callCustomClipDurationSeconds: duration });
+  };
+
+  const handleAnimatedExpressionDurationChange = (duration: number) => {
+    commitSettings({ ...draft, animatedExpressionClipDurationSeconds: duration });
+  };
+
+  return (
+    <SettingsSection
+      title="Video Generation"
+      description="Set default clip lengths and edit reusable video prompts for Game, Gallery, and Conversation Calls."
+      icon={<Film size="0.875rem" />}
+    >
+      {videoSettingsQuery.isLoading ? (
+        <div className="flex items-center gap-2 rounded-lg bg-[var(--background)]/55 px-3 py-2 text-xs text-[var(--muted-foreground)] ring-1 ring-[var(--border)]">
+          <Loader2 size="0.8125rem" className="animate-spin" />
+          Loading video settings…
+        </div>
+      ) : videoSettingsQuery.isError ? (
+        <div className="flex items-center gap-1.5 rounded-lg bg-[var(--destructive)]/10 px-2.5 py-2 text-xs text-[var(--destructive)] ring-1 ring-[var(--destructive)]/20">
+          <AlertTriangle size="0.8125rem" className="shrink-0" />
+          Could not load video settings.
+        </div>
+      ) : (
+        <div className="flex flex-col gap-3">
+          <div className="grid gap-2 rounded-lg bg-[var(--background)]/55 p-3 ring-1 ring-[var(--border)] sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
+            <div className="min-w-0">
+              <div className="inline-flex items-center gap-1 text-xs font-medium text-[var(--foreground)]">
+                Scene video fallback length
+                <HelpTooltip text="Used by Game and Gallery scene videos when the selected Default for Videos connection does not define its own duration defaults." />
+              </div>
+              <div className="mt-1 text-[0.625rem] text-[var(--muted-foreground)]">
+                Seconds, clamped from {VIDEO_SCENE_DURATION_MIN} to {VIDEO_SCENE_DURATION_MAX}.
+              </div>
+            </div>
+            <div className="grid grid-cols-[minmax(0,4rem)_auto] items-center gap-1.5 sm:w-28">
+              <DraftNumberInput
+                value={draft.sceneVideoDurationSeconds}
+                min={VIDEO_SCENE_DURATION_MIN}
+                max={VIDEO_SCENE_DURATION_MAX}
+                onCommit={handleSceneDurationChange}
+                className="min-w-0 rounded-md border border-[var(--border)] bg-[var(--secondary)] px-2 py-1 text-xs"
+                ariaLabel="Scene video fallback length in seconds"
+              />
+              <span className="text-[0.625rem] text-[var(--muted-foreground)]">s</span>
+            </div>
+          </div>
+
+          <div className="rounded-lg bg-[var(--background)]/55 p-3 ring-1 ring-[var(--border)]">
+            <div className="mb-2 flex items-center gap-1 text-xs font-medium text-[var(--foreground)]">
+              Conversation Call Clips
+              <HelpTooltip text="Lengths for generated character video-call presence clips. Idle and talking loops are used continuously, while reaction clips play briefly before returning to idle." />
+            </div>
+            <div className="grid gap-2 sm:grid-cols-2">
+              {CONVERSATION_CALL_CHARACTER_VIDEO_CLIP_KINDS.map((kind) => (
+                <label
+                  key={kind}
+                  className="flex min-w-0 items-center justify-between gap-3 rounded-md bg-[var(--secondary)]/60 px-2.5 py-2 ring-1 ring-[var(--border)]/80"
+                >
+                  <span className="truncate text-xs text-[var(--foreground)]">
+                    {CONVERSATION_CALL_VIDEO_CLIP_LABELS[kind]}
+                  </span>
+                  <span className="grid w-20 shrink-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-1.5">
+                    <DraftNumberInput
+                      value={draft.callClipDurations[kind]}
+                      min={VIDEO_CALL_CLIP_DURATION_MIN}
+                      max={VIDEO_CALL_CLIP_DURATION_MAX}
+                      onCommit={(duration) => handleCallClipDurationChange(kind, duration)}
+                      className="min-w-0 rounded-md border border-[var(--border)] bg-[var(--background)] px-2 py-1 text-xs"
+                      ariaLabel={`${CONVERSATION_CALL_VIDEO_CLIP_LABELS[kind]} length in seconds`}
+                    />
+                    <span className="text-[0.625rem] text-[var(--muted-foreground)]">s</span>
+                  </span>
+                </label>
+              ))}
+            </div>
+            <label className="mt-2 flex min-w-0 items-center justify-between gap-3 rounded-md bg-[var(--secondary)]/60 px-2.5 py-2 ring-1 ring-[var(--border)]/80">
+              <span className="flex min-w-0 flex-col gap-0.5">
+                <span className="truncate text-xs text-[var(--foreground)]">Custom request</span>
+                <span className="text-[0.55rem] leading-snug text-[var(--muted-foreground)]">
+                  Used for one-off clips characters generate from explicit call requests.
+                </span>
+              </span>
+              <span className="grid w-20 shrink-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-1.5">
+                <DraftNumberInput
+                  value={draft.callCustomClipDurationSeconds}
+                  min={VIDEO_CALL_CLIP_DURATION_MIN}
+                  max={VIDEO_CALL_CLIP_DURATION_MAX}
+                  onCommit={handleCustomClipDurationChange}
+                  className="min-w-0 rounded-md border border-[var(--border)] bg-[var(--background)] px-2 py-1 text-xs"
+                  ariaLabel="Custom call clip length in seconds"
+                />
+                <span className="text-[0.625rem] text-[var(--muted-foreground)]">s</span>
+              </span>
+            </label>
+            <div className="mt-2 text-[0.625rem] text-[var(--muted-foreground)]">
+              Call clips are clamped from {VIDEO_CALL_CLIP_DURATION_MIN} to {VIDEO_CALL_CLIP_DURATION_MAX} seconds.
+              {saveVideoSettings.isPending ? " Saving…" : ""}
+            </div>
+          </div>
+
+          <div className="grid gap-2 rounded-lg bg-[var(--background)]/55 p-3 ring-1 ring-[var(--border)] sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
+            <div className="min-w-0">
+              <div className="inline-flex items-center gap-1 text-xs font-medium text-[var(--foreground)]">
+                Animated expression length
+                <HelpTooltip text="Used by Expression Engine animated portrait generation before the clip is converted to a looping GIF sprite." />
+              </div>
+              <div className="mt-1 text-[0.625rem] text-[var(--muted-foreground)]">
+                Seconds, clamped from {VIDEO_ANIMATED_EXPRESSION_CLIP_DURATION_MIN} to{" "}
+                {VIDEO_ANIMATED_EXPRESSION_CLIP_DURATION_MAX}.
+              </div>
+            </div>
+            <div className="grid grid-cols-[minmax(0,4rem)_auto] items-center gap-1.5 sm:w-28">
+              <DraftNumberInput
+                value={draft.animatedExpressionClipDurationSeconds}
+                min={VIDEO_ANIMATED_EXPRESSION_CLIP_DURATION_MIN}
+                max={VIDEO_ANIMATED_EXPRESSION_CLIP_DURATION_MAX}
+                onCommit={handleAnimatedExpressionDurationChange}
+                className="min-w-0 rounded-md border border-[var(--border)] bg-[var(--secondary)] px-2 py-1 text-xs"
+                ariaLabel="Animated expression clip length in seconds"
+              />
+              <span className="text-[0.625rem] text-[var(--muted-foreground)]">s</span>
+            </div>
+          </div>
+        </div>
+      )}
     </SettingsSection>
   );
 }
@@ -3428,20 +3666,58 @@ function BackgroundPicker({
       {(!backgrounds || backgrounds.length === 0) && (
         <div className="flex flex-col items-center gap-1.5 py-4 text-center">
           <Image size="1.25rem" className="text-[var(--muted-foreground)]/40" />
-          <p className="text-[0.625rem] text-[var(--muted-foreground)]">No backgrounds available yet</p>
+          <p className="mari-chrome-text-muted text-[0.625rem]">No backgrounds available yet</p>
         </div>
       )}
       {backgrounds && backgrounds.length > 0 && filteredBackgrounds.length === 0 && (
         <div className="flex flex-col items-center gap-1.5 py-4 text-center">
           <Search size="1.25rem" className="text-[var(--muted-foreground)]/40" />
-          <p className="text-[0.625rem] text-[var(--muted-foreground)]">No backgrounds match that search</p>
+          <p className="mari-chrome-text-muted text-[0.625rem]">No backgrounds match that search</p>
         </div>
       )}
     </div>
   );
 }
 
-function ThemesSettings() {
+function GenerationsSettings() {
+  return (
+    <div className="flex flex-col gap-3">
+      <SettingsIntro>
+        Global defaults for generated images, generated videos, and reusable prompt templates.
+      </SettingsIntro>
+
+      <ImageGenerationSettings />
+      <VideoGenerationSettings />
+      <PromptOverridesEditor
+        title="Video Generation Prompt Overrides"
+        description="Edit reusable templates for Game/Gallery scene videos, Conversation Call character clips, and animated Expression portraits."
+        help="Game scene videos use this before sending a reference-image video request. Conversation Call clips use the selected character avatar as the identity reference and return to idle at the end of each clip. Animated Expression portraits become looping GIF sprites."
+        keys={VIDEO_PROMPT_TEMPLATE_KEYS}
+        preferredKey="game.video"
+      />
+      <PromptOverridesEditor
+        title="Image Generation Prompt Overrides"
+        description="Edit the templates used by image, sprite, Game, and prompt-builder systems."
+        help="Global templates for registered prompt builders, including Conversation selfies, Game NPC portraits, scene media, storyboard prompts, and other registered builders."
+        preferredKey="game.npcPortrait"
+      />
+    </div>
+  );
+}
+
+function AddonsSettings() {
+  return (
+    <div className="flex flex-col gap-3">
+      <SettingsIntro>
+        Custom themes change Marinara's look; extensions add trusted browser or server behavior.
+      </SettingsIntro>
+      <ThemesSettings showIntro={false} />
+      <ExtensionsSettings showIntro={false} />
+    </div>
+  );
+}
+
+function ThemesSettings({ showIntro = true }: { showIntro?: boolean } = {}) {
   const { data: syncedThemes = [], isLoading } = useThemes();
   const createTheme = useCreateTheme();
   const updateTheme = useUpdateTheme();
@@ -3718,9 +3994,11 @@ function ThemesSettings() {
   // ── Theme List View ──
   return (
     <div className="flex flex-col gap-3">
-      <SettingsIntro>
-        Create or import custom CSS themes. Themes sync across devices connected to this Marinara server.
-      </SettingsIntro>
+      {showIntro && (
+        <SettingsIntro>
+          Create or import custom CSS themes. Themes sync across devices connected to this Marinara server.
+        </SettingsIntro>
+      )}
 
       <SettingsSection
         title="Theme Library"
@@ -3869,7 +4147,7 @@ function ThemesSettings() {
             )}
 
             {!isLoading && syncedThemes.length === 0 && (
-              <p className="py-2 text-center text-[0.625rem] text-[var(--muted-foreground)]">
+              <p className="mari-chrome-text-muted py-2 text-center text-[0.625rem]">
                 No synced custom themes yet. Create one or import a .css file above.
               </p>
             )}
@@ -4154,7 +4432,7 @@ function triggerFilePicker(options: {
   el.click();
 }
 
-function ExtensionsSettings() {
+function ExtensionsSettings({ showIntro = true }: { showIntro?: boolean } = {}) {
   const { data: extensions, isLoading } = useExtensions();
   const extensionList = extensions ?? [];
   const createExtension = useCreateExtension();
@@ -4363,7 +4641,9 @@ function ExtensionsSettings() {
 
   return (
     <div className="flex flex-col gap-3">
-      <SettingsIntro>Install browser or trusted server extensions to add custom behavior or styling.</SettingsIntro>
+      {showIntro && (
+        <SettingsIntro>Install browser or trusted server extensions to add custom behavior or styling.</SettingsIntro>
+      )}
 
       <SettingsSection
         title="Extension Library"
@@ -4497,7 +4777,7 @@ function ExtensionsSettings() {
             ))}
 
             {!isLoading && extensionList.length === 0 && (
-              <p className="py-2 text-center text-[0.625rem] text-[var(--muted-foreground)]">
+              <p className="mari-chrome-text-muted py-2 text-center text-[0.625rem]">
                 No extensions installed. Import an extension file or folder above.
               </p>
             )}
@@ -4509,11 +4789,11 @@ function ExtensionsSettings() {
             <code className="rounded bg-[var(--secondary)] px-1">Extensions/My Extension/manifest.json</code>
             . Browser extensions can include CSS and/or JavaScript files to modify the UI.
           </div>
-          <div className="rounded-lg bg-amber-500/10 p-2.5 text-[0.625rem] leading-relaxed text-amber-200 ring-1 ring-amber-500/20">
+          <div className="rounded-lg bg-[var(--secondary)]/50 p-2.5 text-[0.625rem] leading-relaxed text-[var(--muted-foreground)] ring-1 ring-[var(--border)]">
             <strong>Server extensions:</strong> use{" "}
-            <code className="rounded bg-amber-500/10 px-1">runtime: "server"</code> with{" "}
-            <code className="rounded bg-amber-500/10 px-1">serverJsPath</code>, or import a{" "}
-            <code className="rounded bg-amber-500/10 px-1">.server.js</code> file. They run in the Node.js server
+            <code className="rounded bg-[var(--secondary)] px-1">runtime: "server"</code> with{" "}
+            <code className="rounded bg-[var(--secondary)] px-1">serverJsPath</code>, or import a{" "}
+            <code className="rounded bg-[var(--secondary)] px-1">.server.js</code> file. They run in the Node.js server
             process and should only come from trusted sources.
           </div>
           <div className="rounded-lg bg-[var(--secondary)]/35 p-2.5 text-[0.625rem] leading-relaxed text-[var(--muted-foreground)] ring-1 ring-[var(--border)]">
@@ -5282,7 +5562,7 @@ function AdvancedSettings() {
   const setDebugMode = useUIStore((s) => s.setDebugMode);
   const clearAllData = useClearAllData();
   const expungeData = useExpungeData();
-  const [selectedScopes, setSelectedScopes] = useState<ExpungeScope[]>(["chats"]);
+  const [selectedScopes, setSelectedScopes] = useState<ExpungeScope[]>([]);
   const [confirmAction, setConfirmAction] = useState<"selected" | "all" | null>(null);
   const [exportingProfile, setExportingProfile] = useState(false);
   const [exportProfileDialogOpen, setExportProfileDialogOpen] = useState(false);
@@ -5643,7 +5923,7 @@ function AdvancedSettings() {
       />
 
       <SettingsIntro>
-        Server maintenance, generation tooling, message utilities, backups, and data removal.
+        Server maintenance, message utilities, backups, and data removal.
       </SettingsIntro>
 
       <SettingsSection
@@ -5877,16 +6157,6 @@ function AdvancedSettings() {
           </div>
         </div>
       </SettingsSection>
-
-      <ImageGenerationSettings />
-      <PromptOverridesEditor
-        title="Image Prompt Templates"
-        description="Edit the reusable templates used for NPC portraits, scene backgrounds, and scene illustrations."
-        help="These templates render before recurring Game image requests and manual Gallery background generation. One-off prompt review edits still only affect the current request."
-        keys={GAME_IMAGE_PROMPT_TEMPLATE_KEYS}
-        preferredKey="game.npcPortrait"
-      />
-      <PromptOverridesEditor />
 
       <SettingsSection
         title="Message Tools"
@@ -6171,7 +6441,6 @@ function AdvancedSettings() {
         title="Danger Zone"
         description="Permanently clear selected categories of local data. Professor Mari is always preserved."
         icon={<AlertTriangle size="0.875rem" />}
-        tone="danger"
       >
         <div className="flex flex-col gap-2">
           <div className="grid gap-2">
@@ -6183,7 +6452,7 @@ function AdvancedSettings() {
                   className={cn(
                     "flex cursor-pointer items-start gap-2 rounded-lg px-2.5 py-2 ring-1 transition-colors",
                     checked
-                      ? "bg-[var(--destructive)]/10 ring-[var(--destructive)]/25"
+                      ? "bg-[var(--primary)]/10 ring-[var(--primary)]/30"
                       : "bg-[var(--background)]/40 ring-[var(--border)] hover:bg-[var(--secondary)]/70",
                   )}
                 >
@@ -6192,10 +6461,12 @@ function AdvancedSettings() {
                     checked={checked}
                     disabled={isClearing}
                     onChange={() => toggleScope(scope.id)}
-                    className="mt-0.5 h-3.5 w-3.5 rounded border-[var(--border)] accent-[var(--destructive)]"
+                    className="mt-0.5 h-3.5 w-3.5 rounded border-[var(--border)] accent-[var(--primary)]"
                   />
                   <span className="min-w-0">
-                    <span className="block text-xs font-medium text-[var(--foreground)]">{scope.label}</span>
+                    <span className="block text-xs font-medium text-[var(--marinara-chat-chrome-panel-text)]">
+                      {scope.label}
+                    </span>
                     <span className="block text-[0.625rem] text-[var(--muted-foreground)]">{scope.description}</span>
                   </span>
                 </label>
@@ -6230,9 +6501,9 @@ function AdvancedSettings() {
             </button>
           </div>
           {confirmAction && (
-            <div className="flex flex-col gap-2 rounded-lg bg-[var(--destructive)]/12 p-2.5">
-              <div className="flex items-start gap-2 text-[0.6875rem] font-medium text-[var(--destructive)]">
-                <AlertTriangle size="0.875rem" className="mt-0.5 shrink-0" />
+            <div className="flex flex-col gap-2 rounded-lg bg-[var(--background)]/55 p-2.5 ring-1 ring-[var(--border)]">
+              <div className="flex items-start gap-2 text-[0.6875rem] font-medium text-[var(--marinara-chat-chrome-panel-text)]">
+                <AlertTriangle size="0.875rem" className="mt-0.5 shrink-0 text-[var(--marinara-chat-chrome-button-text-active)]" />
                 {confirmAction === "all"
                   ? "Delete all supported data categories except Professor Mari? There is no undo."
                   : `Delete ${selectedScopes.length} selected data categor${selectedScopes.length === 1 ? "y" : "ies"}? There is no undo.`}

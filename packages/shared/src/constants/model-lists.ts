@@ -386,6 +386,12 @@ export const XAI_MODELS: KnownModel[] = [
   { id: "grok-code-fast-1-0831", name: "Grok Code Fast 1 0831", context: 256000, maxOutput: 0 },
 ];
 
+// ── Grok CLI (Subscription via local Grok Build auth) ──
+// Account-tier availability is discovered from the installed CLI with
+// `grok models`. Keep this empty so Marinara does not hand the CLI stale API
+// aliases such as `grok-build-latest` that some Grok CLI installs reject.
+export const GROK_SUBSCRIPTION_MODELS: KnownModel[] = [];
+
 // ── Additional providers with static lists in SillyTavern ──
 
 // Groq (from #model_groq_select)
@@ -493,6 +499,45 @@ export interface ImageGenSource {
   defaultBaseUrl: string;
   requiresApiKey: boolean;
 }
+
+export interface VideoGenSource {
+  id: string;
+  name: string;
+  description: string;
+  defaultBaseUrl: string;
+  requiresApiKey: boolean;
+}
+
+export const VIDEO_GENERATION_SOURCES: VideoGenSource[] = [
+  {
+    id: "google_ai_studio",
+    name: "Google AI Studio",
+    description: "Gemini Omni and Veo video models via the Gemini API.",
+    defaultBaseUrl: "https://generativelanguage.googleapis.com/v1beta",
+    requiresApiKey: true,
+  },
+  {
+    id: "xai",
+    name: "xAI Imagine",
+    description: "Grok Imagine video and image-to-video via the xAI Videos API.",
+    defaultBaseUrl: "https://api.x.ai/v1",
+    requiresApiKey: true,
+  },
+  {
+    id: "openrouter",
+    name: "OpenRouter Video",
+    description: "Video generation models exposed through OpenRouter's asynchronous Videos API.",
+    defaultBaseUrl: "https://openrouter.ai/api/v1",
+    requiresApiKey: true,
+  },
+  {
+    id: "seedance",
+    name: "Seedance 2.0",
+    description: "Seedance 2.0 video generation with text, first-frame, and first/last-frame modes.",
+    defaultBaseUrl: "https://api.seedance2.ai",
+    requiresApiKey: true,
+  },
+];
 
 export const IMAGE_GENERATION_SOURCES: ImageGenSource[] = [
   {
@@ -648,6 +693,33 @@ const IMAGE_GEN_MODELS: KnownModel[] = [
   { id: "pollinations", name: "Pollinations (Auto)", context: 0, maxOutput: 0 },
 ];
 
+const VIDEO_GEN_MODELS: KnownModel[] = [
+  { id: "gemini-omni-flash-preview", name: "Gemini Omni Flash Preview", context: 0, maxOutput: 0 },
+  { id: "veo-3.1-generate-preview", name: "Veo 3.1 Generate Preview", context: 0, maxOutput: 0 },
+  { id: "veo-3.1-fast-generate-preview", name: "Veo 3.1 Fast Generate Preview", context: 0, maxOutput: 0 },
+  { id: "veo-3.1-lite-generate-preview", name: "Veo 3.1 Lite Generate Preview", context: 0, maxOutput: 0 },
+  { id: "veo-3.0-generate-preview", name: "Veo 3 Generate Preview", context: 0, maxOutput: 0 },
+  { id: "veo-3.0-fast-generate-preview", name: "Veo 3 Fast Generate Preview", context: 0, maxOutput: 0 },
+  { id: "grok-imagine-video-1.5", name: "Grok Imagine Video 1.5", context: 0, maxOutput: 0 },
+  { id: "grok-imagine-video", name: "Grok Imagine Video", context: 0, maxOutput: 0 },
+  { id: "google/veo-3.1", name: "Google Veo 3.1 (OpenRouter)", context: 0, maxOutput: 0 },
+  { id: "alibaba/wan-2.7", name: "Alibaba WAN 2.7 (OpenRouter)", context: 0, maxOutput: 0 },
+  { id: "seedance-2-0", name: "Seedance 2.0", context: 0, maxOutput: 0 },
+  { id: "seedance-2-0-fast", name: "Seedance 2.0 Fast", context: 0, maxOutput: 0 },
+];
+
+export function inferVideoSource(model: string, baseUrl: string): string {
+  const m = model.toLowerCase();
+  const u = baseUrl.toLowerCase();
+  if (m === "seedance" || m.startsWith("seedance-") || u.includes("seedance2.ai")) return "seedance";
+  if (m === "openrouter" || u.includes("openrouter.ai")) return "openrouter";
+  if (m.includes("/") && (m.includes("veo") || m.includes("wan"))) return "openrouter";
+  if (m === "google_veo" || m === "veo" || /^veo-[\d.]+/.test(m)) return "google_veo";
+  if (m === "xai" || u.includes("api.x.ai") || u.includes("x.ai")) return "xai";
+  if (m.includes("grok") && m.includes("imagine") && m.includes("video")) return "xai";
+  return "gemini_omni";
+}
+
 /**
  * Infer which image generation API source to use from the model name and base URL.
  * The caller should fall back to "openai" (OpenAI-compatible) if no match is found.
@@ -702,6 +774,7 @@ export const MODEL_LISTS: Record<APIProvider, KnownModel[]> = {
   openai_chatgpt: OPENAI_CHATGPT_MODELS,
   anthropic: ANTHROPIC_MODELS,
   claude_subscription: CLAUDE_SUBSCRIPTION_MODELS,
+  grok_subscription: GROK_SUBSCRIPTION_MODELS,
   google: GOOGLE_MODELS,
   google_vertex: GOOGLE_MODELS,
   mistral: MISTRAL_MODELS,
@@ -712,6 +785,7 @@ export const MODEL_LISTS: Record<APIProvider, KnownModel[]> = {
   // Seed OAI-compatible endpoints with the OpenAI catalog; remote /models still merge on top.
   custom: OPENAI_MODELS,
   image_generation: IMAGE_GEN_MODELS,
+  video_generation: VIDEO_GEN_MODELS,
 };
 
 /**

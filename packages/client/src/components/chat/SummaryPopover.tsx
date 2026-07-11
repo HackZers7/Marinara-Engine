@@ -16,10 +16,12 @@ import { createPortal } from "react-dom";
 import {
   useDeleteSummaryEntry,
   useGenerateSummary,
+  useRollingSummaryBackfill,
   useToggleSummaryEntry,
   useUpdateChatMetadata,
   useUpdateSummaryEntry,
 } from "../../hooks/use-chats";
+import { useRollingBackfillStore } from "../../stores/backfill.store";
 import {
   Check,
   ChevronRight,
@@ -28,6 +30,7 @@ import {
   Loader2,
   PenLine,
   Plus,
+  RefreshCw,
   Save,
   ScrollText,
   Sparkles,
@@ -158,7 +161,8 @@ function isSummaryConnectionOption(value: unknown): value is SummaryConnectionOp
     typeof record.name === "string" &&
     typeof record.model === "string" &&
     typeof record.provider === "string" &&
-    record.provider !== "image_generation"
+    record.provider !== "image_generation" &&
+    record.provider !== "video_generation"
   );
 }
 
@@ -303,6 +307,9 @@ export function SummaryPopover({
   const toggleSummaryEntry = useToggleSummaryEntry();
   const entryTextareaRef = useRef<HTMLTextAreaElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
+
+  const { startBackfill, stopBackfill } = useRollingSummaryBackfill();
+  const backfillState = useRollingBackfillStore();
 
   // Per-chat preference, default off — no global fallback, so one chat never
   // inherits another's setting.
@@ -969,6 +976,62 @@ export function SummaryPopover({
                       <span>user messages</span>
                     </span>
                   </label>
+
+                  {backfillState.status === "running" && backfillState.chatId === chatId && (
+                    <div className="space-y-1.5">
+                      <div className="h-1.5 w-full overflow-hidden rounded-full bg-[var(--border)]">
+                        <div
+                          role="progressbar"
+                          aria-valuenow={backfillState.completedBatches}
+                          aria-valuemin={0}
+                          aria-valuemax={backfillState.totalBatches}
+                          aria-labelledby="backfill-progress-label"
+                          className="h-full rounded-full bg-[var(--primary)] transition-all duration-300"
+                          style={{
+                            width: `${backfillState.totalBatches > 0 ? (backfillState.completedBatches / backfillState.totalBatches) * 100 : 0}%`,
+                          }}
+                        />
+                      </div>
+                      <p id="backfill-progress-label" className="text-[0.625rem] leading-snug text-[var(--muted-foreground)]">
+                        {backfillState.currentRangeStart && backfillState.currentRangeEnd
+                          ? `Summarizing messages ${backfillState.currentRangeStart}-${backfillState.currentRangeEnd} (${backfillState.completedBatches}/${backfillState.totalBatches})`
+                          : `${backfillState.completedBatches}/${backfillState.totalBatches} batches`}
+                      </p>
+                    </div>
+                  )}
+
+                  <div className="flex items-center gap-1.5">
+                    {backfillState.status === "running" && backfillState.chatId === chatId ? (
+                      <button
+                        type="button"
+                        onClick={stopBackfill}
+                        className="flex items-center gap-1.5 rounded-md bg-[var(--destructive)]/10 px-2.5 py-1.5 text-[0.6875rem] font-medium text-[var(--destructive)] ring-1 ring-[var(--destructive)]/30 transition-colors hover:bg-[var(--destructive)]/20"
+                      >
+                        <Loader2 size="0.75rem" className="animate-spin" />
+                        Stop
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          startBackfill({
+                            chatId,
+                            summaryEntries: displayEntries,
+                            batchSize: normalizedAutomaticSummaryInterval,
+                            maxMessagesPerBatch: persistedContextSize,
+                            promptTemplateId: activePromptTemplateId,
+                          });
+                        }}
+                        disabled={
+                          totalMessageCount === 0
+                        }
+                        className="flex items-center gap-1.5 rounded-md bg-[var(--secondary)] px-2.5 py-1.5 text-[0.6875rem] font-medium text-[var(--foreground)] ring-1 ring-[var(--border)] transition-colors hover:bg-[var(--accent)] disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        <RefreshCw size="0.75rem" />
+                        Backfill Summary
+                      </button>
+                    )}
+                  </div>
                 </div>
               )}
 
@@ -1224,13 +1287,14 @@ export function SummaryPopover({
                     onCancelEdit={handleCancelEditEntry}
                     onSaveEdit={handleSaveEntry}
                     onDelete={() => void handleDeleteEntry(entry)}
+                    dockedToFooter={entry.id === visibleEntries[visibleEntries.length - 1]?.id}
                   />
                 ))
               ) : allVisibleEntriesHidden ? (
                 <button
                   type="button"
                   onClick={() => setShowInactiveSummaries(true)}
-                  className="w-full rounded-lg border border-dashed border-[var(--border)] bg-[var(--secondary)]/20 p-5 text-center text-xs italic text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)]/35"
+                  className="w-full rounded-t-lg rounded-b-none border border-b-0 border-dashed border-[var(--border)] bg-[var(--secondary)]/20 p-5 text-center text-xs italic text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)]/35"
                 >
                   Inactive summaries are hidden. Show inactive summaries to view them.
                 </button>
@@ -1238,7 +1302,7 @@ export function SummaryPopover({
                 <button
                   type="button"
                   onClick={handleCreateManualEntry}
-                  className="w-full rounded-lg border border-dashed border-[var(--border)] bg-[var(--secondary)]/20 p-5 text-center text-xs italic text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)]/35"
+                  className="w-full rounded-t-lg rounded-b-none border border-b-0 border-dashed border-[var(--border)] bg-[var(--secondary)]/20 p-5 text-center text-xs italic text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)]/35"
                 >
                   No summaries yet. Generate one or write your own.
                 </button>
@@ -1421,6 +1485,7 @@ interface SummaryEntryRowProps {
   onCancelEdit: () => void;
   onSaveEdit: () => void;
   onDelete: () => void;
+  dockedToFooter?: boolean;
 }
 
 function SummaryEntryRow({
@@ -1437,12 +1502,14 @@ function SummaryEntryRow({
   onCancelEdit,
   onSaveEdit,
   onDelete,
+  dockedToFooter = false,
 }: SummaryEntryRowProps) {
   const metaLine = getSummaryEntryMetaLine(entry);
   return (
     <div
       className={cn(
         "group overflow-hidden rounded-lg border shadow-sm shadow-black/10 ring-1 ring-[var(--border)]/25 transition-colors",
+        dockedToFooter && "rounded-b-none border-b-0",
         expanded
           ? "border-[var(--primary)]/45 bg-[var(--accent)]/22 ring-[var(--primary)]/20"
           : "border-[var(--border)]/80 bg-[var(--secondary)]/28 hover:border-[var(--primary)]/30 hover:bg-[var(--accent)]/30",

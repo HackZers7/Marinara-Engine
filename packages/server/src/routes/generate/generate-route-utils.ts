@@ -6,10 +6,13 @@ import {
   SUMMARY_TAIL_MESSAGES,
   applyTrackerFieldLocksToGameStatePatch,
   generationParametersSchema,
+  localAuthProviderBaseUrl,
   normalizeTextForMatch,
   normalizeThinkingTagPairs,
   parseTrackerFieldLocks,
   resolveMacros,
+  unwrapConversationInstructions,
+  wrapConversationInstructions,
   type CharacterStat,
   type GameState,
   type GenerationParameterSendMap,
@@ -17,6 +20,7 @@ import {
   type InventoryItem,
   type MacroContext,
   type PlayerStats,
+  type WrapFormat,
 } from "@marinara-engine/shared";
 import { LOCAL_SIDECAR_MODEL } from "../../services/llm/local-sidecar.js";
 import { sidecarModelService } from "../../services/sidecar/sidecar-model.service.js";
@@ -70,6 +74,20 @@ export type LocalSidecarGenerationConnection = {
   createdAt: string;
   updatedAt: string;
 };
+
+const PROMPT_WRAP_FORMATS = new Set<WrapFormat>(["xml", "markdown", "none"]);
+
+export function normalizePromptWrapFormat(value: unknown): WrapFormat {
+  return typeof value === "string" && PROMPT_WRAP_FORMATS.has(value as WrapFormat) ? (value as WrapFormat) : "xml";
+}
+
+export function formatConversationInstructionsForWrap(prompt: string, wrapFormat: WrapFormat): string {
+  const body = unwrapConversationInstructions(prompt);
+  if (wrapFormat === "xml") return wrapConversationInstructions(body);
+  if (!body.trim()) return "";
+  if (wrapFormat === "markdown") return `## Instructions\n${body}`;
+  return body;
+}
 export type PromptAttachment = {
   type?: string | null;
   url?: string | null;
@@ -149,7 +167,6 @@ function createEmptyPlayerStats(): PlayerStats {
   return { stats: [], attributes: null, skills: {}, inventory: [], activeQuests: [], status: "" };
 }
 
-const TEXT_ATTACHMENT_CHAR_LIMIT = 60_000;
 const IMAGE_ATTACHMENT_PROVIDER_BYTE_LIMIT = 6 * 1024 * 1024;
 const FILE_ATTACHMENT_PROVIDER_BYTE_LIMIT = 20 * 1024 * 1024;
 const TEXT_ATTACHMENT_EXTENSIONS = new Set([
@@ -301,8 +318,8 @@ export function parseSnapshotPlayerStats(snapshot: { playerStats?: unknown } | n
   }
 }
 
-export function shouldAbortOnPassiveGenerationDisconnect(args: { chatMode: string; impersonate?: boolean }): boolean {
-  return args.chatMode !== "conversation" || args.impersonate === true;
+export function shouldAbortOnPassiveGenerationDisconnect(args: { impersonate?: boolean }): boolean {
+  return args.impersonate === true;
 }
 
 export function resolveProviderTopK(provider: unknown, topK: number): number | undefined {
@@ -1059,15 +1076,11 @@ export function buildReadableAttachmentBlocks(attachments: PromptAttachment[] | 
 
     const filename = getAttachmentFilename(attachment);
     const type = typeof attachment.type === "string" && attachment.type.trim() ? attachment.type.trim() : "text/plain";
-    const trimmed =
-      decoded.length > TEXT_ATTACHMENT_CHAR_LIMIT
-        ? `${decoded.slice(0, TEXT_ATTACHMENT_CHAR_LIMIT)}\n\n[Attachment truncated after ${TEXT_ATTACHMENT_CHAR_LIMIT} characters.]`
-        : decoded;
 
     return [
       [
         `<attached_file name="${escapeXmlAttribute(filename)}" type="${escapeXmlAttribute(type)}">`,
-        trimmed,
+        decoded,
         `</attached_file>`,
       ].join("\n"),
     ];
@@ -1117,8 +1130,8 @@ export function resolveBaseUrl(connection: { baseUrl: string | null; provider: s
   // Subscription/login-backed providers own their endpoint internally, but
   // downstream callers gate on a non-empty baseUrl. Return a sentinel so the
   // gate passes; the provider ignores the value.
-  if (connection.provider === "claude_subscription") return "claude-agent-sdk://local";
-  if (connection.provider === "openai_chatgpt") return "openai-chatgpt://codex-auth";
+  const localAuthBaseUrl = localAuthProviderBaseUrl(connection.provider);
+  if (localAuthBaseUrl) return localAuthBaseUrl;
   const providerDef = PROVIDERS[connection.provider as keyof typeof PROVIDERS];
   return providerDef?.defaultBaseUrl ?? "";
 }

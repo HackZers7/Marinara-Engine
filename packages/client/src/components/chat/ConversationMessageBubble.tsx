@@ -4,8 +4,10 @@
 import { User } from "lucide-react";
 import { normalizeTextForMatch } from "@marinara-engine/shared";
 import { cn } from "../../lib/utils";
+import { PendingTypingDots } from "./PendingTypingDots";
 import {
   HiddenFromAIConversationSummary,
+  DiceMessageContent,
   MessageContent,
   ConversationMessageEditForm,
   ConversationMessageAttachments,
@@ -199,11 +201,7 @@ export function ConversationMessageBubble({ ctx }: { ctx: MessageRenderContext }
                       onImageOpen={(url) => onImageOpen(url)}
                     />
                   )}
-                  <div className="flex items-center gap-1" aria-label="Still typing">
-                    <span className="h-2 w-2 animate-bounce rounded-full bg-[var(--muted-foreground)]/60 [animation-delay:0ms]" />
-                    <span className="h-2 w-2 animate-bounce rounded-full bg-[var(--muted-foreground)]/60 [animation-delay:150ms]" />
-                    <span className="h-2 w-2 animate-bounce rounded-full bg-[var(--muted-foreground)]/60 [animation-delay:300ms]" />
-                  </div>
+                  <PendingTypingDots label="Still typing" dotClassName="bg-[var(--muted-foreground)]/60" />
                 </div>
               ) : groupedSegments && !isUser ? (
                 /* Multi-speaker content inside a bubble */
@@ -246,6 +244,8 @@ export function ConversationMessageBubble({ ctx }: { ctx: MessageRenderContext }
                     );
                   })}
                 </div>
+              ) : extra.diceRollResult ? (
+                <DiceMessageContent diceRollResult={extra.diceRollResult} createdAt={message.createdAt} />
               ) : (
                 <MessageContent
                   content={renderedContent}

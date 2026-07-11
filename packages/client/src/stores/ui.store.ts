@@ -44,6 +44,14 @@ export const LOREBOOK_PANEL_SORT_OPTIONS = ["name-asc", "name-desc", "newest", "
 export type LorebookPanelSort = (typeof LOREBOOK_PANEL_SORT_OPTIONS)[number];
 export const RESOURCE_PANEL_SORT_OPTIONS = BASIC_PANEL_SORT_OPTIONS;
 export type ResourcePanelSort = BasicPanelSort;
+export const CONNECTION_PANEL_SORT_OPTIONS = [...BASIC_PANEL_SORT_OPTIONS, "custom"] as const;
+export type ConnectionPanelSort = (typeof CONNECTION_PANEL_SORT_OPTIONS)[number];
+
+function normalizeConnectionPanelSort(value: unknown): ConnectionPanelSort {
+  return CONNECTION_PANEL_SORT_OPTIONS.includes(value as ConnectionPanelSort)
+    ? (value as ConnectionPanelSort)
+    : "name-asc";
+}
 type FontSize = 12 | 14 | 16 | 17 | 19 | 22;
 export type VisualTheme = "default" | "sillytavern";
 export type ConversationMessageStyle = "classic" | "bubble";
@@ -481,7 +489,7 @@ interface UIState {
   /** Sort order for the compact Presets panel */
   presetPanelSort: ResourcePanelSort;
   /** Sort order for the compact Connections panel */
-  connectionPanelSort: ResourcePanelSort;
+  connectionPanelSort: ConnectionPanelSort;
   /** Sort order for the compact Agents panel */
   agentPanelSort: ResourcePanelSort;
   /** True when any open detail editor has unsaved changes */
@@ -555,6 +563,8 @@ interface UIState {
   trimIncompleteModelOutput: boolean;
   /** When true, chat inputs show a microphone button for browser speech-to-text dictation. */
   speechToTextEnabled: boolean;
+  /** User-set TTS line playback volume (0-100). */
+  ttsLineVolume: number;
   /** When true, allow the rare Chibi Professor Mari scroll toast. */
   chibiProfessorMariEnabled: boolean;
   /** When true, achievements appear on Home and announce unlocks. Backend tracking stays silent either way. */
@@ -571,6 +581,10 @@ interface UIState {
   youtubePlayerVolume: number;
   /** User-set local Custom music player volume (0–100). The DJ can also steer this. */
   localMusicPlayerVolume: number;
+  /** User-set Conversation Call character voice volume (0–100). */
+  conversationCallVoiceVolume: number;
+  /** When true, mute character voices in Conversation Calls. */
+  conversationCallVoiceMuted: boolean;
   /** Mobile Spotify widget collapsed state. */
   spotifyMobileWidgetCollapsed: boolean;
   /** Mobile Spotify widget position in viewport pixels. */
@@ -757,7 +771,7 @@ interface UIState {
   setLorebookPanelTagsExpanded: (expanded: boolean) => void;
   setBotBrowserPanelSort: (sort: ResourcePanelSort) => void;
   setPresetPanelSort: (sort: ResourcePanelSort) => void;
-  setConnectionPanelSort: (sort: ResourcePanelSort) => void;
+  setConnectionPanelSort: (sort: ConnectionPanelSort) => void;
   setAgentPanelSort: (sort: ResourcePanelSort) => void;
   openCharacterDetail: (id: string, options?: { preserveCharacterLibrary?: boolean }) => void;
   closeCharacterDetail: () => void;
@@ -832,6 +846,7 @@ interface UIState {
   setConvertLatexSymbols: (v: boolean) => void;
   setTrimIncompleteModelOutput: (v: boolean) => void;
   setSpeechToTextEnabled: (v: boolean) => void;
+  setTTSLineVolume: (v: number) => void;
   setChibiProfessorMariEnabled: (v: boolean) => void;
   setAchievementsEnabled: (v: boolean) => void;
   setMusicPlayerEnabled: (v: boolean) => void;
@@ -840,6 +855,8 @@ interface UIState {
   setYoutubePlayerEnabled: (v: boolean) => void;
   setYoutubePlayerVolume: (v: number) => void;
   setLocalMusicPlayerVolume: (v: number) => void;
+  setConversationCallVoiceVolume: (v: number) => void;
+  setConversationCallVoiceMuted: (v: boolean) => void;
   setSpotifyMobileWidgetCollapsed: (v: boolean) => void;
   setSpotifyMobileWidgetPosition: (position: FloatingWidgetPosition) => void;
   setIntuitiveSwipeNavigation: (v: boolean) => void;
@@ -1029,6 +1046,7 @@ export function pickSyncedSettings(state: UIState) {
     convertLatexSymbols: state.convertLatexSymbols,
     trimIncompleteModelOutput: state.trimIncompleteModelOutput,
     speechToTextEnabled: state.speechToTextEnabled,
+    ttsLineVolume: state.ttsLineVolume,
     chibiProfessorMariEnabled: state.chibiProfessorMariEnabled,
     achievementsEnabled: state.achievementsEnabled,
     musicPlayerEnabled: state.musicPlayerEnabled,
@@ -1037,6 +1055,8 @@ export function pickSyncedSettings(state: UIState) {
     youtubePlayerEnabled: state.youtubePlayerEnabled,
     youtubePlayerVolume: state.youtubePlayerVolume,
     localMusicPlayerVolume: state.localMusicPlayerVolume,
+    conversationCallVoiceVolume: state.conversationCallVoiceVolume,
+    conversationCallVoiceMuted: state.conversationCallVoiceMuted,
     spotifyMobileWidgetCollapsed: state.spotifyMobileWidgetCollapsed,
     spotifyMobileWidgetPosition: state.spotifyMobileWidgetPosition,
     intuitiveSwipeNavigation: state.intuitiveSwipeNavigation,
@@ -1153,7 +1173,7 @@ export const useUIStore = create<UIState>()(
       lorebookPanelTagsExpanded: false,
       botBrowserPanelSort: "name-asc" as ResourcePanelSort,
       presetPanelSort: "name-asc" as ResourcePanelSort,
-      connectionPanelSort: "name-asc" as ResourcePanelSort,
+      connectionPanelSort: "name-asc" as ConnectionPanelSort,
       agentPanelSort: "name-asc" as ResourcePanelSort,
       editorDirty: false,
       detailReturnRightPanel: null,
@@ -1202,6 +1222,7 @@ export const useUIStore = create<UIState>()(
       convertLatexSymbols: true,
       trimIncompleteModelOutput: false,
       speechToTextEnabled: false,
+      ttsLineVolume: 50,
       chibiProfessorMariEnabled: true,
       achievementsEnabled: true,
       musicPlayerEnabled: true,
@@ -1210,6 +1231,8 @@ export const useUIStore = create<UIState>()(
       youtubePlayerEnabled: true,
       youtubePlayerVolume: 70,
       localMusicPlayerVolume: 70,
+      conversationCallVoiceVolume: 100,
+      conversationCallVoiceMuted: false,
       spotifyMobileWidgetCollapsed: true,
       spotifyMobileWidgetPosition: { x: 16, y: 96 },
       intuitiveSwipeNavigation: false,
@@ -1257,7 +1280,7 @@ export const useUIStore = create<UIState>()(
       hasCompletedOnboarding: false,
       gameTutorialDisabled: false,
       linkApiBannerDismissed: false,
-      echoChamberOpen: false,
+      echoChamberOpen: true,
       echoChamberSide: "bottom-right" as EchoChamberSide,
       userStatusManual: "active" as const,
       userStatus: "active" as UserStatus,
@@ -1394,7 +1417,7 @@ export const useUIStore = create<UIState>()(
       setLorebookPanelTagsExpanded: (expanded) => set({ lorebookPanelTagsExpanded: expanded }),
       setBotBrowserPanelSort: (sort) => set({ botBrowserPanelSort: normalizeBasicPanelSort(sort) }),
       setPresetPanelSort: (sort) => set({ presetPanelSort: normalizeBasicPanelSort(sort) }),
-      setConnectionPanelSort: (sort) => set({ connectionPanelSort: normalizeBasicPanelSort(sort) }),
+      setConnectionPanelSort: (sort) => set({ connectionPanelSort: normalizeConnectionPanelSort(sort) }),
       setAgentPanelSort: (sort) => set({ agentPanelSort: normalizeBasicPanelSort(sort) }),
       openCharacterDetail: (id, options) =>
         set((s) => {
@@ -1750,6 +1773,7 @@ export const useUIStore = create<UIState>()(
       setConvertLatexSymbols: (v) => set({ convertLatexSymbols: v }),
       setTrimIncompleteModelOutput: (v) => set({ trimIncompleteModelOutput: v }),
       setSpeechToTextEnabled: (v) => set({ speechToTextEnabled: v }),
+      setTTSLineVolume: (v) => set({ ttsLineVolume: Math.max(0, Math.min(100, Math.round(v))) }),
       setChibiProfessorMariEnabled: (v) => set({ chibiProfessorMariEnabled: v }),
       setAchievementsEnabled: (v) => set({ achievementsEnabled: v }),
       setMusicPlayerEnabled: (v) =>
@@ -1769,6 +1793,9 @@ export const useUIStore = create<UIState>()(
       setYoutubePlayerEnabled: (v) => set({ youtubePlayerEnabled: v }),
       setYoutubePlayerVolume: (v) => set({ youtubePlayerVolume: Math.max(0, Math.min(100, Math.round(v))) }),
       setLocalMusicPlayerVolume: (v) => set({ localMusicPlayerVolume: Math.max(0, Math.min(100, Math.round(v))) }),
+      setConversationCallVoiceVolume: (v) =>
+        set({ conversationCallVoiceVolume: Math.max(0, Math.min(100, Math.round(v))) }),
+      setConversationCallVoiceMuted: (v) => set({ conversationCallVoiceMuted: v }),
       setSpotifyMobileWidgetCollapsed: (v) => set({ spotifyMobileWidgetCollapsed: v }),
       setSpotifyMobileWidgetPosition: (position) =>
         set({
@@ -1952,7 +1979,7 @@ export const useUIStore = create<UIState>()(
     }),
     {
       name: "marinara-engine-ui",
-      version: 67,
+      version: 69,
       // Debounce localStorage writes to avoid sync I/O on every state change
       storage: createJSONStorage(() => {
         let timer: ReturnType<typeof setTimeout> | null = null;
@@ -2318,6 +2345,21 @@ export const useUIStore = create<UIState>()(
         if (version <= 65 && persisted.includeReasoningInExports === undefined) {
           persisted.includeReasoningInExports = false;
         }
+        if (typeof persisted.conversationCallVoiceVolume !== "number") {
+          persisted.conversationCallVoiceVolume = 100;
+        }
+        persisted.conversationCallVoiceVolume = Math.max(
+          0,
+          Math.min(100, Math.round(persisted.conversationCallVoiceVolume)),
+        );
+        if (typeof persisted.conversationCallVoiceMuted !== "boolean") {
+          persisted.conversationCallVoiceMuted = false;
+        }
+        // v68 -> v69: persist message TTS line playback volume.
+        if (typeof persisted.ttsLineVolume !== "number") {
+          persisted.ttsLineVolume = 50;
+        }
+        persisted.ttsLineVolume = Math.max(0, Math.min(100, Math.round(persisted.ttsLineVolume)));
         // v42 -> v44: reconcile parallel v43 UI preference additions.
         if (version <= 43 && persisted.youtubePlayerEnabled === undefined) {
           persisted.youtubePlayerEnabled = true;
@@ -2410,7 +2452,7 @@ export const useUIStore = create<UIState>()(
         persisted.lorebookPanelTagsExpanded = persisted.lorebookPanelTagsExpanded === true;
         persisted.botBrowserPanelSort = normalizeBasicPanelSort(persisted.botBrowserPanelSort);
         persisted.presetPanelSort = normalizeBasicPanelSort(persisted.presetPanelSort);
-        persisted.connectionPanelSort = normalizeBasicPanelSort(persisted.connectionPanelSort);
+        persisted.connectionPanelSort = normalizeConnectionPanelSort(persisted.connectionPanelSort);
         persisted.agentPanelSort = normalizeBasicPanelSort(persisted.agentPanelSort);
         normalizePersistedMainSurface(persisted);
         if (Array.isArray(persisted.recentUserActivities)) {
@@ -2549,6 +2591,7 @@ export const useUIStore = create<UIState>()(
         convertLatexSymbols: state.convertLatexSymbols,
         trimIncompleteModelOutput: state.trimIncompleteModelOutput,
         speechToTextEnabled: state.speechToTextEnabled,
+        ttsLineVolume: state.ttsLineVolume,
         chibiProfessorMariEnabled: state.chibiProfessorMariEnabled,
         achievementsEnabled: state.achievementsEnabled,
         musicPlayerEnabled: state.musicPlayerEnabled,
@@ -2557,6 +2600,8 @@ export const useUIStore = create<UIState>()(
         youtubePlayerEnabled: state.youtubePlayerEnabled,
         youtubePlayerVolume: state.youtubePlayerVolume,
         localMusicPlayerVolume: state.localMusicPlayerVolume,
+        conversationCallVoiceVolume: state.conversationCallVoiceVolume,
+        conversationCallVoiceMuted: state.conversationCallVoiceMuted,
         spotifyMobileWidgetCollapsed: state.spotifyMobileWidgetCollapsed,
         spotifyMobileWidgetPosition: state.spotifyMobileWidgetPosition,
         intuitiveSwipeNavigation: state.intuitiveSwipeNavigation,

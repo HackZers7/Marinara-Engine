@@ -136,8 +136,10 @@ export interface AssemblerInput {
   characterIds: string[];
   personaId?: string | null;
   personaName: string;
+  personaPhoneticName?: string;
   personaDescription: string;
   personaFields?: {
+    phoneticName?: string;
     personality?: string;
     scenario?: string;
     backstory?: string;
@@ -191,6 +193,8 @@ export interface AssemblerInput {
   timeZone?: string;
   /** Skip regular preset instructions that would conflict with user impersonation. */
   impersonate?: boolean;
+  /** Preserve normal preset sections for a dedicated impersonation preset. */
+  preserveImpersonatePresetSections?: boolean;
   /** Preserve character-scoped macros for a later known-speaker finalization pass. */
   deferCharacterMacros?: boolean;
 }
@@ -300,6 +304,7 @@ export async function assemblePrompt(input: AssemblerInput): Promise<AssemblerOu
     db: input.db,
     characterIds: input.characterIds,
     personaName: input.personaName,
+    personaPhoneticName: input.personaPhoneticName,
     personaDescription: input.personaDescription,
     personaFields: input.personaFields,
     variables: variableValues,
@@ -361,7 +366,9 @@ export async function assemblePrompt(input: AssemblerInput): Promise<AssemblerOu
     const section = sectionMap.get(sectionId);
     if (!section) continue;
     if (section.enabled !== "true") continue;
-    if (input.impersonate === true && section.isMarker !== "true") continue;
+    if (input.impersonate === true && input.preserveImpersonatePresetSections !== true && section.isMarker !== "true") {
+      continue;
+    }
 
     // Check if group is enabled
     if (section.groupId) {

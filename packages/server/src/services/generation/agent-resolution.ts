@@ -8,6 +8,7 @@ import {
   isRetiredBuiltInAgentId,
   LOCAL_SIDECAR_CONNECTION_ID,
   mergeBuiltInAgentSettings,
+  normalizeAgentPhaseValue,
   resolveAgentPromptTemplate,
   findKnownModel,
   type APIProvider,
@@ -111,10 +112,8 @@ export type ResolvedAgentPipelineAgents = {
   agentConnectionWarnings: AgentConnectionWarning[];
 };
 
-function resolveAgentRuntimePhase(agentType: string, configuredPhase: string): string {
-  if (agentType === "prose-guardian" || agentType === "continuity" || agentType === "html") return "post_processing";
-  if (agentType === "echo-chamber") return "parallel";
-  return configuredPhase;
+function resolveAgentRuntimePhase(_agentType: string, configuredPhase: string): string {
+  return normalizeAgentPhaseValue(configuredPhase);
 }
 
 function parseAgentSettings(settings: unknown): Record<string, unknown> {
@@ -539,6 +538,7 @@ export async function resolveAgentPipelineAgents({
     agentConnectionWarnings.push(
       buildDefaultAgentConnectionWarning({
         agentNames: defaultAgentConnectionAgents,
+        connectionId: defaultAgentConn.id,
         connectionName: defaultAgentConn.name,
         model: String(defaultAgentConn.model ?? "").trim(),
       }),

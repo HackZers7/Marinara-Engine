@@ -15,6 +15,25 @@ export interface ProviderDefinition {
   apiKeyHeader: string | null;
 }
 
+export const LOCAL_AUTH_PROVIDERS = ["openai_chatgpt", "claude_subscription", "grok_subscription"] as const;
+
+export function isLocalAuthProvider(provider: string | null | undefined): boolean {
+  return LOCAL_AUTH_PROVIDERS.includes(provider as (typeof LOCAL_AUTH_PROVIDERS)[number]);
+}
+
+export function localAuthProviderBaseUrl(provider: string | null | undefined): string | null {
+  switch (provider) {
+    case "claude_subscription":
+      return "claude-agent-sdk://local";
+    case "openai_chatgpt":
+      return "openai-chatgpt://codex-auth";
+    case "grok_subscription":
+      return "grok-cli://local";
+    default:
+      return null;
+  }
+}
+
 export const PROVIDERS: Record<APIProvider, ProviderDefinition> = {
   openai: {
     id: "openai",
@@ -54,6 +73,17 @@ export const PROVIDERS: Record<APIProvider, ProviderDefinition> = {
     defaultBaseUrl: "",
     modelsEndpoint: "",
     supportsStreaming: true,
+    usesAuthHeader: false,
+    apiKeyHeader: null,
+  },
+  grok_subscription: {
+    id: "grok_subscription",
+    name: "Grok CLI (Subscription)",
+    // No user-entered endpoint or API key. Marinara shells out to the local
+    // Grok Build CLI, which reads credentials from `grok login`.
+    defaultBaseUrl: "",
+    modelsEndpoint: "",
+    supportsStreaming: false,
     usesAuthHeader: false,
     apiKeyHeader: null,
   },
@@ -137,5 +167,14 @@ export const PROVIDERS: Record<APIProvider, ProviderDefinition> = {
     supportsStreaming: false,
     usesAuthHeader: true,
     apiKeyHeader: null,
+  },
+  video_generation: {
+    id: "video_generation",
+    name: "Video Generation",
+    defaultBaseUrl: "https://generativelanguage.googleapis.com/v1beta",
+    modelsEndpoint: "",
+    supportsStreaming: false,
+    usesAuthHeader: false,
+    apiKeyHeader: "x-goog-api-key",
   },
 };

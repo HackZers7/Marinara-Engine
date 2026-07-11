@@ -1,6 +1,6 @@
 # Image Generation
 
-Marinara Engine centralizes image prompt style through **Settings -> Image Generation -> Style Profiles**. A style profile controls how roleplay selfies, avatars, sprites, Game Mode backgrounds, NPC portraits, and scene illustrations are shaped before they are sent to the selected image provider.
+Marinara Engine centralizes image prompt style through **Settings -> Generations -> Image Generation -> Style Profiles**. A style profile controls how roleplay selfies, avatars, sprites, Game Mode backgrounds, NPC portraits, and scene illustrations are shaped before they are sent to the selected image provider.
 
 ## Style profiles
 
@@ -41,4 +41,8 @@ The backend-specific controls for AUTOMATIC1111/Forge, ComfyUI, NovelAI, and oth
 
 ## Prompt review
 
-When **review prompts before image generation** is enabled, Marinara shows the final compiled positive prompt and, when available, the final compiled negative prompt before generation. Editing either field changes exactly what is sent for that request; reviewed prompts are not compiled a second time after confirmation.
+When **Expose image prompts before sending** is enabled in **Settings -> Generations -> Image Generation**, Marinara shows the final compiled positive prompt and, when available, the final compiled negative prompt before generation. Editing either field changes exactly what is sent for that request; reviewed prompts are not compiled a second time after confirmation.
+
+## Scene videos
+
+Scene videos are configured separately from still-image generation. They use **Video Generation** connections, animate existing Gallery illustrations, and save MP4 files in their own media store. See [Scene Video Generation](SCENE_VIDEO_GENERATION.md) for setup, Gallery controls, provider defaults, and editable prompt templates.

@@ -33,6 +33,7 @@ import {
 
 import { useChatStore } from "../../stores/chat.store";
 import { useGenerate } from "../../hooks/use-generate";
+import { useGenerateGallerySelfie } from "../../hooks/use-gallery";
 import {
   characterKeys,
   spriteKeys,
@@ -52,16 +53,19 @@ import { parseCharacterDisplayData } from "../../lib/character-display";
 import { showConfirmDialog } from "../../lib/app-dialogs";
 import { chatBackgroundMetadataToUrl, chatBackgroundUrlToMetadata } from "../../lib/backgrounds";
 import { useGameStateStore } from "../../stores/game-state.store";
+import { useGalleryStore } from "../../stores/gallery.store";
 import { toast } from "sonner";
-import { Check, HelpCircle, List, X } from "lucide-react";
+import { BookOpen, Check, HelpCircle, List, X } from "lucide-react";
 import {
   APP_VERSION,
   BUILT_IN_AGENTS,
   PROFESSOR_MARI_ID,
   buildGuidedGenerationInstructionMessage,
   type AchievementEvent,
+  type GeneratedSceneVideo,
   type SpritePlacement,
   type SpriteSide,
+  type WeekSchedule,
 } from "@marinara-engine/shared";
 import { resolveLiveConversationStatus } from "../../lib/conversation-presence-status";
 import { useUIStore } from "../../stores/ui.store";
@@ -109,6 +113,7 @@ import { HomeProfessorMariChat } from "./HomeProfessorMariChat";
 import { HomeAchievements } from "./HomeAchievements";
 import { NewChatConnectionGate } from "./NewChatConnectionGate";
 import { ChatCommonOverlays, preloadChatSettingsDrawer, type ChatSettingsInitialSection } from "./ChatCommonOverlays";
+import { PendingTypingDots } from "./PendingTypingDots";
 import { CreatorNotesCssInjector, type CardCssMode } from "./CreatorNotesCssInjector";
 import type { ChatModeFilter } from "../../lib/card-css";
 import { ImagePromptReviewModal, type ImagePromptOverride, type ImagePromptReviewItem } from "../ui/ImagePromptReviewModal";
@@ -262,6 +267,10 @@ function parseMessageExtraRecord(value: unknown): Record<string, unknown> {
   return typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
 }
 
+function startsNewAssistantBubble(message: { extra?: unknown } | null | undefined): boolean {
+  return parseMessageExtraRecord(message?.extra).startsNewAssistantBubble === true;
+}
+
 function normalizeMessageSpriteExpressions(value: unknown): Record<string, string> {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
   const expressions: Record<string, string> = {};
@@ -291,6 +300,7 @@ function suppressBuiltInProfessorMariForMode(mode: string | undefined): boolean 
 
 const INTUITIVE_SWIPE_MIN_DISTANCE = 56;
 const INTUITIVE_SWIPE_MAX_VERTICAL_DRIFT = 44;
+const SCENE_VIDEO_GENERATION_TIMEOUT_MS = 1_800_000;
 
 const shouldIgnoreIntuitiveSwipeTarget = (target: EventTarget | null): boolean => {
   if (!(target instanceof Element)) return false;
@@ -355,6 +365,7 @@ function toCharacterMapValue(char: CharacterRow): CharacterMapValue {
     const extensions = data.extensions && typeof data.extensions === "object" ? data.extensions : {};
     return {
       name: data.name ?? "Unknown",
+      phoneticName: extensions.phoneticName || undefined,
       description: data.description ?? "",
       personality: data.personality ?? "",
       backstory: extensions.backstory ?? "",
@@ -374,6 +385,43 @@ function toCharacterMapValue(char: CharacterRow): CharacterMapValue {
   }
 }
 
+// [#3164] Value comparators so the characterMap memo can keep its previous
+// identity when a rebuild produced equal contents. A new map identity re-runs
+// the regex+macro display pipeline for every mounted message, so renders
+// triggered by the presence clock or unrelated metadata writes must not renew
+// it. The field list must cover every field of the CharacterMap value type —
+// a missed field would make a real change invisible to consumers.
+function areCharacterMapValuesEqual(a: CharacterMapValue, b: CharacterMapValue): boolean {
+  return (
+    a.name === b.name &&
+    a.phoneticName === b.phoneticName &&
+    a.description === b.description &&
+    a.personality === b.personality &&
+    a.backstory === b.backstory &&
+    a.appearance === b.appearance &&
+    a.scenario === b.scenario &&
+    a.example === b.example &&
+    a.avatarUrl === b.avatarUrl &&
+    a.nameColor === b.nameColor &&
+    a.dialogueColor === b.dialogueColor &&
+    a.boxColor === b.boxColor &&
+    a.conversationStatus === b.conversationStatus &&
+    a.conversationActivity === b.conversationActivity &&
+    // avatarCrop is a small plain object — compare by value, not reference.
+    (a.avatarCrop === b.avatarCrop ||
+      JSON.stringify(a.avatarCrop ?? null) === JSON.stringify(b.avatarCrop ?? null))
+  );
+}
+
+function areCharacterMapsEqual(a: CharacterMap, b: CharacterMap): boolean {
+  if (a.size !== b.size) return false;
+  for (const [id, value] of b) {
+    const previous = a.get(id);
+    if (!previous || !areCharacterMapValuesEqual(previous, value)) return false;
+  }
+  return true;
+}
+
 const ChatConversationSurface = lazy(async () => {
   const module = await import("./ChatConversationSurface");
   return { default: module.ChatConversationSurface };
@@ -388,6 +436,20 @@ const GameSurface = lazy(async () => {
   const module = await import("../game/GameSurface");
   return { default: module.GameSurface };
 });
+
+const loadCharacterScheduleEditorModal = async () => {
+  const module = await import("./CharacterScheduleEditorModal");
+  return { default: module.CharacterScheduleEditorModal };
+};
+
+let characterScheduleEditorModalLoadPromise: ReturnType<typeof loadCharacterScheduleEditorModal> | null = null;
+
+function preloadCharacterScheduleEditorModal() {
+  characterScheduleEditorModalLoadPromise ??= loadCharacterScheduleEditorModal();
+  return characterScheduleEditorModalLoadPromise;
+}
+
+const CharacterScheduleEditorModal = lazy(preloadCharacterScheduleEditorModal);
 
 type FloatingPanelAnchor = { right: number; top: number } | null;
 type OpenSettingsOptions = { initialSection?: ChatSettingsInitialSection };
@@ -474,6 +536,7 @@ export function ChatArea() {
   const intuitiveSwipeNavigation = useUIStore((s) => s.intuitiveSwipeNavigation);
   const intuitiveSwipeRerollLatest = useUIStore((s) => s.intuitiveSwipeRerollLatest);
   const editLastMessageOnArrowUp = useUIStore((s) => s.editLastMessageOnArrowUp);
+  const ttsLineVolume = useUIStore((s) => s.ttsLineVolume);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const prevScrollHeightRef = useRef(0);
@@ -567,7 +630,9 @@ export function ChatArea() {
   }, []);
 
   useEffect(() => {
-    if (activeChatId) setHomeProfessorChatOpen(false);
+    if (!activeChatId) return;
+    setHomeProfessorChatOpen(false);
+    setHomeProfessorChatActive(false);
   }, [activeChatId]);
   const closeFloatingChatDrawers = useCallback(() => {
     setSettingsOpen(false);
@@ -648,6 +713,7 @@ export function ChatArea() {
   const peekPrompt = usePeekPrompt();
   const branchChat = useBranchChat();
   const { generate, retryAgents } = useGenerate();
+  const generateGallerySelfie = useGenerateGallerySelfie(activeChatId ?? "");
   const setActiveSwipe = useSetActiveSwipe(activeChatId);
   const setActiveChatId = useChatStore((s) => s.setActiveChatId);
   const pendingNewChatMode = useChatStore((s) => s.pendingNewChatMode);
@@ -703,8 +769,11 @@ export function ChatArea() {
     setAgentInjectionDrafts({});
   }, []);
 
-  // Character IDs in the active chat
-  const chatCharIds = useMemo(() => getChatCharacterIds(chat), [chat]);
+  // Character IDs in the active chat. Keyed on the raw characterIds field
+  // (all getChatCharacterIds reads) so chat-detail refetches that only bump
+  // other fields don't renew the array identity. [#3164]
+  const chatCharacterIdsRaw = chat?.characterIds;
+  const chatCharIds = useMemo(() => getChatCharacterIds({ characterIds: chatCharacterIdsRaw }), [chatCharacterIdsRaw]);
   const chatPersonaId = useMemo(() => resolveChatPersonaId(chat), [chat]);
   const { data: chatPersona } = usePersona(chatPersonaId);
   const { data: activePersonaFallback } = useActivePersona(!!chat?.id && !chatPersonaId && !isGameChat);
@@ -718,10 +787,20 @@ export function ChatArea() {
       staleTime: 5 * 60_000,
     })),
   });
-  const chatCharacterRows = useMemo(
-    () => activeCharacterQueries.map((query) => query.data).filter(isCharacterRow),
-    [activeCharacterQueries],
-  );
+  // [#3164] useQueries returns a fresh result array every render while the
+  // underlying row objects are cache-stable — reuse the previous array when
+  // every element is unchanged so the characterMap memo below (and everything
+  // downstream of it) keeps its identity across unrelated re-renders.
+  const chatCharacterRowsRef = useRef<CharacterRow[]>([]);
+  const chatCharacterRows = useMemo(() => {
+    const next = activeCharacterQueries.map((query) => query.data).filter(isCharacterRow);
+    const previous = chatCharacterRowsRef.current;
+    if (previous.length === next.length && next.every((row, index) => row === previous[index])) {
+      return previous;
+    }
+    chatCharacterRowsRef.current = next;
+    return next;
+  }, [activeCharacterQueries]);
 
   // A 60s-cadence clock so schedule/override-derived presence refreshes when time
   // alone changes the effective status (mirrors the presence pill's refetch).
@@ -729,6 +808,7 @@ export function ChatArea() {
 
   // Build character lookup map from the active chat's characters only. Library
   // panels can load the whole catalog; the chat surface should not.
+  const characterMapRef = useRef<CharacterMap>(new Map());
   const characterMap: CharacterMap = useMemo(() => {
     const map: CharacterMap = new Map();
     for (const char of chatCharacterRows) {
@@ -786,6 +866,12 @@ export function ChatArea() {
         });
       }
     }
+    // [#3164] Presence-clock ticks and metadata writes that didn't change any
+    // displayed character field must not renew the map identity — a new
+    // identity re-runs the regex+macro display pipeline for every mounted
+    // message across all three chat surfaces.
+    if (areCharacterMapsEqual(characterMapRef.current, map)) return characterMapRef.current;
+    characterMapRef.current = map;
     return map;
   }, [chatCharacterRows, chat?.metadata, presenceNow]);
 
@@ -860,6 +946,7 @@ export function ChatArea() {
     return {
       id: persona.id,
       name: persona.name,
+      phoneticName: persona.phoneticName || undefined,
       description: persona.description ?? "",
       personality: persona.personality || undefined,
       scenario: persona.scenario || undefined,
@@ -974,9 +1061,34 @@ export function ChatArea() {
   const groupChatMode: string | undefined = chatCharIds.length > 1 ? (chatMeta.groupChatMode ?? "merged") : undefined;
 
   const updateMeta = useUpdateChatMetadata();
+  const [scheduleModalCharacterId, setScheduleModalCharacterId] = useState<string | null>(null);
+  const [scheduleModalInitialDay, setScheduleModalInitialDay] = useState<string | null>(null);
+  const handleOpenScheduleEditor = useCallback((characterId: string, options?: { initialDay?: string | null }) => {
+    void preloadCharacterScheduleEditorModal();
+    setScheduleModalInitialDay(options?.initialDay ?? null);
+    setScheduleModalCharacterId(characterId);
+  }, []);
+  const handleCloseScheduleEditor = useCallback(() => {
+    setScheduleModalCharacterId(null);
+    setScheduleModalInitialDay(null);
+  }, []);
+  const handleSaveCharacterSchedule = useCallback(
+    (savedCharacterId: string, updated: WeekSchedule) => {
+      if (!chat?.id) return;
+      updateMeta.mutate({
+        id: chat.id,
+        characterSchedules: {
+          ...((chatMeta.characterSchedules as Record<string, WeekSchedule> | undefined) ?? {}),
+          [savedCharacterId]: updated,
+        },
+      });
+    },
+    [chat?.id, chatMeta.characterSchedules, updateMeta],
+  );
   const summaryContextSize: number = (chatMeta.summaryContextSize as number) ?? 50;
   const [roleplayBackgroundReviewItems, setRoleplayBackgroundReviewItems] = useState<ImagePromptReviewItem[]>([]);
   const [roleplayBackgroundReviewSubmitting, setRoleplayBackgroundReviewSubmitting] = useState(false);
+  const roleplaySceneVideoGeneratingRef = useRef(false);
   const roleplayBackgroundReviewResolveRef = useRef<((overrides: ImagePromptOverride[] | null) => void) | null>(null);
 
   const openRoleplayBackgroundPromptReview = useCallback((items: ImagePromptReviewItem[]) => {
@@ -1058,6 +1170,61 @@ export function ChatArea() {
     queryClient,
     updateMeta,
   ]);
+
+  const handleGenerateRoleplaySceneVideo = useCallback(
+    async (source?: { galleryImageId?: string }) => {
+      if (!activeChatId || !chat || (chatMode !== "roleplay" && chatMode !== "visual_novel")) return;
+      if (roleplaySceneVideoGeneratingRef.current) return;
+      const sceneVideoConnectionId =
+        typeof chatMeta.sceneVideoConnectionId === "string" ? chatMeta.sceneVideoConnectionId.trim() : "";
+      if (!sceneVideoConnectionId) {
+        toast.error("Choose a Scene Video connection in Chat Settings first.");
+        return;
+      }
+
+      const galleryImageId = source?.galleryImageId?.trim();
+      roleplaySceneVideoGeneratingRef.current = true;
+      try {
+        const result = await api.post<{ video: GeneratedSceneVideo }>(
+          "/gallery/generate-scene-video",
+          {
+            chatId: activeChatId,
+            ...(galleryImageId ? { galleryImageId } : {}),
+            debugMode: useUIStore.getState().debugMode,
+          },
+          { signal: AbortSignal.timeout(SCENE_VIDEO_GENERATION_TIMEOUT_MS) },
+        );
+        const galleryStore = useGalleryStore.getState();
+        galleryStore.pinVideo(result.video);
+        galleryStore.syncLatestViewer({ ...result.video, kind: "video" as const });
+        void queryClient.invalidateQueries({ queryKey: ["gallery", "scene-videos", activeChatId] });
+        toast.success("Scene video generated.", { duration: 1800 });
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : "Scene video generation failed.");
+      } finally {
+        roleplaySceneVideoGeneratingRef.current = false;
+      }
+    },
+    [activeChatId, chat, chatMeta.sceneVideoConnectionId, chatMode, queryClient],
+  );
+
+  const handleGenerateConversationSelfie = useCallback(
+    async (characterId?: string) => {
+      if (!activeChatId || chatMode !== "conversation") return;
+      const targetCharacterId =
+        characterId && chatCharIds.includes(characterId)
+          ? characterId
+          : (chatCharIds.find((id) => characterMap.has(id)) ?? chatCharIds[0]);
+      if (!targetCharacterId) {
+        throw new Error("Add a character to this conversation before generating a selfie.");
+      }
+      await generateGallerySelfie.mutateAsync({
+        characterId: targetCharacterId,
+        debugMode: useUIStore.getState().debugMode,
+      });
+    },
+    [activeChatId, characterMap, chatCharIds, chatMode, generateGallerySelfie],
+  );
 
   // Creator-notes card CSS: resolve the per-chat mode (default "chat") and map
   // the chat mode onto the @chat-mode filter surface (visual novel shares the
@@ -1514,6 +1681,8 @@ export function ChatArea() {
     setMultiSelectMode(false);
     setSelectedMessageIds(new Set());
     setSelectionAnchorIndex(null);
+    setScheduleModalCharacterId(null);
+    setScheduleModalInitialDay(null);
   }, [activeChatId]);
 
   const handleUnselectAllMessages = useCallback(() => {
@@ -2144,8 +2313,9 @@ export function ChatArea() {
 
     void ttsService.speakSequence(withTTSVoiceRequestCacheKeys(ttsRequests, cfg, lastMsg.id), lastMsg.id, {
       progressive: cfg.progressivePlayback,
+      volume: ttsLineVolume / 100,
     });
-  }, [characterMap, isStreaming, resolveTTSCharacterId]);
+  }, [characterMap, isStreaming, resolveTTSCharacterId, ttsLineVolume]);
 
   const newestMsgId = msgData?.pages[0]?.[msgData.pages[0].length - 1]?.id;
   const newestMsgSwipeIndex = msgData?.pages[0]?.[msgData.pages[0].length - 1]?.activeSwipeIndex;
@@ -2471,15 +2641,29 @@ export function ChatArea() {
                     </button>
                   </div>
 
-                  {/* Restart tutorial */}
-                  <button
-                    onClick={() => useUIStore.getState().setHasCompletedOnboarding(false)}
-                    className="mari-chrome-control mari-chrome-control--small text-xs"
-                    title="Replay tutorial"
-                  >
-                    <HelpCircle size="0.875rem" />
-                    Replay Tutorial
-                  </button>
+                  <div className="flex flex-wrap justify-center gap-2">
+                    {/* In-app documentation */}
+                    <button
+                      type="button"
+                      onClick={() => useUIStore.getState().openModal("docs-viewer")}
+                      className="mari-chrome-control mari-chrome-control--small text-xs"
+                      title="Browse the documentation"
+                    >
+                      <BookOpen size="0.875rem" />
+                      Documentation
+                    </button>
+
+                    {/* Restart tutorial */}
+                    <button
+                      type="button"
+                      onClick={() => useUIStore.getState().setHasCompletedOnboarding(false)}
+                      className="mari-chrome-control mari-chrome-control--small text-xs"
+                      title="Replay tutorial"
+                    >
+                      <HelpCircle size="0.875rem" />
+                      Replay Tutorial
+                    </button>
+                  </div>
                 </div>
               </>
             )}
@@ -2500,6 +2684,7 @@ export function ChatArea() {
     if (i === 0 || !messages) return false;
     const prev = messages[i - 1];
     const curr = messages[i];
+    if (startsNewAssistantBubble(curr)) return false;
     if (prev.role !== curr.role || prev.characterId !== curr.characterId) return false;
     // Break grouping when persona changes between consecutive user messages
     if (prev.role === "user" && curr.role === "user") {
@@ -2543,6 +2728,22 @@ export function ChatArea() {
           }
         : undefined;
   const surfaceFallback = <div className="flex flex-1 overflow-hidden" />;
+  const scheduleModal = scheduleModalCharacterId ? (
+    <Suspense fallback={null}>
+      <CharacterScheduleEditorModal
+        open
+        chatId={activeChatId}
+        characterId={scheduleModalCharacterId}
+        characterName={characterMap.get(scheduleModalCharacterId)?.name ?? "Character"}
+        characterAvatarUrl={characterMap.get(scheduleModalCharacterId)?.avatarUrl ?? null}
+        characterAvatarCrop={characterMap.get(scheduleModalCharacterId)?.avatarCrop ?? null}
+        schedule={(chatMeta.characterSchedules as Record<string, WeekSchedule> | undefined)?.[scheduleModalCharacterId]}
+        initialDay={scheduleModalInitialDay}
+        onClose={handleCloseScheduleEditor}
+        onSave={handleSaveCharacterSchedule}
+      />
+    </Suspense>
+  ) : null;
 
   // ═══════════════════════════════════════════════
   // Game mode — RPG surface with GM narration, map, party chat
@@ -2554,6 +2755,7 @@ export function ChatArea() {
       <Suspense fallback={surfaceFallback}>
         <>
           {cardCssInjector}
+          {scheduleModal}
           <GameSurface
             activeChatId={activeChatId}
             chat={chat!}
@@ -2596,6 +2798,7 @@ export function ChatArea() {
             }}
             onCloseSettings={handleCloseSettingsPanel}
             onCloseGallery={handleCloseGalleryPanel}
+            onOpenScheduleEditor={handleOpenScheduleEditor}
             onIllustrate={() => retryAgents(activeChatId, ["illustrator"])}
             onWizardFinish={() => {
               setWizardOpen(false);
@@ -2624,6 +2827,7 @@ export function ChatArea() {
     return (
       <>
         {cardCssInjector}
+        {scheduleModal}
         <Suspense fallback={surfaceFallback}>
           <ChatConversationSurface
             activeChatId={activeChatId}
@@ -2669,8 +2873,10 @@ export function ChatArea() {
             onAbandonScene={chatMeta.sceneStatus === "active" ? () => abandonScene(activeChatId) : undefined}
             onOpenSettings={handleOpenSettingsPanel}
             onOpenGallery={handleOpenGalleryPanel}
+            onOpenScheduleEditor={handleOpenScheduleEditor}
             onCloseSettings={handleCloseSettingsPanel}
             onCloseGallery={handleCloseGalleryPanel}
+            onGenerateSelfie={handleGenerateConversationSelfie}
             onWizardFinish={() => {
               setWizardOpen(false);
               handleOpenSettingsPanel();
@@ -2710,6 +2916,7 @@ export function ChatArea() {
   return (
     <>
       {cardCssInjector}
+      {scheduleModal}
       <Suspense fallback={surfaceFallback}>
         <ChatRoleplaySurface
           activeChatId={activeChatId}
@@ -2794,8 +3001,11 @@ export function ChatArea() {
           onOpenGallery={handleOpenGalleryPanel}
           onCloseSettings={handleCloseSettingsPanel}
           onCloseGallery={handleCloseGalleryPanel}
+          onOpenScheduleEditor={handleOpenScheduleEditor}
           onIllustrate={() => retryAgents(activeChatId, ["illustrator"])}
           onGenerateBackground={handleGenerateRoleplayBackground}
+          onGenerateVideo={() => handleGenerateRoleplaySceneVideo()}
+          onAnimateImage={(image) => handleGenerateRoleplaySceneVideo({ galleryImageId: image.id })}
           onWizardFinish={() => {
             setWizardOpen(false);
             handleOpenSettingsPanel();
@@ -2853,9 +3063,7 @@ function TypingIndicator() {
   return (
     <div className="flex items-center gap-1 px-4 py-3">
       <div className="flex items-center gap-1 rounded-xl bg-[var(--secondary)] px-4 py-2.5">
-        <span className="h-2 w-2 animate-bounce rounded-full bg-[var(--muted-foreground)]/60 [animation-delay:0ms]" />
-        <span className="h-2 w-2 animate-bounce rounded-full bg-[var(--muted-foreground)]/60 [animation-delay:150ms]" />
-        <span className="h-2 w-2 animate-bounce rounded-full bg-[var(--muted-foreground)]/60 [animation-delay:300ms]" />
+        <PendingTypingDots dotClassName="bg-[var(--muted-foreground)]/60" />
       </div>
     </div>
   );
