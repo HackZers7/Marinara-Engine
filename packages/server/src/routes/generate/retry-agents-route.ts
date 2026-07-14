@@ -35,10 +35,12 @@ import {
   AGENT_PHASE_MAX_CONCURRENT_GROUPS,
   getAgentBatchLane,
   normalizeAgentMaxParallelJobs,
+  planAgentBatches,
   settleAgentJobsWithConcurrencyLimit,
   type ResolvedAgent,
 } from "../../services/agents/agent-pipeline.js";
-import { executeAgent, executeAgentBatch, normalizeAgentContextSize } from "../../services/agents/agent-executor.js";
+import { executeAgent, executeAgentBatch, normalizeAgentContextSize, shouldRunAgentIndividually } from "../../services/agents/agent-executor.js";
+import { randomUUID } from "node:crypto";
 import type { LLMToolDefinition } from "../../services/llm/base-provider.js";
 import { getLocalSidecarProvider, LOCAL_SIDECAR_MODEL } from "../../services/llm/local-sidecar.js";
 import { createLLMProvider } from "../../services/llm/provider-registry.js";
@@ -2153,8 +2155,69 @@ async function executeRetryBatches(
   agentContext: AgentContext,
   resolvedAgents: ResolvedRetryAgent[],
   preGenerationContext?: AgentContext | null,
+  onStart?: (start: { agentType: string; agentName: string; phase: string; batchId?: string | null }) => void,
+  onSiblingCompleted?: (
+    completion: { agentType: string; agentName: string; phase: string; success: boolean },
+  ) => void,
+  // Pre-planned batchIds keyed by ResolvedAgent.id. When present, reuse the
+  // id the client already knows about instead of minting a new one so the
+  // widget cluster it rendered up-front matches the runtime cluster.
+  plannedBatchIds?: Map<string, string>,
 ) {
+  const safeOnStart = (agent: { type: string; name: string; phase: string }, batchId: string | null) => {
+    try {
+      onStart?.({ agentType: agent.type, agentName: agent.name, phase: agent.phase, batchId });
+    } catch {
+      /* swallow */
+    }
+  };
+  const safeOnSiblingCompleted = (
+    completion: { agentType: string; agentName: string; phase: string; success: boolean },
+  ) => {
+    try {
+      onSiblingCompleted?.(completion);
+    } catch {
+      /* swallow */
+    }
+  };
+  // Compute the merge BEFORE we lose the original member list — the retry
+  // route folds Continuity + Prose Guardian + Immersive HTML into a single
+  // ResolvedRetryAgent for one LLM call. The client, however, has separate
+  // widgets for each. Remember the original members keyed by the merged
+  // agent id so we can fan agent_start / agent_completed out to every
+  // sibling.
+  const builtInRewriteMembers = resolvedAgents.filter((entry) =>
+    isBuiltInTextRewriteAgentType(entry.resolved.type),
+  );
   const retryAgents = mergeRetryPairedBuiltInRewriteAgents(resolvedAgents);
+  const mergedRewriteMembers = new Map<
+    string,
+    Array<{ type: string; name: string; phase: string }>
+  >();
+  if (builtInRewriteMembers.length > 1) {
+    const mergedEntry = retryAgents.find((entry) => entry.resolved.id === builtInRewriteMembers[0]!.resolved.id);
+    if (mergedEntry) {
+      mergedRewriteMembers.set(
+        mergedEntry.resolved.id,
+        builtInRewriteMembers.map((entry) => ({
+          type: entry.resolved.type,
+          name: entry.resolved.name,
+          phase: entry.resolved.phase,
+        })),
+      );
+    }
+  }
+  const startForConfig = (config: { id: string; type: string; name: string; phase: string }, fallbackBatchId: string | null) => {
+    const members = mergedRewriteMembers.get(config.id);
+    if (members && members.length > 1) {
+      // Reuse the id from the pre-flight plan if we have one; otherwise
+      // mint fresh (a merged built-in rewrite call is always a batch).
+      const rewriteBatchId = plannedBatchIds?.get(config.id) ?? randomUUID();
+      for (const member of members) safeOnStart(member, rewriteBatchId);
+      return;
+    }
+    safeOnStart(config, fallbackBatchId);
+  };
   const providerModelGroups = new Map<
     string,
     { agents: ResolvedRetryAgent[]; provider: any; model: string; context: AgentContext; maxParallelJobs: number }
@@ -2217,10 +2280,51 @@ async function executeRetryBatches(
 
       if (batchAgents.length > 0) {
         const configs = batchAgents.map((agent) => agent.resolved);
-        groupResults.push(...(await executeAgentBatch(configs, group.context, group.provider, group.model)));
+        // Mirror executeAgentBatch: agents in the shared batched LLM call
+        // share a batchId; compact/isolated agents fire their own request.
+        const trulyBatched = configs.filter((c) => !shouldRunAgentIndividually(c));
+        const isolatedFromBatch = configs.filter((c) => shouldRunAgentIndividually(c));
+        // Prefer the pre-planned id the client already rendered clusters
+        // with; only mint a fresh id if planning didn't cover this group.
+        const preplannedBatchId =
+          trulyBatched.length >= 2 ? plannedBatchIds?.get(trulyBatched[0]!.id) ?? null : null;
+        const sharedBatchId = preplannedBatchId ?? (trulyBatched.length >= 2 ? randomUUID() : null);
+        // Batched agents ride a single HTTP call, so mark them running
+        // synchronously. Isolated ones go through executeAgentBatch's inner
+        // concurrency limiter — let it emit per-agent starts so the widget
+        // flips only when a worker actually picks the request up.
+        // startForConfig fans a merged built-in rewrite agent (Continuity +
+        // Prose Guardian + …) out to every original member so each gets its
+        // own widget event.
+        for (const config of trulyBatched) startForConfig(config, sharedBatchId);
+        const batchResults = await executeAgentBatch(configs, group.context, group.provider, group.model, (config) => {
+          const isolated = isolatedFromBatch.find((candidate) => candidate.id === config.id);
+          if (isolated) startForConfig(isolated, null);
+        });
+        groupResults.push(...batchResults);
+        // Fan completion out to the merged rewrite siblings. The single
+        // AgentResult only carries the type of the merged agent (whichever
+        // member sat first), so the other members' widgets would otherwise
+        // never leave "running".
+        for (const result of batchResults) {
+          const members = mergedRewriteMembers.get(result.agentId);
+          if (!members || members.length <= 1) continue;
+          for (const member of members) {
+            if (member.type === result.agentType) continue;
+            safeOnSiblingCompleted({
+              agentType: member.type,
+              agentName: member.name,
+              phase: member.phase,
+              success: result.success,
+            });
+          }
+        }
       }
 
       for (const entry of toolAgents) {
+        // Tool agents in a group run sequentially — emit start right before
+        // this specific agent's LLM request goes out. Own request → null.
+        startForConfig(entry.resolved, null);
         const result = await executeAgent(
           entry.resolved,
           group.context,
@@ -3381,7 +3485,6 @@ export async function registerRetryAgentsRoute(app: FastifyInstance) {
         }
       }
 
-      sendSseEvent(reply, { type: "agent_start", data: { phase: "retry" } });
       for (const warning of warnings) {
         sendSseEvent(reply, { type: "agent_warning", data: warning });
       }
@@ -3391,14 +3494,116 @@ export async function registerRetryAgentsRoute(app: FastifyInstance) {
           "No runnable agents were found for this retry. Add tracker agents to this chat or check their connection settings.",
         );
       }
+
+      // Emit the full agent queue BEFORE agent_start so the client has widgets
+      // to promote from "queued" to "running" once the phase begins. If
+      // agent_start arrives first the queue is still empty and the running
+      // transition is silently dropped.
+      //
+      // Pre-compute batch clustering here (same rules as the pipeline uses at
+      // runtime) so the queue arrives with batchIds already attached and the
+      // widget row shows cluster containers in "queued" state before any LLM
+      // call fires. executeRetryBatches reuses these ids so agent_start lands
+      // in the same clusters.
+      const retryBuiltInRewriteEntries = resolvedAgents.filter((entry) =>
+        isBuiltInTextRewriteAgentType(entry.resolved.type),
+      );
+      const retryPlannerAgents: ResolvedAgent[] = resolvedAgents.map((entry) => ({
+        ...entry.resolved,
+        provider: entry.agentProvider,
+        model: entry.agentModel,
+      }));
+      const retryPlannedMergedGroups =
+        retryBuiltInRewriteEntries.length > 1
+          ? [
+              {
+                representativeId: retryBuiltInRewriteEntries[0]!.resolved.id,
+                members: retryBuiltInRewriteEntries.slice(1).map((entry) => ({
+                  agentType: entry.resolved.type,
+                  agentName: entry.resolved.name,
+                  phase: entry.resolved.phase,
+                })),
+              },
+            ]
+          : [];
+      const retryPlannedWidgets = planAgentBatches(retryPlannerAgents, {
+        mergedGroups: retryPlannedMergedGroups,
+      });
+      const retryPlannedBatchIdByAgentId = new Map<string, string>();
+      const retryPlannedBatchIdByType = new Map<string, string>();
+      for (const widget of retryPlannedWidgets) {
+        if (!widget.batchId) continue;
+        retryPlannedBatchIdByAgentId.set(widget.agentId, widget.batchId);
+        retryPlannedBatchIdByType.set(widget.agentType, widget.batchId);
+      }
+      const retryQueueAgents = resolvedAgents
+        .map((entry) => ({
+          agentType: entry.resolved.type,
+          agentName: entry.resolved.name,
+          phase: entry.resolved.phase,
+          batchId: retryPlannedBatchIdByType.get(entry.resolved.type) ?? null,
+        }))
+        .sort((a, b) => {
+          const phaseOrder: Record<string, number> = { pre_generation: 0, parallel: 1, post_processing: 2 };
+          return (phaseOrder[a.phase] ?? 3) - (phaseOrder[b.phase] ?? 3);
+        });
+      sendSseEvent(reply, {
+        type: "agent_queue",
+        data: { agents: retryQueueAgents },
+      });
+      sendSseEvent(reply, { type: "agent_start", data: { phase: "retry" } });
+
       const lorebookKeeperAgent = resolvedAgents.find((entry) => entry.resolved.type === "lorebook-keeper") ?? null;
       const nonLorebookAgents = resolvedAgents.filter((entry) => entry.resolved.type !== "lorebook-keeper");
       if (cyoaAgentWillRun) {
         logger.info("[retry-agents] CYOA re-roll chatId=%s assistantMessageId=%s", chatId, lastAssistant?.id ?? "none");
       }
+      const emitAgentStart = (start: {
+        agentType: string;
+        agentName: string;
+        phase: string;
+        batchId?: string | null;
+      }) => {
+        sendSseEvent(reply, {
+          type: "agent_start",
+          data: {
+            phase: start.phase,
+            agentType: start.agentType,
+            agentName: start.agentName,
+            batchId: start.batchId ?? null,
+          },
+        });
+      };
+      // Closes out sibling widgets of a merged rewrite agent (Continuity +
+      // Prose Guardian + …). The upstream AgentResult only carries the type
+      // of the merged agent, so we synthesize a completion event for every
+      // other original member.
+      const emitAgentCompleted = (completion: {
+        agentType: string;
+        agentName: string;
+        phase: string;
+        success: boolean;
+      }) => {
+        sendSseEvent(reply, {
+          type: "agent_completed",
+          data: {
+            phase: completion.phase,
+            agentType: completion.agentType,
+            agentName: completion.agentName,
+            success: completion.success,
+          },
+        });
+      };
       const rawResults =
         nonLorebookAgents.length > 0
-          ? await executeRetryBatches(agentContext, nonLorebookAgents, preGenerationAgentContext)
+          ? await executeRetryBatches(
+              agentContext,
+              nonLorebookAgents,
+              preGenerationAgentContext,
+              emitAgentStart,
+              emitAgentCompleted,
+              retryPlannedBatchIdByAgentId,
+            )
           : [];
       const results = rawResults
         .map(markInvalidJsonAgentResult)
@@ -3409,6 +3614,11 @@ export async function registerRetryAgentsRoute(app: FastifyInstance) {
         );
       let rawLorebookKeeperRunEntries: Array<{ messageId: string; result: AgentResult }> = [];
       if (lorebookKeeperAgent) {
+        emitAgentStart({
+          agentType: lorebookKeeperAgent.resolved.type,
+          agentName: lorebookKeeperAgent.resolved.name,
+          phase: lorebookKeeperAgent.resolved.phase,
+        });
         try {
           rawLorebookKeeperRunEntries = await executeLorebookKeeperRetries({
             lorebookKeeperAgent,

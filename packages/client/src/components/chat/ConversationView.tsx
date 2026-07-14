@@ -26,6 +26,7 @@ import {
 import { toast } from "sonner";
 import { ConversationMessage } from "./ConversationMessage";
 import { ConversationInput } from "./ConversationInput";
+import { AgentTrackBar } from "../agents/AgentTrackBar";
 import { UnoBoard } from "./UnoBoard";
 import { UnoSetup } from "./UnoSetup";
 import { ChessBoard } from "./ChessBoard";
@@ -1545,6 +1546,9 @@ export function ConversationView({
       <ChessSetup key={`chess-${chatId}`} chatId={chatId} open={chessSetupOpen} onClose={closeChessSetup} />
       <PokerSetup key={`poker-${chatId}`} chatId={chatId} open={pokerSetupOpen} onClose={closePokerSetup} />
       <EightBallSetup key={`eightball-${chatId}`} chatId={chatId} open={eightBallSetupOpen} onClose={closeEightBallSetup} />
+
+      {/* ── Agent track bar — circular progress widgets (above input, below messages) ── */}
+      <AgentTrackBar chatId={chatId} />
 
       {/* ── Input area ── */}
       <ConversationInput

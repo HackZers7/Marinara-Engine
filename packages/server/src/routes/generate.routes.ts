@@ -1,6 +1,7 @@
 // ──────────────────────────────────────────────
 // Routes: Generation (SSE Streaming with Tool Use + Agent Pipeline)
 // ──────────────────────────────────────────────
+import { randomUUID } from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { join } from "path";
@@ -102,7 +103,12 @@ import {
 import { wrapContent } from "../services/prompt/format-engine.js";
 import { yieldToEventLoop, type ChatMessage, type LLMUsage } from "../services/llm/base-provider.js";
 import { executeToolCalls } from "../services/tools/tool-executor.js";
-import { createAgentPipeline, type ResolvedAgent, type AgentInjection } from "../services/agents/agent-pipeline.js";
+import {
+  createAgentPipeline,
+  planAgentBatches,
+  type ResolvedAgent,
+  type AgentInjection,
+} from "../services/agents/agent-pipeline.js";
 import { DATA_DIR } from "../utils/data-dir.js";
 import { executeAgent, normalizeAgentContextSize, resolveAgentResultType } from "../services/agents/agent-executor.js";
 import { matchCustomAgentActivation } from "./generate/agent-activation.js";
@@ -438,6 +444,7 @@ import {
   isBuiltInTextRewriteAgentType,
   mergePairedBuiltInRewriteAgents,
   PROSE_GUARDIAN_PENDING_MESSAGE,
+  REWRITE_AGENT_TYPES,
   shouldHoldForTextRewrite,
 } from "../services/generation/prose-guardian-settings.js";
 import {
@@ -3593,7 +3600,6 @@ export async function generateRoutes(app: FastifyInstance) {
         };
         const deferredParallelAgentEvents: Array<{ result: AgentResult; options?: { finalized?: boolean } }> = [];
         let deferParallelAgentEvents = false;
-        let parallelAgentStartPending = false;
         const sendAgentEventAfterMainStream = (result: AgentResult, options?: { finalized?: boolean }) => {
           if (deferParallelAgentEvents) {
             deferredParallelAgentEvents.push({ result, options });
@@ -3602,10 +3608,6 @@ export async function generateRoutes(app: FastifyInstance) {
           sendAgentEvent(result, options);
         };
         const flushDeferredParallelAgentEvents = () => {
-          if (parallelAgentStartPending) {
-            trySendSseEvent(reply, { type: "agent_start", data: { phase: "parallel" } });
-            parallelAgentStartPending = false;
-          }
           if (deferredParallelAgentEvents.length === 0) return;
           const events = deferredParallelAgentEvents.splice(0);
           for (const event of events) {
@@ -3623,6 +3625,26 @@ export async function generateRoutes(app: FastifyInstance) {
           (a) => a.phase === "post_processing" && resolveAgentResultType(a) === "text_rewrite",
         );
         const textRewriteRunAgents = mergePairedBuiltInRewriteAgents(textRewriteAgents);
+        // Map from the merged agent id back to every original built-in rewrite
+        // agent that got folded into it. Only the built-in rewrite trio
+        // (continuity, prose-guardian, html) participates in the merge; other
+        // rewrite agents pass through as-is. We use this map to fan agent_start
+        // / agent_completed widget events out to every visible sibling even
+        // though the server only makes one LLM call.
+        const mergedBuiltInRewriteMembers = new Map<
+          string,
+          Array<{ type: string; name: string; phase: string }>
+        >();
+        const builtInRewriteMembers = textRewriteAgents.filter((agent) => REWRITE_AGENT_TYPES.has(agent.type));
+        if (builtInRewriteMembers.length > 1) {
+          const mergedAgent = textRewriteRunAgents.find((agent) => agent.id === builtInRewriteMembers[0]!.id);
+          if (mergedAgent) {
+            mergedBuiltInRewriteMembers.set(
+              mergedAgent.id,
+              builtInRewriteMembers.map((agent) => ({ type: agent.type, name: agent.name, phase: agent.phase })),
+            );
+          }
+        }
         const textRewritePendingState = getTextRewritePendingState(textRewriteAgents);
         const holdForTextRewrite = shouldHoldForTextRewrite(textRewriteAgents);
         const textRewriteAgentIds = new Set(textRewriteAgents.map((a) => a.id));
@@ -3690,7 +3712,106 @@ export async function generateRoutes(app: FastifyInstance) {
         // Pre-generation prompt-patch agents read the assembled prompt here; this is overwritten
         // with the fitted provider prompt before each main model call.
         agentContext.memory._mainPromptPreview = promptPreviewForAgents(finalMessages);
-        const pipeline = createAgentPipeline(pipelineAgents, agentContext, sendAgentEventAfterMainStream);
+        // Emit per-agent agent_start events as each agent's LLM request is
+        // actually about to fire. This lets the client's tracker widgets flip
+        // from "queued" to "running" one at a time, matching the real request
+        // fan-out (isolated groups, batched groups, tool-agent concurrency
+        // limiter, etc.) instead of a phase-wide blast.
+        // Pre-compute batch grouping so the client can render batch clusters
+        // in the widget row the instant the queue arrives, in "queued" state,
+        // instead of waiting for the first agent_start to arrive and having
+        // widgets snap into a cluster mid-run. The pipeline reuses these ids
+        // at runtime (see `plannedBatchIds` below) so agent_start events
+        // land on the same clusters.
+        const mergedRewriteRepresentativeId = builtInRewriteMembers[0]?.id;
+        const plannedMergedGroups =
+          mergedRewriteRepresentativeId && mergedBuiltInRewriteMembers.has(mergedRewriteRepresentativeId)
+            ? [
+                {
+                  representativeId: mergedRewriteRepresentativeId,
+                  members: mergedBuiltInRewriteMembers
+                    .get(mergedRewriteRepresentativeId)!
+                    // Drop the first member — it's the representative itself and
+                    // is already in the runnable list under that id.
+                    .slice(1)
+                    .map((member) => ({
+                      agentType: member.type,
+                      agentName: member.name,
+                      phase: member.phase,
+                    })),
+                },
+              ]
+            : [];
+        const plannedWidgets = planAgentBatches(
+          [
+            ...pipelineAgents,
+            ...textRewriteRunAgents,
+            ...(lorebookKeeperAgent ? [lorebookKeeperAgent] : []),
+          ],
+          { mergedGroups: plannedMergedGroups },
+        );
+        const plannedBatchIdByAgentId = new Map<string, string>();
+        for (const widget of plannedWidgets) {
+          if (widget.batchId) plannedBatchIdByAgentId.set(widget.agentId, widget.batchId);
+        }
+        // Per-original-type map for emitAgentStart (both real agents and
+        // rewrite sibling widgets need to look up their planned batch id).
+        const plannedBatchIdByType = new Map<string, string>();
+        for (const widget of plannedWidgets) {
+          if (widget.batchId) plannedBatchIdByType.set(widget.agentType, widget.batchId);
+        }
+
+        const emitAgentStart = (start: {
+          agentType: string;
+          agentName: string;
+          phase: string;
+          batchId?: string | null;
+        }) => {
+          const resolvedBatchId = start.batchId ?? plannedBatchIdByType.get(start.agentType) ?? null;
+          trySendSseEvent(reply, {
+            type: "agent_start",
+            data: {
+              phase: start.phase,
+              agentType: start.agentType,
+              agentName: start.agentName,
+              batchId: resolvedBatchId,
+            },
+          });
+        };
+        const pipeline = createAgentPipeline(
+          pipelineAgents,
+          agentContext,
+          sendAgentEventAfterMainStream,
+          emitAgentStart,
+          plannedBatchIdByAgentId,
+        );
+
+        // Emit the full agent queue so the client can show per-agent progress widgets.
+        // For text-rewrite we send the ORIGINAL agents (Continuity Checker,
+        // Prose Guardian, …) — not the merged one — so each gets its own
+        // widget with the pre-planned batchId shared across siblings.
+        const agentQueueList = [
+          ...pipelineAgents,
+          ...textRewriteAgents,
+          ...(lorebookKeeperAgent ? [lorebookKeeperAgent] : []),
+        ].sort((a, b) => {
+          const phaseOrder: Record<string, number> = { pre_generation: 0, parallel: 1, post_processing: 2 };
+          return (phaseOrder[a.phase] ?? 3) - (phaseOrder[b.phase] ?? 3);
+        });
+        if (agentQueueList.length > 0) {
+          trySendSseEvent(reply, {
+            type: "agent_queue",
+            data: {
+              agents: agentQueueList.map((a) => ({
+                agentType: a.type,
+                agentName: a.name,
+                phase: a.phase,
+                batchId: plannedBatchIdByType.get(a.type) ?? null,
+              })),
+            },
+          });
+        }
+
         let directorSecretPlotResults: AgentResult[] = [];
         let directorSecretPlotArcForPrompt: unknown = directorSecretPlotMemory.overarchingArc;
 
@@ -5760,8 +5881,12 @@ export async function generateRoutes(app: FastifyInstance) {
         const hasParallelAgents = pipelineAgents.some((a) => a.phase === "parallel");
         let parallelPromise: Promise<AgentResult[]> | null = null;
         if (hasParallelAgents && !abortController.signal.aborted) {
+          // Emit agent_start immediately so the client can flip its parallel
+          // widgets from "queued" to "running" while the LLM calls are in
+          // flight. Only agent_result payloads are deferred — those carry
+          // data that must apply after the main stream settles.
+          trySendSseEvent(reply, { type: "agent_start", data: { phase: "parallel" } });
           deferParallelAgentEvents = true;
-          parallelAgentStartPending = true;
           parallelPromise = pipeline.runParallel();
         }
 
@@ -5996,6 +6121,15 @@ export async function generateRoutes(app: FastifyInstance) {
 
         const hasPostProcessingAgents = resolvedAgents.some((a) => a.phase === "post_processing");
         const combinedResponse = allResponses.join("\n\n");
+        // Signal the client that the main LLM call has produced its full
+        // response. Post-processing agents may still run for seconds after
+        // this, so the "done" event isn't a good proxy for main-generation
+        // completion — the widget would otherwise stay in "running" long
+        // after the model actually finished.
+        trySendSseEvent(reply, {
+          type: "main_generation_end",
+          data: { success: combinedResponse.length > 0 },
+        });
         let lorebookKeeperProcessedMessageId = "";
         // Illustration runs asynchronously so it doesn't block other agents.
         // (pendingIllustration is hoisted above the follow-up loop.)
@@ -6298,6 +6432,11 @@ export async function generateRoutes(app: FastifyInstance) {
 
             if (lorebookKeeperContext && processedMessageId) {
               lorebookKeeperProcessedMessageId = processedMessageId;
+              emitAgentStart({
+                agentType: lorebookKeeperAgent.type,
+                agentName: lorebookKeeperAgent.name,
+                phase: lorebookKeeperAgent.phase,
+              });
               const lorebookKeeperResult = await executeAgent(
                 lorebookKeeperAgent,
                 lorebookKeeperContext,
@@ -7846,6 +7985,37 @@ export async function generateRoutes(app: FastifyInstance) {
                   memory: { ...agentContext.memory, _agentResults: agentSummary },
                 };
 
+                // For a merged built-in rewrite agent (Continuity + Prose
+                // Guardian + …), we only fire ONE LLM request but the client
+                // has separate widgets for each original member. Emit
+                // agent_start per member with the SAME batchId so they render
+                // inside a single batch cluster.
+                const mergedMembers = mergedBuiltInRewriteMembers.get(textRewriteAgent.id);
+                if (mergedMembers && mergedMembers.length > 1) {
+                  // Reuse the id we announced in agent_queue so the widget
+                  // cluster the client rendered up-front is the same one
+                  // that flips to "running" now.
+                  const rewriteBatchId =
+                    plannedBatchIdByAgentId.get(textRewriteAgent.id) ??
+                    plannedBatchIdByType.get(mergedMembers[0]!.type) ??
+                    randomUUID();
+                  for (const member of mergedMembers) {
+                    emitAgentStart({
+                      agentType: member.type,
+                      agentName: member.name,
+                      phase: member.phase,
+                      batchId: rewriteBatchId,
+                    });
+                  }
+                } else {
+                  emitAgentStart({
+                    agentType: textRewriteAgent.type,
+                    agentName: textRewriteAgent.name,
+                    phase: textRewriteAgent.phase,
+                    batchId: null,
+                  });
+                }
+
                 const editorResult = await executeAgent(
                   textRewriteAgent,
                   editorContext,
@@ -7853,6 +8023,25 @@ export async function generateRoutes(app: FastifyInstance) {
                   textRewriteAgent.model,
                 );
                 sendAgentEvent(editorResult);
+
+                // sendAgentEvent above will flip the widget for editorResult.agentType
+                // to completed via agent_result. For merged runs, do the same for
+                // the sibling members explicitly — otherwise they'd stay "running"
+                // forever since no per-agent result carries their type.
+                if (mergedMembers && mergedMembers.length > 1) {
+                  for (const member of mergedMembers) {
+                    if (member.type === editorResult.agentType) continue;
+                    trySendSseEvent(reply, {
+                      type: "agent_completed",
+                      data: {
+                        agentType: member.type,
+                        agentName: member.name,
+                        phase: member.phase,
+                        success: editorResult.success,
+                      },
+                    });
+                  }
+                }
 
                 try {
                   await agentsStore.saveRun({

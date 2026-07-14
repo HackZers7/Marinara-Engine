@@ -412,6 +412,7 @@ function createPendingAgentWriteApproval(proposal: AgentWriteApprovalProposal): 
 }
 import { useChatStore } from "../stores/chat.store";
 import { useAgentStore } from "../stores/agent.store";
+import { MAIN_GENERATION_AGENT_TYPE, TRANSLATION_AGENT_TYPE } from "../components/agents/AgentTrackBar";
 import { useGameModeStore } from "../stores/game-mode.store";
 import { useGameStateStore } from "../stores/game-state.store";
 import { useUnoGameStore } from "../stores/uno-game.store";
@@ -606,6 +607,14 @@ function parseChatMetadata(metadata: Chat["metadata"] | string | null | undefine
     }
   }
   return metadata as Record<string, unknown>;
+}
+
+// Reads the chat's live auto-translate setting from the query cache. Used both
+// to seed the translation widget at generation start and to re-check the
+// setting at the end of the turn (the user may have toggled it off meanwhile).
+function isAutoTranslateEnabled(qc: QueryClient, chatId: string): boolean {
+  const chatData = qc.getQueryData<Chat>(chatKeys.detail(chatId));
+  return parseChatMetadata(chatData?.metadata).autoTranslate === true;
 }
 
 function parseStoredParameterRecord(raw: unknown): Record<string, unknown> | null {
@@ -996,6 +1005,12 @@ export function useGenerate() {
   const enqueuePendingAgentWriteApproval = useAgentStore((s) => s.enqueuePendingAgentWriteApproval);
   const setFailedAgentFailures = useAgentStore((s) => s.setFailedAgentFailures);
   const clearFailedAgentTypes = useAgentStore((s) => s.clearFailedAgentTypes);
+  const setAgentTrackQueue = useAgentStore((s) => s.setAgentTrackQueue);
+  const removeAgentTrackEntry = useAgentStore((s) => s.removeAgentTrackEntry);
+  const markAgentTrackRunning = useAgentStore((s) => s.markAgentTrackRunning);
+  const markAgentTrackCompleted = useAgentStore((s) => s.markAgentTrackCompleted);
+  const markAgentTrackFailed = useAgentStore((s) => s.markAgentTrackFailed);
+  const settleAgentTrackQueueAsFailed = useAgentStore((s) => s.settleAgentTrackQueueAsFailed);
 
   const generate = useCallback(
     async (params: {
@@ -1455,6 +1470,10 @@ export function useGenerate() {
                     detail: { chatId: params.chatId, phase: "thinking" },
                   }),
                 );
+                // First visible chunk = the main-response widget flips to
+                // "running". If there's no widget row (agents disabled), the
+                // store action is a no-op so this stays cheap.
+                markAgentTrackRunning(MAIN_GENERATION_AGENT_TYPE);
               }
 
               let chunk = event.data as string;
@@ -1474,6 +1493,60 @@ export function useGenerate() {
 
             case "agent_start": {
               setProcessing(true, params.chatId);
+              // Only per-agent events promote widgets — a bare phase-level
+              // agent_start is just a "phase begins" marker for the busy
+              // indicator, not a signal that every agent in the phase has
+              // started its LLM request. The pipeline emits per-agent events
+              // as each request actually fires, matching real fan-out.
+              const startData = event.data as { agentType?: string; batchId?: string | null };
+              if (startData.agentType) markAgentTrackRunning(startData.agentType, startData.batchId ?? null);
+              break;
+            }
+
+            case "agent_completed": {
+              // Sent by the server when a merged built-in rewrite call
+              // (Continuity + Prose Guardian + Immersive HTML) finishes: the
+              // sole agent_result only carries the type of the first member,
+              // so the server fans agent_completed out to every sibling so
+              // their widgets don't hang on "running".
+              const completed = event.data as { agentType?: string; success?: boolean };
+              if (completed.agentType) markAgentTrackCompleted(completed.agentType, completed.success ?? true);
+              break;
+            }
+
+            case "agent_queue": {
+              const data = event.data as {
+                agents?: Array<{ agentType: string; agentName: string; phase: string; batchId?: string | null }>;
+              };
+              if (data.agents && data.agents.length > 0) {
+                // Splice the main-response generation into the queue as a
+                // virtual agent so the widget row shows the whole turn's
+                // work, not just the sidecar agents. `main_generation`
+                // shares the parallel-phase slot in PHASE_ORDER, so it sits
+                // between pre-gen and post-processing.
+                const withMain = [
+                  ...data.agents,
+                  {
+                    agentType: MAIN_GENERATION_AGENT_TYPE,
+                    agentName: "Response",
+                    phase: "main_generation",
+                  },
+                ];
+                // Seed the auto-translation widget up front when the setting
+                // is on, so it rides the row through queued → running →
+                // completed like any agent. Translation itself runs at the
+                // very end of the turn (client-side), and the setting is
+                // re-checked then — if it was toggled off meanwhile the
+                // widget is removed. It sits last via the `translation` phase.
+                if (isAutoTranslateEnabled(qc, params.chatId)) {
+                  withMain.push({
+                    agentType: TRANSLATION_AGENT_TYPE,
+                    agentName: "Translation",
+                    phase: "translation",
+                  });
+                }
+                setAgentTrackQueue(params.chatId, withMain);
+              }
               break;
             }
 
@@ -1492,8 +1565,15 @@ export function useGenerate() {
             }
 
             case "progress": {
-              if (!isActiveChat()) break;
               const phase = (event.data as { phase?: string })?.phase;
+              // Flip the main-response widget to running as soon as the
+              // server signals it's about to hit the LLM — the first token
+              // can be seconds away and leaving the widget in "queued"
+              // while the model is already thinking looks broken.
+              if (phase === "generating") {
+                markAgentTrackRunning(MAIN_GENERATION_AGENT_TYPE);
+              }
+              if (!isActiveChat()) break;
               const labels: Record<string, string> = {
                 embedding: "Preparing context...",
                 assembling: "Building prompt...",
@@ -1558,6 +1638,12 @@ export function useGenerate() {
                 enqueuePendingAgentWriteApproval(createPendingAgentWriteApproval(writeApproval));
                 if (isActiveChat()) useUIStore.getState().openModal("agent-write-approval");
               }
+
+              // Update the tracker widget regardless of active chat — the
+              // AgentTrackBar decides its own visibility from agentTrackChatId,
+              // and gating this behind isActiveChat leaves widgets stuck at
+              // "running" if the user switches chats mid-generation.
+              markAgentTrackCompleted(result.agentType, result.success);
 
               // Only update agent/game/UI stores for the active chat so a
               // background generation doesn't corrupt what the user sees.
@@ -2216,6 +2302,7 @@ export function useGenerate() {
             case "agent_error": {
               const errData = event.data as { agentType: string; agentName?: string | null; error: string };
               const failure = toAgentFailure(errData);
+              markAgentTrackFailed(failure.agentType);
               setFailedAgentFailures([failure], params.chatId);
               showAgentFailuresError([failure], () => {
                 void retryAgentsRef.current?.(params.chatId, [failure.agentType]);
@@ -2367,11 +2454,27 @@ export function useGenerate() {
               break;
             }
 
+            case "main_generation_end": {
+              // Fired the instant the main LLM call returns its full text,
+              // BEFORE post-processing agents run. Flip the main-response
+              // widget to done here instead of waiting for "done" — the
+              // latter arrives only after every post-processing agent has
+              // finished, which can be seconds later and misrepresents the
+              // real state of the generation.
+              const success = (event.data as { success?: boolean })?.success ?? true;
+              markAgentTrackCompleted(MAIN_GENERATION_AGENT_TYPE, success);
+              break;
+            }
+
             case "done": {
               sawDoneEvent = true;
               if (spriteChangeReceived) {
                 qc.invalidateQueries({ queryKey: chatKeys.messages(params.chatId) });
               }
+              // Fallback: if the server closed the stream without emitting
+              // main_generation_end (older builds, error paths), settle the
+              // widget here based on whether we saw any tokens.
+              markAgentTrackCompleted(MAIN_GENERATION_AGENT_TYPE, receivedContent);
               // Final UI handoff happens after the typewriter drains below.
               // Clearing here makes the completed persisted message flash in
               // while tokens or a held rewrite are still being animated.
@@ -2526,6 +2629,13 @@ export function useGenerate() {
         if (stillOwnerAtCleanupStart) {
           useChatStore.getState().clearPerChatState(params.chatId);
           useChatStore.getState().setAbortController(params.chatId, null);
+        }
+
+        // If the user aborted (or the stream died without emitting agent_result
+        // for every queued agent), close out any still-running widgets so the
+        // AgentTrackBar can fade itself out instead of spinning forever.
+        if (abortController.signal.aborted) {
+          settleAgentTrackQueueAsFailed(params.chatId);
         }
 
         if (shouldRefreshGameState) {
@@ -2705,12 +2815,20 @@ export function useGenerate() {
           try {
             const chatData = qc.getQueryData<Chat>(chatKeys.detail(params.chatId));
             const meta = parseChatMetadata(chatData?.metadata);
+            // Re-check the live setting: the translation widget may have been
+            // seeded as "queued" at generation start, but the user could have
+            // toggled auto-translate off mid-turn. If so, drop the widget so
+            // it doesn't hang in the row.
+            if (!meta.autoTranslate) {
+              removeAgentTrackEntry(params.chatId, TRANSLATION_AGENT_TYPE);
+            }
             if (meta.autoTranslate) {
               const store = useTranslationStore.getState();
               const chatSystemPrompt =
                 typeof meta.translationPrompt === "string" && meta.translationPrompt.trim().length > 0
                   ? meta.translationPrompt
                   : store.config.systemPrompt;
+              const translationJobs: Array<Promise<boolean>> = [];
               for (const [id, msg] of persistedMessages) {
                 const textToTranslate =
                   chatData?.mode === "game" ? stripGmTagsKeepReadables(msg.content ?? "").trim() : (msg.content ?? "");
@@ -2721,7 +2839,7 @@ export function useGenerate() {
                   !store.hiddenTranslationIds[id]
                 ) {
                   store.setTranslating(id, true);
-                  api
+                  const job = api
                     .post<{ translatedText: string }>("/translate", {
                       text: textToTranslate,
                       provider: store.config.provider,
@@ -2741,16 +2859,44 @@ export function useGenerate() {
                           translationHidden: false,
                         })
                         .catch(() => {});
+                      return true;
                     })
                     .catch(() => {
                       store.setTranslating(id, false);
+                      return false;
                     });
+                  translationJobs.push(job);
                 }
+              }
+              // The translation widget was seeded as "queued" at generation
+              // start (when the setting was on). Drive it through its final
+              // stages now:
+              //  • work to do  → flip to running, then completed/failed when
+              //    the jobs settle.
+              //  • nothing to translate (already-translated / no new assistant
+              //    messages) → remove the widget so it doesn't hang in queued
+              //    and block the bar from collapsing.
+              // markAgentTrackRunning is a no-op when the widget wasn't seeded
+              // (turn had no agents, so no row exists) — matching the rule
+              // that the bar shouldn't appear when there are no agents.
+              if (translationJobs.length > 0) {
+                markAgentTrackRunning(TRANSLATION_AGENT_TYPE);
+                void Promise.all(translationJobs).then((outcomes) => {
+                  const anySuccess = outcomes.some(Boolean);
+                  markAgentTrackCompleted(TRANSLATION_AGENT_TYPE, anySuccess);
+                });
+              } else {
+                removeAgentTrackEntry(params.chatId, TRANSLATION_AGENT_TYPE);
               }
             }
           } catch {
             /* non-critical — don't block generation cleanup */
           }
+        } else {
+          // No content was produced this turn, so the end-of-turn translation
+          // pass never runs. Drop the speculatively-seeded translation widget
+          // so it doesn't hang in "queued" and keep the bar from collapsing.
+          removeAgentTrackEntry(params.chatId, TRANSLATION_AGENT_TYPE);
         }
       }
       return receivedContent || passiveStreamRecovered;
@@ -2792,6 +2938,12 @@ export function useGenerate() {
       enqueuePendingAgentWriteApproval,
       clearFailedAgentTypes,
       setFailedAgentFailures,
+      setAgentTrackQueue,
+      removeAgentTrackEntry,
+      markAgentTrackRunning,
+      markAgentTrackCompleted,
+      markAgentTrackFailed,
+      settleAgentTrackQueueAsFailed,
     ],
   );
 
@@ -2850,6 +3002,34 @@ export function useGenerate() {
               break;
             }
 
+            case "agent_queue": {
+              const data = event.data as {
+                agents?: Array<{ agentType: string; agentName: string; phase: string; batchId?: string | null }>;
+              };
+              if (data.agents && data.agents.length > 0) {
+                setAgentTrackQueue(chatId, data.agents);
+              }
+              break;
+            }
+
+            case "agent_start": {
+              // Retry route ships one bare agent_start { phase: "retry" }
+              // followed by per-agent starts. Only the per-agent events flip
+              // widgets to running — the bare phase event is just a marker.
+              const startData = event.data as { agentType?: string; batchId?: string | null };
+              if (startData.agentType) markAgentTrackRunning(startData.agentType, startData.batchId ?? null);
+              break;
+            }
+
+            case "agent_completed": {
+              // Fan-out completion for the sibling members of a merged
+              // built-in rewrite call. See the main-stream handler above for
+              // the full rationale.
+              const completed = event.data as { agentType?: string; success?: boolean };
+              if (completed.agentType) markAgentTrackCompleted(completed.agentType, completed.success ?? true);
+              break;
+            }
+
             case "agent_result": {
               const result = event.data as {
                 agentType: string;
@@ -2888,6 +3068,7 @@ export function useGenerate() {
                 }
               }
 
+              markAgentTrackCompleted(result.agentType, result.success);
               addResult(result.agentType, {
                 agentId: result.agentType,
                 agentType: result.agentType,
@@ -3100,6 +3281,7 @@ export function useGenerate() {
               const errData = event.data as { agentType: string; agentName?: string | null; error: string };
               hasError = true;
               const failure = toAgentFailure(errData);
+              markAgentTrackFailed(failure.agentType);
               setFailedAgentFailures([failure], chatId);
               showAgentFailuresError([failure], () => {
                 void retryAgentsRef.current?.(chatId, [failure.agentType], options);
@@ -3145,6 +3327,11 @@ export function useGenerate() {
         if (useChatStore.getState().abortControllers.get(chatId) === abortController) {
           useChatStore.getState().setAbortController(chatId, null);
         }
+        // Close out still-running/queued widgets so the AgentTrackBar can fade
+        // itself out instead of spinning forever after an abort or stream drop.
+        if (abortController.signal.aborted) {
+          settleAgentTrackQueueAsFailed(chatId);
+        }
         if (isTrackerRetry) useGameStateStore.getState().clearRefreshingChat(chatId);
         if (hasError && isActiveChat()) {
           void refreshMessagesAuthoritatively(qc, chatId);
@@ -3172,6 +3359,11 @@ export function useGenerate() {
       setFailedAgentFailures,
       setProcessing,
       qc,
+      setAgentTrackQueue,
+      markAgentTrackRunning,
+      markAgentTrackCompleted,
+      markAgentTrackFailed,
+      settleAgentTrackQueueAsFailed,
     ],
   );
 
