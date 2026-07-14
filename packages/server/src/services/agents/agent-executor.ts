@@ -952,8 +952,22 @@ export async function executeAgentBatch(
   context: AgentContext,
   provider: BaseLLMProvider,
   model: string,
+  // Fired inside the concurrency limiter, immediately before we hand this
+  // isolated agent to `executeAgent`. This is the closest we can get to
+  // "the LLM request is going out now" without touching provider code, so
+  // widgets flip to "running" only when the worker actually schedules them
+  // — not while they're still waiting behind AGENT_BATCH_FALLBACK_MAX_CONCURRENT.
+  onIsolatedStart?: (config: AgentExecConfig) => void,
 ): Promise<AgentResult[]> {
   if (configs.length === 0) return [];
+  const runIsolated = (config: AgentExecConfig) => {
+    try {
+      onIsolatedStart?.(config);
+    } catch {
+      /* swallow */
+    }
+    return executeAgent(config, context, provider, model);
+  };
   const isolatedConfigs = configs.filter(shouldRunAgentIndividually);
   if (isolatedConfigs.length === configs.length) {
     logger.info(
@@ -971,7 +985,7 @@ export async function executeAgentBatch(
     const isolatedSettled = await settleAgentJobsWithConcurrencyLimit(
       isolatedConfigs,
       AGENT_BATCH_FALLBACK_MAX_CONCURRENT,
-      (config) => executeAgent(config, context, provider, model),
+      runIsolated,
     );
     return isolatedSettled.map((entry, index) =>
       entry.status === "fulfilled"
@@ -991,10 +1005,10 @@ export async function executeAgentBatch(
     );
     const batchedConfigs = configs.filter((config) => !shouldRunAgentIndividually(config));
     const [batchedResults, isolatedSettled] = await Promise.all([
-      executeAgentBatch(batchedConfigs, context, provider, model),
-      settleAgentJobsWithConcurrencyLimit(isolatedConfigs, AGENT_BATCH_FALLBACK_MAX_CONCURRENT, (config) =>
-        executeAgent(config, context, provider, model),
-      ),
+      // Note: batchedConfigs is guaranteed non-isolated here, so onIsolatedStart
+      // would never fire from the nested call — but pass it through for symmetry.
+      executeAgentBatch(batchedConfigs, context, provider, model, onIsolatedStart),
+      settleAgentJobsWithConcurrencyLimit(isolatedConfigs, AGENT_BATCH_FALLBACK_MAX_CONCURRENT, runIsolated),
     ]);
     const isolatedResults = isolatedSettled.map((entry, index) =>
       entry.status === "fulfilled"
@@ -1482,7 +1496,7 @@ function buildInvalidJsonRetryMessages(
   ];
 }
 
-function shouldRunAgentIndividually(config: Pick<AgentExecConfig, "type" | "settings">): boolean {
+export function shouldRunAgentIndividually(config: Pick<AgentExecConfig, "type" | "settings">): boolean {
   // These agents either need compact prompts or carry large private extras that
   // must not be merged into unrelated batched agent requests.
   return (

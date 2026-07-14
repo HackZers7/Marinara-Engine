@@ -68,6 +68,23 @@ export interface AgentDebugEntry {
   timestamp: number;
 }
 
+export type AgentTrackStatus = "queued" | "running" | "completed" | "failed";
+
+export interface AgentTrackEntry {
+  agentType: string;
+  agentName: string;
+  phase: string;
+  status: AgentTrackStatus;
+  /** Stable index in execution order — assigned when the queue is populated. */
+  order: number;
+  /**
+   * Shared identifier for agents that fulfill a single batched LLM request.
+   * Null for agents that fire their own request. Assigned when the server
+   * emits `agent_start` — unknown until then.
+   */
+  batchId: string | null;
+}
+
 function logAgentDebugToBrowserConsole(entry: AgentDebugEntry) {
   const call = entry.agentCall;
   if (!call) {
@@ -148,6 +165,11 @@ interface AgentState {
   pendingCardUpdates: PendingCardUpdate[];
   pendingAgentWriteApprovals: PendingAgentWriteApproval[];
 
+  /** Per-agent tracking queue for the circular progress widgets above the chat. */
+  agentTrackQueue: AgentTrackEntry[];
+  /** Chat ID the current track queue belongs to. */
+  agentTrackChatId: string | null;
+
   // Actions
   setActiveAgents: (agents: string[]) => void;
   setProcessing: (processing: boolean, chatId?: string | null) => void;
@@ -173,7 +195,6 @@ interface AgentState {
   setMariChips: (chatId: string | null, chips: MariSuggestionChip[]) => void;
   clearMariChips: () => void;
   setMariPlan: (chatId: string | null, steps: MariGuidedPlanStep[]) => void;
-  /** Records the answer for the current step and advances the cursor. Returns "complete" once past the last step. */
   recordMariPlanAnswer: (fieldKey: string, value: string) => "advanced" | "complete";
   clearMariPlan: () => void;
   setYoutubePlay: (play: { searchQuery: string; mood: string }) => void;
@@ -188,6 +209,35 @@ interface AgentState {
   enqueuePendingAgentWriteApproval: (entry: PendingAgentWriteApproval) => void;
   dismissPendingAgentWriteApproval: (id: string) => void;
   clearPendingAgentWriteApprovals: () => void;
+  setAgentTrackQueue: (
+    chatId: string | null,
+    agents: Array<{ agentType: string; agentName: string; phase: string; batchId?: string | null }>,
+  ) => void;
+  /**
+   * Append virtual widgets (e.g. main-response generation, auto-translation)
+   * to the current queue. No-op when chatId mismatches or the queue is empty
+   * — virtual widgets only make sense as siblings of real agent widgets.
+   * Entries whose agentType is already present are skipped so this is safe
+   * to call multiple times.
+   */
+  addAgentTrackEntries: (
+    chatId: string,
+    agents: Array<{ agentType: string; agentName: string; phase: string; status?: AgentTrackStatus }>,
+  ) => void;
+  /**
+   * Remove a single widget from the queue by agentType. Used when a widget
+   * that was seeded speculatively (e.g. the auto-translation widget) turns
+   * out to be unnecessary — the setting was toggled off before the work ran.
+   * No-op when chatId mismatches.
+   */
+  removeAgentTrackEntry: (chatId: string, agentType: string) => void;
+  markAgentTrackRunning: (agentType: string, batchId?: string | null) => void;
+  markAgentTrackPhaseRunning: (phase: string) => void;
+  markAgentTrackCompleted: (agentType: string, success: boolean) => void;
+  markAgentTrackFailed: (agentType: string) => void;
+  /** Mark every queued/running entry as failed — used when generation aborts. */
+  settleAgentTrackQueueAsFailed: (chatId: string) => void;
+  clearAgentTrackQueue: () => void;
   reset: () => void;
 }
 
@@ -220,6 +270,8 @@ type AgentDataState = Pick<
   | "localMusicVolume"
   | "pendingCardUpdates"
   | "pendingAgentWriteApprovals"
+  | "agentTrackQueue"
+  | "agentTrackChatId"
 >;
 
 function createInitialAgentDataState(): AgentDataState {
@@ -251,6 +303,8 @@ function createInitialAgentDataState(): AgentDataState {
     localMusicVolume: null,
     pendingCardUpdates: [],
     pendingAgentWriteApprovals: [],
+    agentTrackQueue: [],
+    agentTrackChatId: null,
   };
 }
 
@@ -430,6 +484,131 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       pendingAgentWriteApprovals: s.pendingAgentWriteApprovals.filter((entry) => entry.id !== id),
     })),
   clearPendingAgentWriteApprovals: () => set({ pendingAgentWriteApprovals: [] }),
+
+  setAgentTrackQueue: (chatId, agents) =>
+    set({
+      agentTrackChatId: chatId,
+      agentTrackQueue: agents.map((a, index) => ({
+        agentType: a.agentType,
+        agentName: a.agentName,
+        phase: a.phase,
+        status: "queued" as const,
+        order: index,
+        // The server can pre-compute batch clustering in agent_queue so the
+        // UI shows the correct batch grouping immediately in "queued" state
+        // rather than waiting for the first agent_start to arrive.
+        batchId: a.batchId ?? null,
+      })),
+    }),
+
+  addAgentTrackEntries: (chatId, agents) =>
+    set((s) => {
+      if (s.agentTrackChatId !== chatId) return {};
+      if (s.agentTrackQueue.length === 0) return {};
+      const existing = new Set(s.agentTrackQueue.map((e) => e.agentType));
+      const fresh = agents.filter((a) => !existing.has(a.agentType));
+      if (fresh.length === 0) return {};
+      const nextOrder = s.agentTrackQueue.reduce((m, e) => Math.max(m, e.order), -1) + 1;
+      return {
+        agentTrackQueue: [
+          ...s.agentTrackQueue,
+          ...fresh.map((a, i) => ({
+            agentType: a.agentType,
+            agentName: a.agentName,
+            phase: a.phase,
+            status: (a.status ?? "queued") as AgentTrackStatus,
+            order: nextOrder + i,
+            batchId: null,
+          })),
+        ],
+      };
+    }),
+
+  removeAgentTrackEntry: (chatId, agentType) =>
+    set((s) => {
+      if (s.agentTrackChatId !== chatId) return {};
+      if (!s.agentTrackQueue.some((e) => e.agentType === agentType)) return {};
+      return {
+        agentTrackQueue: s.agentTrackQueue.filter((e) => e.agentType !== agentType),
+      };
+    }),
+
+  markAgentTrackRunning: (agentType, batchId = null) =>
+    set((s) => ({
+      agentTrackQueue: s.agentTrackQueue.map((entry) =>
+        entry.agentType === agentType && entry.status === "queued"
+          ? {
+              ...entry,
+              status: "running" as const,
+              // Keep the id the server pre-planned in agent_queue when
+              // present — the runtime one that comes back on agent_start
+              // matches by design. Fall back to the runtime id only if the
+              // entry didn't have one to begin with.
+              batchId: entry.batchId ?? batchId,
+            }
+          : entry,
+      ),
+    })),
+
+  markAgentTrackPhaseRunning: (phase) =>
+    set((s) => {
+      // The server runs agents within a phase concurrently (grouped by
+      // provider+model). Promote every queued agent in this phase, not just
+      // the first — otherwise the widgets look stuck while the batch runs.
+      // The special value "retry" (emitted by the retry-agents route) promotes
+      // every queued entry regardless of its real phase, since the retry route
+      // fires them together.
+      const matches = (entryPhase: string) => phase === "retry" || entryPhase === phase;
+      const hasQueued = s.agentTrackQueue.some((e) => matches(e.phase) && e.status === "queued");
+      if (!hasQueued) return {};
+      return {
+        agentTrackQueue: s.agentTrackQueue.map((entry) =>
+          matches(entry.phase) && entry.status === "queued"
+            ? { ...entry, status: "running" as const }
+            : entry,
+        ),
+      };
+    }),
+
+  markAgentTrackCompleted: (agentType, success) =>
+    set((s) => ({
+      // Only flip the addressed entry. The server drives phase transitions via
+      // agent_start events, so the store must not "promote" siblings on its own.
+      agentTrackQueue: s.agentTrackQueue.map((entry) =>
+        entry.agentType === agentType && entry.status !== "completed" && entry.status !== "failed"
+          ? { ...entry, status: success ? ("completed" as const) : ("failed" as const) }
+          : entry,
+      ),
+    })),
+
+  markAgentTrackFailed: (agentType) =>
+    set((s) => ({
+      agentTrackQueue: s.agentTrackQueue.map((entry) =>
+        entry.agentType === agentType && entry.status !== "completed" && entry.status !== "failed"
+          ? { ...entry, status: "failed" as const }
+          : entry,
+      ),
+    })),
+
+  settleAgentTrackQueueAsFailed: (chatId) =>
+    set((s) => {
+      // Ignore stale calls from an unrelated chat's generation cleanup — the
+      // active queue may already belong to another chat by then.
+      if (s.agentTrackChatId !== chatId) return {};
+      const hasUnfinished = s.agentTrackQueue.some(
+        (e) => e.status === "queued" || e.status === "running",
+      );
+      if (!hasUnfinished) return {};
+      return {
+        agentTrackQueue: s.agentTrackQueue.map((entry) =>
+          entry.status === "queued" || entry.status === "running"
+            ? { ...entry, status: "failed" as const }
+            : entry,
+        ),
+      };
+    }),
+
+  clearAgentTrackQueue: () => set({ agentTrackQueue: [], agentTrackChatId: null }),
 
   reset: () => set(createInitialAgentDataState()),
 }));
