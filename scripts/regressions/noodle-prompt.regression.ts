@@ -2,17 +2,20 @@ import assert from "node:assert/strict";
 import { DEFAULT_NOODLE_SETTINGS, noodleRefreshSchema } from "../../packages/shared/src/schemas/noodle.schema.js";
 import { canManageNoodleReply } from "../../packages/shared/src/utils/noodle-interactions.js";
 import type { NoodleAccount, NoodleInteraction, NoodlePost } from "../../packages/shared/src/types/noodle.js";
-import { LIMITS } from "../../packages/shared/src/constants/defaults.js";
+import { LIMITS, PROFESSOR_MARI_ID } from "../../packages/shared/src/constants/defaults.js";
 import {
   canGenerateNoodleActivityForAccountKind,
+  composeNoodleTimelineSystemPrompt,
   formatNoodleTimelineForPrompt,
   noodleLorebookTokenBudget,
   noodlePastMemoryCutoff,
   noodlePastMemorySampleSize,
   noodlePersonaCommentPostIds,
   noodleTimelineVoiceDefaultText,
+  NOODLE_ADULT_PLATFORM_POLICY,
   NOODLE_CONGRUENCY_INSTRUCTION,
   NOODLE_CREATIVE_FORMAT_INSTRUCTIONS,
+  noodleCreativeFormatInstructions,
   NOODLE_LEGACY_PAST_MEMORY_INCLUSION_CHANCE,
   NOODLE_LEGACY_PAST_MEMORY_MAX_ITEMS,
   NOODLE_LEGACY_RECALLED_MEMORY_INSTRUCTION,
@@ -21,11 +24,17 @@ import {
   NOODLE_RANDOM_USER_TREATMENT_INSTRUCTION,
   NOODLE_RECALLED_MEMORY_INSTRUCTION,
   NOODLE_TONE_INSTRUCTIONS,
+  NOODLE_TIMELINE_BASE_DEFAULT_PROMPT,
   noodleTimelineFeatureInstructions,
   sampleNoodlePastMemories,
   sampleNoodlePastMemoriesWeighted,
 } from "../../packages/server/src/services/noodle/noodle-prompt.js";
 import { chooseNoodleParticipantAccounts } from "../../packages/server/src/services/noodle/noodle-participant-selection.js";
+import { noodleAccountsNeedingProfiles } from "../../packages/server/src/services/noodle/noodle-profile-selection.js";
+import {
+  buildNoodleCarryoverBlock,
+  NOODLE_CARRYOVER_TOKEN_BUDGET,
+} from "../../packages/server/src/services/noodle/noodle-context.js";
 import { canCreateGeneratedNoodleInteraction } from "../../packages/server/src/services/noodle/noodle-interaction-policy.js";
 import { parseNoodleGeneratedProfiles } from "../../packages/server/src/services/noodle/noodle-generated-profiles.js";
 import {
@@ -33,7 +42,10 @@ import {
   validateNoodleGeneratedRefresh,
 } from "../../packages/server/src/services/noodle/noodle-generated-refresh.js";
 import { normalizeNoodleImagePrompt } from "../../packages/server/src/services/noodle/noodle-image-prompt.js";
-import { NOODLE_IMAGE_POST } from "../../packages/server/src/services/prompt-overrides/registry/noodle.js";
+import {
+  NOODLE_IMAGE_POST,
+  NOODLE_TIMELINE_BASE,
+} from "../../packages/server/src/services/prompt-overrides/registry/noodle.js";
 import { collectNoodlePriorityAccountIds } from "../../packages/server/src/routes/noodle.routes.js";
 import { NOODLE_TIMELINE_VOICE } from "../../packages/server/src/services/prompt-overrides/registry/noodle.js";
 
@@ -59,12 +71,32 @@ const participantSettings = {
   participantMax: 2,
 };
 const participantAccounts = [makeAccount("alpha"), makeAccount("beta"), makeAccount("gamma")];
+const professorMariAccount = { ...makeAccount("professor-mari"), entityId: PROFESSOR_MARI_ID };
 const selectionPersona: NoodleAccount = {
   ...makeAccount("persona-account"),
   kind: "persona",
   entityId: "persona-entity",
   handle: "mari",
 };
+
+const largeInvitedRoster = Array.from({ length: 200 }, (_, index) => makeAccount(`invited-${index}`));
+const selectedLargeRosterParticipants = chooseNoodleParticipantAccounts({
+  accounts: largeInvitedRoster,
+  settings: participantSettings,
+  selectedGroupCharacterIds: new Set(),
+  random: () => 0,
+});
+assert.equal(selectedLargeRosterParticipants.length, 2);
+const selectedWithExistingProfile = selectedLargeRosterParticipants.map((account, index) => ({
+  ...account,
+  settings: index === 0 ? { profileGenerated: true } : {},
+}));
+const largeRosterProfileTargets = noodleAccountsNeedingProfiles(selectedWithExistingProfile);
+assert.equal(largeRosterProfileTargets.length, 1);
+assert.ok(selectedLargeRosterParticipants.some((account) => account.id === largeRosterProfileTargets[0]!.id));
+assert.ok(
+  largeRosterProfileTargets.every((account) => selectedLargeRosterParticipants.some((selected) => selected.id === account.id)),
+);
 assert.deepEqual(
   [
     ...collectNoodlePriorityAccountIds({
@@ -137,6 +169,22 @@ assert.deepEqual(
     random: () => 0,
   }).map((account) => account.id),
   ["alpha", "gamma"],
+);
+assert.equal(
+  chooseNoodleParticipantAccounts({
+    accounts: [professorMariAccount],
+    settings: { ...participantSettings, allowProfessorMari: false },
+    selectedGroupCharacterIds: new Set(),
+  }).length,
+  0,
+);
+assert.equal(
+  chooseNoodleParticipantAccounts({
+    accounts: [professorMariAccount],
+    settings: participantSettings,
+    selectedGroupCharacterIds: new Set(),
+  })[0]?.entityId,
+  PROFESSOR_MARI_ID,
 );
 
 const randomParticipant = { ...makeAccount("ambient"), kind: "random_user" as const };
@@ -244,6 +292,28 @@ assert.match(
   NOODLE_PERSONA_AUTHORSHIP_INSTRUCTION,
   /Never generate posts, replies, likes, reposts, poll votes, or follows/u,
 );
+assert.match(
+  NOODLE_TIMELINE_BASE_DEFAULT_PROMPT,
+  /^You write a fake social media timeline for Marinara Engine's in-app parody site called Noodle\./u,
+);
+assert.equal(NOODLE_TIMELINE_BASE_DEFAULT_PROMPT.includes(NOODLE_ADULT_PLATFORM_POLICY), true);
+assert.equal(NOODLE_TIMELINE_BASE_DEFAULT_PROMPT.includes(NOODLE_PERSONA_AUTHORSHIP_INSTRUCTION), true);
+assert.match(NOODLE_TIMELINE_BASE_DEFAULT_PROMPT, /Return JSON only\. No prose outside the JSON object\.$/u);
+assert.equal(NOODLE_TIMELINE_BASE.defaultBuilder({}), NOODLE_TIMELINE_BASE_DEFAULT_PROMPT);
+const timelineVoiceTail = "- Distinct final timeline voice instruction.";
+const composedTimelineSystemPrompt = composeNoodleTimelineSystemPrompt(
+  NOODLE_TIMELINE_BASE_DEFAULT_PROMPT,
+  timelineVoiceTail,
+);
+assert.equal(composedTimelineSystemPrompt.endsWith(timelineVoiceTail), true);
+assert.ok(
+  composedTimelineSystemPrompt.indexOf(NOODLE_PERSONA_AUTHORSHIP_INSTRUCTION) <
+    composedTimelineSystemPrompt.indexOf(timelineVoiceTail),
+);
+assert.equal(
+  composeNoodleTimelineSystemPrompt("Replace the base prompt entirely.", timelineVoiceTail),
+  `Replace the base prompt entirely.\n${timelineVoiceTail}`,
+);
 assert.equal(NOODLE_CREATIVE_FORMAT_INSTRUCTIONS.length, 3);
 assert.match(NOODLE_CREATIVE_FORMAT_INSTRUCTIONS[0], /create polls in their own posts and vote in polls/u);
 assert.match(NOODLE_CREATIVE_FORMAT_INSTRUCTIONS[0], /polls are optional, not a quota/u);
@@ -252,6 +322,8 @@ assert.match(NOODLE_CREATIVE_FORMAT_INSTRUCTIONS[1], /not every post or reply ne
 assert.match(NOODLE_CREATIVE_FORMAT_INSTRUCTIONS[2], /allowed to be assholes to each other/u);
 assert.match(NOODLE_CREATIVE_FORMAT_INSTRUCTIONS[2], /revive old grievances, form rivalries/u);
 assert.match(NOODLE_CREATIVE_FORMAT_INSTRUCTIONS[2], /permission, not a quota/u);
+assert.doesNotMatch(noodleCreativeFormatInstructions(false).join("\n"), /random users?/iu);
+assert.match(noodleCreativeFormatInstructions(false)[0] ?? "", /^- Characters may create polls/u);
 
 assert.equal(NOODLE_TONE_INSTRUCTIONS.length, 2);
 assert.match(NOODLE_TONE_INSTRUCTIONS[0], /must come from each character's own Personality\/Description\/Backstory/u);
@@ -351,7 +423,7 @@ assert.deepEqual(
   ["old-post-with-new-comment"],
 );
 
-const activeAccountsInstruction = "- Use only the active accounts listed by entityId. Do not invent accounts.";
+const activeAccountsInstruction = "- Use only the active accounts listed by @handle. Do not invent accounts.";
 const randomUserSupportingInstruction =
   "- Character accounts are the primary cast. Random-user activity should be occasional supporting texture and must never dominate the generated posts or interactions.";
 const randomUserParodyInstruction =
@@ -392,10 +464,10 @@ assert.deepEqual(
 );
 
 const resilientRefresh = parseNoodleGeneratedRefresh({
-  posts: [{ authorEntityId: "entity-alpha", content: "A valid post." }],
+  posts: [{ authorHandle: "alpha", content: "A valid post." }],
   interactions: [
     {
-      actorEntityId: "entity-beta",
+      actorHandle: "beta",
       targetPostId: "post-1",
       type: "like",
       parentInteractionId: "comment-that-must-not-be-here",
@@ -410,34 +482,34 @@ assert.deepEqual(resilientRefresh.rejected, [{ collection: "interactions", index
 assert.equal(
   validateNoodleGeneratedRefresh(
     { posts: [], interactions: [], follows: [], digests: [] },
-    new Set(["entity-alpha"]),
-    new Set(["entity-alpha", "persona"]),
+    new Set(["alpha"]),
+    new Set(["alpha", "persona"]),
   ),
   "the response contained no timeline activity",
 );
 assert.equal(
   validateNoodleGeneratedRefresh(
     {
-      posts: [{ authorEntityId: "persona", content: "The model must not post as the user.", attachGalleryImage: false }],
+      posts: [{ authorHandle: "persona", content: "The model must not post as the user.", attachGalleryImage: false }],
       interactions: [],
       follows: [],
       digests: [],
     },
-    new Set(["entity-alpha"]),
-    new Set(["entity-alpha", "persona"]),
+    new Set(["alpha"]),
+    new Set(["alpha", "persona"]),
   ),
-  "the response used no selected participant entityId",
+  "the response used no selected participant handle",
 );
 assert.equal(
   validateNoodleGeneratedRefresh(
     {
-      posts: [{ authorEntityId: "entity-alpha", content: "A valid cast post.", attachGalleryImage: false }],
+      posts: [{ authorHandle: "alpha", content: "A valid cast post.", attachGalleryImage: false }],
       interactions: [],
       follows: [],
       digests: [],
     },
-    new Set(["entity-alpha"]),
-    new Set(["entity-alpha", "persona"]),
+    new Set(["alpha"]),
+    new Set(["alpha", "persona"]),
   ),
   null,
 );
@@ -564,14 +636,29 @@ assert.equal(sampleNoodlePastMemoriesWeighted(["a", "b"], 0, () => 1, () => 0.5)
 
 // noodleLorebookTokenBudget scales with active character count but is floored and capped so a
 // single-character Noodle refresh never dips below the floor, and a large roster never exceeds
-// the same global default a normal chat turn would get.
+// Noodle's explicit 8k hard ceiling.
 assert.equal(noodleLorebookTokenBudget(0), LIMITS.NOODLE_LOREBOOK_TOKEN_BUDGET_FLOOR);
 assert.equal(noodleLorebookTokenBudget(1), LIMITS.NOODLE_LOREBOOK_TOKEN_BUDGET_FLOOR);
 assert.equal(
   noodleLorebookTokenBudget(10),
-  Math.min(LIMITS.DEFAULT_LOREBOOK_TOKEN_BUDGET, 10 * LIMITS.NOODLE_LOREBOOK_TOKEN_BUDGET_PER_ACCOUNT),
+  Math.min(LIMITS.NOODLE_LOREBOOK_TOKEN_BUDGET_MAX, 10 * LIMITS.NOODLE_LOREBOOK_TOKEN_BUDGET_PER_ACCOUNT),
 );
-assert.equal(noodleLorebookTokenBudget(100), LIMITS.DEFAULT_LOREBOOK_TOKEN_BUDGET);
+assert.equal(LIMITS.NOODLE_LOREBOOK_TOKEN_BUDGET_MAX, 8192);
+assert.equal(noodleLorebookTokenBudget(100), LIMITS.NOODLE_LOREBOOK_TOKEN_BUDGET_MAX);
+
+const oversizedCarryoverDigests = Array.from({ length: 50 }, (_, index) => ({
+  content: `newest-${index}-${"x".repeat(1180)}`,
+}));
+const boundedCarryoverBlock = buildNoodleCarryoverBlock(oversizedCarryoverDigests, 50, "xml");
+assert.ok(boundedCarryoverBlock);
+assert.ok(boundedCarryoverBlock.length <= NOODLE_CARRYOVER_TOKEN_BUDGET * 4);
+assert.match(boundedCarryoverBlock, /newest-0-/u);
+assert.doesNotMatch(boundedCarryoverBlock, /newest-49-/u);
+assert.ok(boundedCarryoverBlock.indexOf("newest-1-") < boundedCarryoverBlock.indexOf("newest-0-"));
+assert.equal(
+  buildNoodleCarryoverBlock([{ content: "newest" }, { content: "older\nwith detail" }], 2, "none"),
+  "- older\nwith detail\n- newest",
+);
 
 // noodleTimelineVoiceDefaultText(enhanced) feeds the "Noodle Timeline Voice & Tone" prompt
 // override default (NOODLE_TIMELINE_VOICE.defaultBuilder). `enhanced=false` (the setting's
@@ -591,9 +678,17 @@ const expectedEnhancedVoiceText = [
 ].join("\n");
 assert.equal(noodleTimelineVoiceDefaultText(false), expectedLegacyVoiceText);
 assert.equal(noodleTimelineVoiceDefaultText(true), expectedEnhancedVoiceText);
+assert.equal(
+  noodleTimelineVoiceDefaultText(false, false),
+  [NOODLE_LEGACY_TONE_INSTRUCTION, ...noodleCreativeFormatInstructions(false)].join("\n"),
+);
 assert.equal(NOODLE_TIMELINE_VOICE.key, "noodle.timelineVoice");
 assert.equal(NOODLE_TIMELINE_VOICE.defaultBuilder({ enhanced: "false" }), expectedLegacyVoiceText);
 assert.equal(NOODLE_TIMELINE_VOICE.defaultBuilder({ enhanced: "true" }), expectedEnhancedVoiceText);
+assert.doesNotMatch(
+  NOODLE_TIMELINE_VOICE.defaultBuilder({ enhanced: "false", allowRandomUsers: "false" }),
+  /random users?/iu,
+);
 assert.equal(NOODLE_TIMELINE_VOICE.defaultBuilder({ enhanced: "garbage" }), expectedLegacyVoiceText);
 assert.match(NOODLE_LEGACY_RECALLED_MEMORY_INSTRUCTION, /optional long-term memories/u);
 assert.match(NOODLE_LEGACY_RECALLED_MEMORY_INSTRUCTION, /do not force a reference/u);

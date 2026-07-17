@@ -18,6 +18,11 @@ import { createPromptsStorage } from "../../services/storage/prompts.storage.js"
 import { createCharactersStorage } from "../../services/storage/characters.storage.js";
 import { createLorebooksStorage } from "../../services/storage/lorebooks.storage.js";
 import { createRegexScriptsStorage } from "../../services/storage/regex-scripts.storage.js";
+import {
+  injectOwnerSpatialPrompt,
+  projectGameSnapshotLocation,
+  resolveOwnerSpatialProjection,
+} from "../../services/spatial-context/projection.js";
 import { buildImpersonateInstruction } from "../../services/conversation/impersonate-prompt.js";
 import { processLorebooks } from "../../services/lorebook/index.js";
 import { resolveLorebookScopeExclusions } from "../../services/lorebook/game-lorebook-scope.js";
@@ -582,7 +587,6 @@ export async function registerDryRunRoute(app: FastifyInstance) {
     const dryRunActiveAgentIds = Array.isArray(chatMeta.activeAgentIds) ? (chatMeta.activeAgentIds as string[]) : [];
     const dryRunChatEnableAgents = shouldEnableAgentsForGeneration({
       chatEnableAgents: chatMeta.enableAgents === true,
-      chatMode,
       impersonate,
       impersonateBlockAgents: false,
     });
@@ -603,6 +607,17 @@ export async function registerDryRunRoute(app: FastifyInstance) {
       typeof body.regenerateMessageId === "string" && body.regenerateMessageId.trim()
         ? body.regenerateMessageId.trim()
         : null;
+    const ownerSpatialProjection = await resolveOwnerSpatialProjection(
+      chatId,
+      regenerateMessageId ? { beforeMessageId: regenerateMessageId } : {},
+      chatMeta,
+    );
+    const promptSpatialProjection =
+      (ownerSpatialProjection?.ownerMode === "game" && chatMode === "game") ||
+      (ownerSpatialProjection?.ownerMode === "roleplay" && (chatMode === "roleplay" || chatMode === "visual_novel"))
+        ? ownerSpatialProjection
+        : null;
+    const ownerSpatialLorebookEntryIds = promptSpatialProjection?.lorebookEntryIds ?? [];
     const visibleGameStateAnchor = regenerateMessageId
       ? resolveRegenerationGameStateAnchor(scopedMessages, regenerateMessageId)
       : resolveVisibleGameStateAnchor(allChatMessages);
@@ -790,9 +805,7 @@ export async function registerDryRunRoute(app: FastifyInstance) {
       personaDescription,
       personaFields,
       variables: {
-        gameStoryboardKeyframeCount: String(
-          normalizeGameStoryboardKeyframeCount(chatMeta.gameStoryboardKeyframeCount),
-        ),
+        gameStoryboardKeyframeCount: String(normalizeGameStoryboardKeyframeCount(chatMeta.gameStoryboardKeyframeCount)),
       },
       groupScenarioOverrideText:
         typeof chatMeta.groupScenarioText === "string" && (chatMeta.groupScenarioText as string).trim()
@@ -1020,6 +1033,7 @@ export async function registerDryRunRoute(app: FastifyInstance) {
               characterIds: promptCharacterIds,
               personaId,
               activeLorebookIds,
+              forcedEntryIds: ownerSpatialLorebookEntryIds,
               excludedLorebookIds: lorebookScopeExclusions.excludedLorebookIds,
               excludedSourceAgentIds: lorebookScopeExclusions.excludedSourceAgentIds,
               tokenBudget: lorebookTokenBudget,
@@ -1225,6 +1239,7 @@ export async function registerDryRunRoute(app: FastifyInstance) {
             ? (chatMeta.activeLorebookIds as string[])
             : []
           : [],
+        forcedLorebookEntryIds: ownerSpatialLorebookEntryIds,
         excludedLorebookIds: lorebookScopeExclusions.excludedLorebookIds,
         excludedLorebookSourceAgentIds: lorebookScopeExclusions.excludedSourceAgentIds,
         chatEmbedding: null,
@@ -1374,6 +1389,7 @@ export async function registerDryRunRoute(app: FastifyInstance) {
         chatId,
         characterIds: promptCharacterIds,
         personaId,
+        forcedEntryIds: ownerSpatialLorebookEntryIds,
         activeLorebookIds,
         excludedLorebookIds: lorebookScopeExclusions.excludedLorebookIds,
         excludedSourceAgentIds: lorebookScopeExclusions.excludedSourceAgentIds,
@@ -1414,11 +1430,7 @@ export async function registerDryRunRoute(app: FastifyInstance) {
     }
 
     if (usePromptParts || !effectivePresetId) {
-      const characterAdvancedPromptIds = resolveCharacterAdvancedPromptIds(
-        promptCharacterIds,
-        chatMode,
-        chatMeta,
-      );
+      const characterAdvancedPromptIds = resolveCharacterAdvancedPromptIds(promptCharacterIds, chatMode, chatMeta);
       const characterAdvancedPromptEntries = await collectCharacterAdvancedPromptEntries(
         app.db,
         characterAdvancedPromptIds,
@@ -1433,7 +1445,10 @@ export async function registerDryRunRoute(app: FastifyInstance) {
     // Optional injection: tracker context (read-only snapshot)
     const resolvedInjectTrackersForRun = usePromptParts ? false : resolvedInjectTrackers;
     if (resolvedInjectTrackersForRun) {
-      const snap = await loadLatestGameSnapshot(app, chatId, visibleGameStateAnchor, regenerateMessageId);
+      const snap = projectGameSnapshotLocation(
+        await loadLatestGameSnapshot(app, chatId, visibleGameStateAnchor, regenerateMessageId),
+        ownerSpatialProjection,
+      );
       const contextBlock = snap
         ? formatTrackersContextBlock({
             wrapFormat,
@@ -1481,7 +1496,11 @@ export async function registerDryRunRoute(app: FastifyInstance) {
       // rejects a final assistant message ending in whitespace.
       finalMessages.push({ role: "assistant", content: assistantPrefill.trimEnd() });
     }
+    finalMessages = injectOwnerSpatialPrompt(finalMessages, promptSpatialProjection);
     dedupeLastMessageWrappers(finalMessages);
+    // Mirror the live route's provider-boundary macro guard so Peek Prompt is
+    // both accurate and incapable of exposing late raw identity macros (#3704).
+    finalMessages = resolveHistoryMessageMacros(finalMessages);
 
     // ── Parameter normalization (mirror /api/generate) ──
     const modelLower = (conn.model ?? "").toLowerCase();
@@ -1536,6 +1555,9 @@ export async function registerDryRunRoute(app: FastifyInstance) {
             conn.maxContext,
             conn.openrouterProvider,
             conn.maxTokensOverride,
+            conn.claudeFastMode === "true",
+            conn.treatAsLocalEndpoint === "true",
+            conn.defaultParameters,
           );
 
     // ── Mirror /api/generate: normalize + fit prompt to context ──

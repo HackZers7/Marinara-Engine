@@ -153,7 +153,7 @@ HOST=0.0.0.0
 
 ## Optional: AI sprite background removal
 
-Marinara Engine has built in background cleanup for character sprites. You can also install a stronger optional tool called `backgroundremover`. It gives cleaner transparent cutouts. It is optional because it downloads large machine learning files.
+Marinara Engine requests native transparency for generated still sprites and has built-in adaptive matte cleanup for flat chroma and older white backgrounds. You can also install an optional tool called `backgroundremover` as a fallback for detailed scenery and other non-flat backgrounds. It is optional because it downloads large machine learning files.
 
 To use it you first need Python. Install Python 3.11 from the official site, then run the install command from the `Marinara-Engine` folder:
 
@@ -186,6 +186,8 @@ Your chats, characters, and settings stay in place when you update. Marinara Eng
 ### Automatic updates with the launcher
 
 When you launch the app with the desktop shortcut or **start.bat** from a Git based copy, the launcher checks for updates first. If a newer version exists, it downloads the changes, reinstalls dependencies, rebuilds the app, and then starts. This works for both installer setups and manual clones.
+
+Run `start.bat --skip-update` to skip one check. To keep the installed Engine version across launches, add `AUTO_UPDATE_ENABLED=false` to `.env`. Manual checks, in-app apply, and manual Git updates remain available.
 
 If you have unsaved local changes to the code, the launcher tries to set them aside safely. It puts them back after updating. If it cannot, it keeps your current version and prints a note.
 

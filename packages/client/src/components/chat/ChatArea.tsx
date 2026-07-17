@@ -51,6 +51,7 @@ import { getChatCharacterIds } from "../../lib/chat-macros";
 import { resolveSpriteExpression } from "../../lib/sprite-expression-match";
 import { parseCharacterDisplayData } from "../../lib/character-display";
 import { showConfirmDialog } from "../../lib/app-dialogs";
+import { parseMessageExtraRecord } from "../../lib/chat-message-extra";
 import { chatBackgroundMetadataToUrl, chatBackgroundUrlToMetadata } from "../../lib/backgrounds";
 import { useGameStateStore } from "../../stores/game-state.store";
 import { useGalleryStore } from "../../stores/gallery.store";
@@ -129,10 +130,9 @@ import {
 
 export type { CharacterMap };
 
-const BUILT_IN_AGENT_ID_SET = new Set(BUILT_IN_AGENTS.map((agent) => agent.id));
-const BUILT_IN_TRACKER_AGENT_ID_SET = new Set(
-  BUILT_IN_AGENTS.filter((agent) => agent.category === "tracker" && !agent.libraryHidden).map((agent) => agent.id),
-);
+const isBuiltInAgentType = (agentType: string) => BUILT_IN_AGENTS.some((agent) => agent.id === agentType);
+const isBuiltInTrackerAgentType = (agentType: string) =>
+  BUILT_IN_AGENTS.some((agent) => agent.id === agentType && agent.category === "tracker" && !agent.libraryHidden);
 
 function shallowEqualTranslationConfig(
   a: TranslationChannelConfig | null,
@@ -288,19 +288,6 @@ const normalizeSpriteDisplayValue = (value: unknown, fallback: number, min: numb
   if (!Number.isFinite(numeric)) return fallback;
   return Math.max(min, Math.min(max, numeric));
 };
-
-function parseMessageExtraRecord(value: unknown): Record<string, unknown> {
-  if (!value) return {};
-  if (typeof value === "string") {
-    try {
-      const parsed = JSON.parse(value);
-      return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : {};
-    } catch {
-      return {};
-    }
-  }
-  return typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
-}
 
 function startsNewAssistantBubble(message: { extra?: unknown } | null | undefined): boolean {
   return parseMessageExtraRecord(message?.extra).startsNewAssistantBubble === true;
@@ -811,6 +798,7 @@ export function ChatArea() {
   const updateMessageExtra = useUpdateMessageExtra(activeChatId);
   const peekPrompt = usePeekPrompt();
   const branchChat = useBranchChat();
+  const branchPendingRef = useRef(false);
   const { generate, retryAgents } = useGenerate();
   const generateGallerySelfie = useGenerateGallerySelfie(activeChatId ?? "");
   const setActiveSwipe = useSetActiveSwipe(activeChatId);
@@ -911,7 +899,9 @@ export function ChatArea() {
   const chatCharIds = useMemo(() => getChatCharacterIds({ characterIds: chatCharacterIdsRaw }), [chatCharacterIdsRaw]);
   const chatPersonaId = useMemo(() => resolveChatPersonaId(chat), [chat]);
   const { data: chatPersona } = usePersona(chatPersonaId);
-  const { data: activePersonaFallback } = useActivePersona(!!chat?.id && !chatPersonaId && !isGameChat);
+  const { data: activePersonaFallback } = useActivePersona(
+    !!chat?.id && !chatPersonaId && chatMode === "conversation",
+  );
 
   const activeCharacterQueries = useQueries({
     queries: chatCharIds.map((id) => ({
@@ -1075,8 +1065,9 @@ export function ChatArea() {
 
   // Active persona info (for user message styling: name, avatar, colors)
   const personaInfo = useMemo(() => {
-    // Prefer per-chat personaId, fall back to the globally active persona outside Game mode.
-    const persona = chatPersona ?? (!isGameChat ? activePersonaFallback : null);
+    // Roleplay and Game may intentionally have no Persona; only Conversation
+    // falls back to the globally active account Persona.
+    const persona = chatPersona ?? (chatMode === "conversation" ? activePersonaFallback : null);
     if (!persona) return undefined;
     const avatarCrop =
       typeof persona.avatarCrop === "string" ? parseAvatarCropJson(persona.avatarCrop) : (persona.avatarCrop ?? null);
@@ -1096,7 +1087,7 @@ export function ChatArea() {
       dialogueColor: persona.dialogueColor || undefined,
       boxColor: persona.boxColor || undefined,
     };
-  }, [activePersonaFallback, chatPersona, isGameChat]);
+  }, [activePersonaFallback, chatMode, chatPersona]);
 
   const { startEncounter } = useEncounter();
   const { concludeScene, abandonScene, forkScene, isForking } = useScene();
@@ -1545,14 +1536,14 @@ export function ChatArea() {
   // (personas have no other data-card-css hook), so only feed it in Convo mode.
   const cardCssPersonas = useMemo<PersonaCssRow[] | undefined>(() => {
     if (chatMode !== "conversation") return undefined;
-    const persona = (chatPersona ?? (!isGameChat ? activePersonaFallback : null)) as
+    const persona = (chatPersona ?? (chatMode === "conversation" ? activePersonaFallback : null)) as
       | { id?: string; creatorNotes?: string | null }
       | null
       | undefined;
     return persona?.id
       ? [{ id: persona.id, creatorNotes: typeof persona.creatorNotes === "string" ? persona.creatorNotes : null }]
       : undefined;
-  }, [chatMode, chatPersona, activePersonaFallback, isGameChat]);
+  }, [chatMode, chatPersona, activePersonaFallback]);
   const cardCssInjector = (
     <CreatorNotesCssInjector
       characterIds={chatCharIds}
@@ -1796,7 +1787,7 @@ export function ChatArea() {
   const manualTrackerTypes = useMemo(() => {
     const set = new Set<string>();
     for (const type of enabledAgentTypes) {
-      if (!BUILT_IN_TRACKER_AGENT_ID_SET.has(type)) continue;
+      if (!isBuiltInTrackerAgentType(type)) continue;
       if (chatMeta.manualTrackers === true || manualTrackerAgentTypes[type] === true) set.add(type);
     }
     return set;
@@ -2108,7 +2099,7 @@ export function ChatArea() {
       manualTypes.length > 0
         ? manualTypes
         : Array.from(enabledAgentTypes).filter(
-            (type) => BUILT_IN_TRACKER_AGENT_ID_SET.has(type) || !BUILT_IN_AGENT_ID_SET.has(type),
+            (type) => isBuiltInTrackerAgentType(type) || !isBuiltInAgentType(type),
           );
     if (types.length === 0) return;
     await retryAgents(activeChatId, types);
@@ -2117,7 +2108,7 @@ export function ChatArea() {
   const handleRerunSingleTracker = useCallback(
     async (agentType: string) => {
       if (!activeChatId || isStreaming || agentProcessing) return;
-      if (!BUILT_IN_TRACKER_AGENT_ID_SET.has(agentType) || !enabledAgentTypes.has(agentType)) return;
+      if (!isBuiltInTrackerAgentType(agentType) || !enabledAgentTypes.has(agentType)) return;
       await retryAgents(activeChatId, [agentType]);
     },
     [activeChatId, isStreaming, agentProcessing, enabledAgentTypes, retryAgents],
@@ -2202,11 +2193,22 @@ export function ChatArea() {
   );
 
   const handleBranch = useCallback(
-    (messageId: string) => {
-      if (!activeChatId || branchChat.isPending) return;
+    async (messageId: string) => {
+      const chatId = activeChatId;
+      if (!chatId || branchChat.isPending || branchPendingRef.current) return;
+      branchPendingRef.current = true;
+      const confirmed = await showConfirmDialog({
+        title: "Create a new branch?",
+        message: "This will copy the chat through this message and open the new branch.",
+        confirmLabel: "Create branch",
+      });
+      if (!confirmed || useChatStore.getState().activeChatId !== chatId) {
+        branchPendingRef.current = false;
+        return;
+      }
       const branchToastId = toast.loading("Creating branch...");
       branchChat.mutate(
-        { chatId: activeChatId, upToMessageId: messageId },
+        { chatId, upToMessageId: messageId },
         {
           onSuccess: (newChat) => {
             if (newChat) useChatStore.getState().setActiveChatId(newChat.id);
@@ -2216,6 +2218,7 @@ export function ChatArea() {
             toast.error(error instanceof Error ? `Branch failed: ${error.message}` : "Branch failed.");
           },
           onSettled: () => {
+            branchPendingRef.current = false;
             toast.dismiss(branchToastId);
           },
         },

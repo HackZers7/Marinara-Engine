@@ -2,6 +2,7 @@ import {
   BUILT_IN_AGENTS,
   DEFAULT_AGENT_TOOLS,
   getDefaultAgentPrompt,
+  getBuiltInAgentDefaultPrompt,
   getDefaultBuiltInAgentSettings,
   isBuiltInAgentRuntimeDisabled,
   isAgentConfigDeleted,
@@ -158,7 +159,7 @@ function getAgentFallbackPrompt(agentType: string, settings: Record<string, unkn
   if (agentType === "spotify" && (settings.musicProvider === "custom" || settings.musicPlayerSource === "custom")) {
     return getDefaultAgentPrompt("local-music");
   }
-  return getDefaultAgentPrompt(agentType);
+  return getBuiltInAgentDefaultPrompt(agentType) || getDefaultAgentPrompt(agentType);
 }
 
 function resolveConnectionCustomParameters(connection: { defaultParameters?: unknown }): Record<string, unknown> {
@@ -243,6 +244,9 @@ async function resolveAgentConnectionProvider(args: {
     agentConn.maxContext,
     agentConn.openrouterProvider,
     agentConn.maxTokensOverride,
+    agentConn.claudeFastMode === "true",
+    agentConn.treatAsLocalEndpoint === "true",
+    agentConn.defaultParameters,
   );
   const resolved = {
     provider: withConnectionFallbackProvider({
