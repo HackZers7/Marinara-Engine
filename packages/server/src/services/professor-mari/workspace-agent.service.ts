@@ -7,26 +7,31 @@ import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { delimiter, dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { FastifyInstance } from "fastify";
+import { jsonrepair } from "jsonrepair";
 import type {
   BaseLLMProvider,
   ChatCompletionResult,
   ChatMessage,
   ChatOptions,
+  LLMToolDefinition,
   LLMUsage,
 } from "../llm/base-provider.js";
+import { parseTextualToolCalls } from "../llm/textual-tool-call-parser.js";
 import { createLLMProvider } from "../llm/provider-registry.js";
 import { getLocalSidecarProvider, LOCAL_SIDECAR_MODEL } from "../llm/local-sidecar.js";
 import { createChatsStorage } from "../storage/chats.storage.js";
+import {
+  mergeCustomParameters,
+  normalizeServiceTier,
+} from "../../routes/generate/generate-route-utils.js";
 import {
   appendReadableAttachmentsToContent,
   extractFileAttachmentInputs,
   extractImageAttachmentDataUrls,
   getAttachmentFilename,
-  resolveBaseUrl,
-  mergeCustomParameters,
-  normalizeServiceTier,
   type PromptAttachment,
-} from "../../routes/generate/generate-route-utils.js";
+} from "../generation/prompt-attachments.js";
+import { resolveBaseUrl } from "../generation/connection-base-url.js";
 import { MARI_GUIDED_SEQUENCES } from "./guided-sequences.js";
 import { getFileStorageDir, getMonorepoRoot, getPort, getServerProtocol } from "../../config/runtime-config.js";
 import { apiConnections } from "../../db/schema/index.js";
@@ -308,6 +313,15 @@ const WORKSPACE_TOOL_DEFINITIONS: WorkspaceToolDefinition[] = [
   },
 ];
 
+const WORKSPACE_TEXTUAL_TOOL_DEFINITIONS: LLMToolDefinition[] = WORKSPACE_TOOL_DEFINITIONS.map((tool) => ({
+  type: "function",
+  function: {
+    name: tool.name,
+    description: tool.description,
+    parameters: tool.parameters,
+  },
+}));
+
 function getPathEnvKey(env: NodeJS.ProcessEnv) {
   return Object.keys(env).find((key) => key.toLowerCase() === "path") ?? "PATH";
 }
@@ -378,7 +392,7 @@ ${PROFESSOR_MARI_AGENT_CATALOG_KNOWLEDGE}
 Workspace defaults:
 - Marinara's first-party agents and larger optional features are downloaded from **Agents → Download Agents**. Fresh installs start without them; maps, Conversation calls, and Conversation games are packages too. Tell users to install the desired package, enable it for the chat, and restart Marinara Engine when the catalog prompts them. Existing pre-package installs are migrated automatically without losing settings or history.
 - Use the structured \`app_data\` workspace command, not shell, for character/persona/lorebook/lorebook-entry/theme/agent/preset reads, creation, and updates.
-- Use Mari CLI commands for images, wiki reads, code/workspace tasks, agents, tools, extensions, raw DB work, or anything \`app_data\` does not cover. Only write raw files when no CLI/helper path fits.
+- Use Mari CLI commands for images, wiki reads, code/workspace tasks, agents, tools, raw DB work, or anything \`app_data\` does not cover. Only write raw files when no CLI/helper path fits.
 - Inspect before claiming facts. Verify after changing anything.
 - Do not ask the user to choose between \`apply:true\` and \`apply:false\`. Those are internal command flags, not chat questions.
 - For structured app-data writes the user requested, use \`apply:true\` so Marinara can save the change and show the user an in-chat Keep/Restore review card when the change is reversible. Use \`apply:false\` only when the user explicitly asks for a preview/dry run or when you are inspecting a risky change before deciding what to do.
@@ -388,17 +402,17 @@ Workspace defaults:
 
 Command families:
 - \`app_data\`: no-shell structured actions for characters, personas, lorebooks, lorebook entries, themes, agents, and prompt presets. Prefer this before shell commands for those objects.
-- \`mari db\`: generic live app data and storage-backed rows, including customization tables such as \`agent_configs\`, \`custom_tools\`, and \`installed_extensions\` when no narrower helper exists.
+- \`mari db\`: generic live app data and storage-backed rows, including customization tables such as \`agent_configs\` and \`custom_tools\` when no narrower helper exists.
 - \`mari themes\`: synced custom themes and active theme state.
 - \`mari images\`: image-generation connections, HITL image prompt previews, generated/edited preview assets, and assignment/deletion for avatars, personas, lorebooks, sprites, backgrounds, and galleries.
 - \`mari wiki\`: read-only Fandom/MediaWiki discovery and page reads.
-- \`mari characters\`: list, get, search, create, update, delete. Prefer this helper for character edits. \`--backstory\`, \`--appearance\`, and \`--about-me\` write to their matching \`data.extensions\` fields.
+- \`mari characters\`: list, get, search, create, update, delete. Prefer this helper for character edits, including backstory, appearance, and About Me changes.
 - \`mari personas\`: list, active, get, search, create, update, delete. Prefer this helper for persona edits.
 - \`mari lorebooks\`: list, get, entries <lorebook-id>, search, create, update <lorebook-id>, add-entry <lorebook-id>, update-entry <entry-id>, delete-entry <entry-id>, link-character, unlink-character, delete.
 - \`mari presets\`: no dedicated shell helper — use \`app_data\` \`preset.*\` for preset reads/writes. \`preset.create\` and \`preset.update\` can include \`groups\`, \`sections\`, and \`choiceBlocks\` for preset variables. Use \`mari db\` only for advanced raw-table repairs after inspecting schemas.
 - \`mari chats\`: read-only list/get/messages/search.
 - \`mari agents\`: no dedicated shell helper — use \`app_data\` \`agent.*\` for agent configs.
-- \`mari extensions\`, \`mari tools\`: customization helpers; if unavailable, use \`mari db\` with the related tables.
+- \`mari tools\`: customization helper; if unavailable, use \`mari db\` with the related table.
 - \`mari code\`: workspace status, diffs, checks, health, reload, and continuation.
 
 Built-in help:
@@ -408,10 +422,10 @@ Raw DB row contracts:
 - \`agent_configs.phase\` must be one of \`pre_generation\`, \`parallel\`, or \`post_processing\`. Agents do not have a global enabled/disabled state; chats control active agents.
 - Raw text booleans such as \`custom_tools.enabled\` are stored as \`"true"\` or \`"false"\`.
 - Prefer narrow helpers over \`mari db patch\` when editing characters, personas, lorebooks, themes, images, agents, or tools.
-- Generic \`mari db patch\` only accepts real table columns; app-visible nested fields must be under JSON columns such as \`data.extensions.appearance\`, not top-level \`appearance\`.
+- Generic \`mari db patch\` only accepts real table columns; app-visible nested fields must stay inside their owning JSON column instead of being written as invented top-level columns.
 
 Workspace files:
-Use workspace files to understand Marinara internals, answer source-code questions, or find content that is not available through CLI/app-data commands. Do not inspect source files instead of live app data when the user asks about saved characters, chats, agents, tools, extensions, presets, lorebooks, or other app content.`;
+Use workspace files to understand Marinara internals, answer source-code questions, or find content that is not available through CLI/app-data commands. Do not inspect source files instead of live app data when the user asks about saved characters, chats, agents, tools, presets, lorebooks, or other app content.`;
 
 function workspaceCommandProtocolPrompt() {
   const toolDocs = WORKSPACE_TOOL_DEFINITIONS.map(
@@ -777,7 +791,7 @@ function createProviderForConnection(connection: WorkspaceConnection): BaseLLMPr
 
 function parseToolArgumentsValue(value: unknown): Record<string, unknown> {
   if (isRecord(value)) return value;
-  if (typeof value === "string") return parseJsonObject(value) ?? {};
+  if (typeof value === "string") return tryParseJsonPayload(value) ?? {};
   return {};
 }
 
@@ -796,25 +810,62 @@ function hasActionPayload(payload: Record<string, unknown>): boolean {
   );
 }
 
+function closeOpenJsonContainers(raw: string): string | null {
+  const stack: string[] = [];
+  let inString = false;
+  let escaped = false;
+  for (const char of raw) {
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (char === "\\") escaped = true;
+      else if (char === '"') inString = false;
+      continue;
+    }
+    if (char === '"') {
+      inString = true;
+      continue;
+    }
+    if (char === "{" || char === "[") {
+      stack.push(char);
+      continue;
+    }
+    if (char !== "}" && char !== "]") continue;
+    const expected = char === "}" ? "{" : "[";
+    if (stack.pop() !== expected) return null;
+  }
+  if (inString) return null;
+  return (
+    raw +
+    stack
+      .reverse()
+      .map((opening) => (opening === "{" ? "}" : "]"))
+      .join("")
+  );
+}
+
 function tryParseJsonPayload(raw: string): Record<string, unknown> | null {
+  let repaired: string | null = null;
   try {
-    const parsed = JSON.parse(raw) as unknown;
-    return isRecord(parsed) ? parsed : null;
+    repaired = jsonrepair(raw);
   } catch {
-    // A single stray comma or smart-quote anywhere in the envelope (most often inside the
-    // optional `suggestions` array) would otherwise fail the entire { say, commands, stop }
-    // object, not just the chips - repair the common near-miss cases before giving up.
+    // Fall through to the conservative container-closing recovery.
+  }
+  const candidates = [
+    raw,
+    repaired,
+    closeOpenJsonContainers(raw),
+    repaired && closeOpenJsonContainers(repaired),
+  ];
+  for (const candidate of candidates) {
+    if (!candidate) continue;
     try {
-      const repaired = raw
-        .replace(/[‘’]/g, "'")
-        .replace(/[“”]/g, '"')
-        .replace(/,\s*([\]}])/g, "$1");
-      const parsed = JSON.parse(repaired) as unknown;
+      const parsed = JSON.parse(candidate) as unknown;
       return isRecord(parsed) ? parsed : null;
     } catch {
-      return null;
+      // Try the next conservative repair candidate.
     }
   }
+  return null;
 }
 
 function findJsonPayloadMatch(content: string): JsonPayloadMatch | null {
@@ -833,6 +884,7 @@ function findJsonPayloadMatch(content: string): JsonPayloadMatch | null {
     let depth = 0;
     let inString = false;
     let escaped = false;
+    let closedWithoutAction = false;
     for (let index = start; index < content.length; index += 1) {
       const char = content[index];
       if (inString) {
@@ -852,11 +904,25 @@ function findJsonPayloadMatch(content: string): JsonPayloadMatch | null {
         const raw = content.slice(start, index + 1);
         const payload = tryParseJsonPayload(raw);
         if (payload && hasActionPayload(payload)) return { payload, raw, start, end: index + 1 };
+        closedWithoutAction = true;
         break;
       }
     }
+    if (closedWithoutAction) continue;
+    const incompleteRaw = content.slice(start).trim();
+    const incompletePayload = tryParseJsonPayload(incompleteRaw);
+    if (incompletePayload && hasActionPayload(incompletePayload)) {
+      return { payload: incompletePayload, raw: incompleteRaw, start, end: content.length };
+    }
   }
   return null;
+}
+
+function isAppDataActionName(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    /^(?:characters?|personas?|lorebooks?|themes?|agents?|presets?|promptpresets?)\./i.test(value.trim())
+  );
 }
 
 function rawJsonToolCalls(payload: Record<string, unknown>): unknown[] {
@@ -864,19 +930,52 @@ function rawJsonToolCalls(payload: Record<string, unknown>): unknown[] {
   if (Array.isArray(plural)) return plural;
   const single = payload.tool_call ?? payload.toolCall ?? payload.command;
   if (single !== undefined) return [single];
-  if (typeof payload.name === "string") return [payload];
+  if (typeof payload.name === "string" || isAppDataActionName(payload.action)) return [payload];
   return [];
 }
 
 function parseJsonCommandCallsFromPayload(payload: Record<string, unknown>): WorkspaceCommandCall[] {
   const calls: WorkspaceCommandCall[] = [];
   rawJsonToolCalls(payload).forEach((raw, index) => {
-    if (!isRecord(raw) || typeof raw.name !== "string" || !isWorkspaceToolName(raw.name)) return;
-    const args = parseToolArgumentsValue(raw.arguments ?? raw.args ?? raw.input ?? {});
-    const id = typeof raw.id === "string" && raw.id.trim() ? raw.id.trim() : newToolCallId(raw.name, index);
-    calls.push({ id, name: raw.name, arguments: args });
+    if (!isRecord(raw)) return;
+    const requestedName = typeof raw.name === "string" ? raw.name.trim() : "";
+    const directAction = isAppDataActionName(raw.action) ? raw.action.trim() : null;
+    const nameAsAction = isAppDataActionName(requestedName) ? requestedName : null;
+    const workspaceName = isWorkspaceToolName(requestedName)
+      ? requestedName
+      : directAction || nameAsAction
+        ? "app_data"
+        : null;
+    if (!workspaceName) return;
+
+    const parsedArguments = parseToolArgumentsValue(raw.arguments ?? raw.args ?? raw.input ?? {});
+    const argumentsWithRecoveredAction =
+      workspaceName === "app_data" && (directAction || nameAsAction)
+        ? {
+            ...(directAction ? raw : parsedArguments),
+            ...parsedArguments,
+            action: directAction ?? nameAsAction,
+          }
+        : parsedArguments;
+    const id = typeof raw.id === "string" && raw.id.trim() ? raw.id.trim() : newToolCallId(workspaceName, index);
+    calls.push({ id, name: workspaceName, arguments: argumentsWithRecoveredAction });
   });
   return calls;
+}
+
+function parseTextualWorkspaceCommandCalls(content: string): WorkspaceCommandCall[] {
+  return parseTextualToolCalls(content, WORKSPACE_TEXTUAL_TOOL_DEFINITIONS).flatMap((call) => {
+    const name = call.function.name;
+    if (!isWorkspaceToolName(name)) return [];
+    return [
+      {
+        id: call.id,
+        name,
+        arguments: parseToolArgumentsValue(call.function.arguments),
+        raw: content,
+      },
+    ];
+  });
 }
 
 function jsonPayloadVisibleText(payload: Record<string, unknown>): string {
@@ -906,7 +1005,7 @@ function parseXmlCommandCalls(content: string): WorkspaceCommandCall[] {
     const name = match[1];
     if (!name || !isWorkspaceToolName(name)) continue;
     const rawBody = match[2]?.trim() ?? "{}";
-    let args = parseJsonObject(rawBody) ?? {};
+    let args = tryParseJsonPayload(rawBody) ?? {};
     if (name === "bash" && !args.command && rawBody && !rawBody.startsWith("{")) args = { command: rawBody };
     calls.push({ id: newToolCallId(name, index), name, arguments: args, raw: match[0] });
   }
@@ -1001,11 +1100,12 @@ function stripWorkspaceCommands(content: string): string {
     .trim();
 }
 
-function parseAssistantWorkspaceAction(content: string): AssistantWorkspaceAction {
+export function parseAssistantWorkspaceAction(content: string): AssistantWorkspaceAction {
   const { content: contentWithoutJson, matches } = removeJsonActionFrames(content);
   const jsonCommands = matches.flatMap((match) => parseJsonCommandCallsFromPayload(match.payload));
+  const textualCommands = parseTextualWorkspaceCommandCalls(contentWithoutJson);
   // If JSON frames are present, treat all prose outside them as protocol leakage.
-  // Visible text must come from the frame's say/message/final field only.
+  // Textual calls have no visible-text field, so retain their surrounding prose.
   const inlineVisibleText = matches.length > 0 ? "" : stripWorkspaceCommands(contentWithoutJson);
   const frameVisibleText = matches
     .map((match) => jsonPayloadVisibleText(match.payload))
@@ -1017,6 +1117,7 @@ function parseAssistantWorkspaceAction(content: string): AssistantWorkspaceActio
   const commands = dedupeWorkspaceCommandCalls([
     ...parseXmlCommandCalls(contentWithoutJson),
     ...jsonCommands,
+    ...textualCommands,
     ...parseBracketCommandCalls(contentWithoutJson),
   ]);
   const protocolValid = matches.length > 0;

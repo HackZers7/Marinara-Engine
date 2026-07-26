@@ -28,7 +28,6 @@ import {
   CalendarClock,
   RefreshCw,
   Settings2,
-  Link,
   ArrowRightLeft,
   Unlink,
   Brain,
@@ -42,6 +41,7 @@ import {
   Save,
   FileText,
   FilePlus2,
+  FolderOpen,
   Upload,
   Download,
   Star,
@@ -118,6 +118,10 @@ import {
 import { useUpdateGameWidgets } from "../../hooks/use-game";
 import { useRegexScripts, useUpdateRegexScript, type RegexScriptRow } from "../../hooks/use-regex-scripts";
 import { api } from "../../lib/api-client";
+import {
+  trackChatMetadataSave,
+  waitForPendingChatMetadataSaves,
+} from "../../lib/chat-metadata-save-barrier";
 import { appendLocalSidecarConnectionOption, filterLanguageGenerationConnections } from "../../lib/connection-filters";
 import {
   deriveActiveLorebookViews,
@@ -169,8 +173,10 @@ import type {
   KnowledgeAgentSourceSettings,
   Message,
   PromptPreset,
+  SpotifySourceType,
   WeekSchedule,
 } from "@marinara-engine/shared";
+import { normalizeSpotifySourceType } from "@marinara-engine/shared";
 import { useAgentConfigs, useCreateAgent, useUpdateAgent, type AgentConfigRow } from "../../hooks/use-agents";
 import { useAgentStore } from "../../stores/agent.store";
 import { useSidecarStore } from "../../stores/sidecar.store";
@@ -203,6 +209,7 @@ import {
   LIMITS,
   MIN_AGENT_MAX_TOKENS,
   PROFESSOR_MARI_ID,
+  SUMMARY_TAIL_MESSAGES,
   estimateAgentLoadCost,
   getAgentPromptTemplateOptions,
   includesTextForMatch,
@@ -259,8 +266,11 @@ import {
   applyAgentAddSetupToAgentSettings,
   buildAgentAddMetadataPatch,
   buildInitialAgentAddSetupState,
+  normalizeCustomMusicExternalFolder,
+  normalizeCustomMusicSource,
   type AgentAddSetupState,
   type AgentAddSpriteSubject,
+  type CustomMusicSource,
   type MusicProvider,
 } from "./AgentAddSetupFields";
 import { GameWidgetFileControls, GameWidgetSetupEditor, normalizeGameHudWidgets } from "../game/GameWidgetSetupEditor";
@@ -280,8 +290,6 @@ interface ChatSettingsDrawerProps {
   onOpenScheduleEditor?: (characterId: string, options?: { initialDay?: string | null }) => void;
 }
 
-type SpotifySourceType = "liked" | "playlist" | "artist" | "any";
-
 const SPOTIFY_SOURCE_OPTIONS: Array<{ id: SpotifySourceType; label: string; description: string }> = [
   { id: "liked", label: "Liked Songs", description: "Pick from the user's saved tracks first." },
   { id: "playlist", label: "Playlist", description: "Keep choices inside one Spotify playlist." },
@@ -299,8 +307,6 @@ function normalizeCustomMusicFolder(value: unknown): string {
   if (!normalized || normalized.includes("..")) return "music";
   return normalized.startsWith("music") ? normalized : `music/${normalized}`;
 }
-
-const AUTONOMOUS_DAILY_CAP_OPTIONS = [1, 2, 3, 4, 5, 6, 7, 8] as const;
 
 const DEFAULT_PROSE_GUARDIAN_BANNED_WORDS = "ozone";
 const DEFAULT_PROSE_GUARDIAN_AVOID =
@@ -691,10 +697,6 @@ const CONVERSATION_COMMAND_TOGGLE_OPTIONS: Array<{
     description: "Let characters accept a one-on-one rock-paper-scissors match at the table.",
   },
 ];
-
-function normalizeSpotifySourceType(value: unknown): SpotifySourceType {
-  return value === "playlist" || value === "artist" || value === "any" ? value : "liked";
-}
 
 function readConversationCommandToggles(value: unknown): Partial<Record<ConversationCommandKey, boolean>> {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
@@ -1326,12 +1328,16 @@ export function ChatSettingsDrawer({
   const spotifyPlaylistId = typeof metadata.spotifyPlaylistId === "string" ? metadata.spotifyPlaylistId : "";
   const spotifyArtist = typeof metadata.spotifyArtist === "string" ? metadata.spotifyArtist : "";
   const gameUseSpotifyMusic = metadata.gameUseSpotifyMusic === true;
-  const gameSpotifySourceType = normalizeSpotifySourceType(metadata.gameSpotifySourceType);
+  const gameSpotifySourceType = metadata.gameSpotifySourceType ?? "liked";
   const gameSpotifyPlaylistId =
     typeof metadata.gameSpotifyPlaylistId === "string" ? metadata.gameSpotifyPlaylistId : "";
   const gameSpotifyArtist = typeof metadata.gameSpotifyArtist === "string" ? metadata.gameSpotifyArtist : "";
   const musicDjSettings = mergeBuiltInAgentSettings("spotify", agentConfigsByType.get("spotify")?.settings);
+  const customMusicSource = normalizeCustomMusicSource(musicDjSettings);
   const customMusicFolder = normalizeCustomMusicFolder(metadata.customMusicFolder ?? musicDjSettings.customMusicFolder);
+  const customMusicExternalFolder = normalizeCustomMusicExternalFolder(
+    musicDjSettings.customMusicExternalFolder ?? musicDjSettings.localMusicExternalFolder,
+  );
   const gameMusicDjEnabled =
     metadata.gameUseMusicDj === true || gameUseSpotifyMusic || activeAgentIds.includes("youtube");
   const spriteCharacterIds: string[] = Array.isArray(metadata.spriteCharacterIds) ? metadata.spriteCharacterIds : [];
@@ -1628,7 +1634,6 @@ export function ChatSettingsDrawer({
       const cfg = agentConfigsByType.get(id);
       const settings = mergeBuiltInAgentSettings(id, cfg?.settings);
       const promptTemplate = resolveAgentPromptTemplate({
-        agentType: id,
         promptTemplate: cfg?.promptTemplate || "",
         fallbackPromptTemplate: getDefaultAgentPrompt(id),
         settings,
@@ -1721,6 +1726,7 @@ export function ChatSettingsDrawer({
       : illustratorDefaults.useAvatarReferences === true;
   const illustratorPromptConnectionId =
     typeof metadata.illustratorPromptConnectionId === "string" ? metadata.illustratorPromptConnectionId : "";
+  const illustratorAutoBackgroundsEnabled = metadata.illustratorAutoBackgroundsEnabled === true;
   const selectedIllustratorPromptConnectionMissing =
     illustratorPromptConnectionId.length > 0 &&
     !illustratorPromptConnectionsList.some((connection) => connection.id === illustratorPromptConnectionId);
@@ -2113,14 +2119,14 @@ export function ChatSettingsDrawer({
     [chat.id, updateMeta],
   );
   const renderIllustratorPromptConnectionSelect = () => (
-    <label className="flex flex-col gap-1">
+    <div className="flex flex-col gap-1">
       <span className="text-[0.625rem] font-medium text-[var(--foreground)]">Prompt Model</span>
       <select
         value={illustratorPromptConnectionId}
         onChange={(event) => updateIllustratorPromptConnection(event.target.value)}
         className="w-full rounded-lg border border-[var(--border)] bg-[var(--background)] px-2.5 py-2 text-xs text-[var(--foreground)] outline-none transition-colors focus:border-[var(--primary)]/50"
       >
-        <option value="">Main chat model</option>
+        <option value="">Agent default</option>
         {selectedIllustratorPromptConnectionMissing && (
           <option value={illustratorPromptConnectionId}>Missing connection</option>
         )}
@@ -2135,7 +2141,11 @@ export function ChatSettingsDrawer({
         Chooses the text model that writes Illustrator/selfie prompts. Image rendering still uses the selected image
         connection for this feature or the agent setup.
       </span>
-    </label>
+      <AgentDefaultStatus
+        overridden={illustratorPromptConnectionId.length > 0}
+        onReset={() => updateIllustratorPromptConnection("")}
+      />
+    </div>
   );
   const toggleIllustratorCharacterAppearance = useCallback(() => {
     updateMeta.mutate({
@@ -2149,6 +2159,42 @@ export function ChatSettingsDrawer({
       illustratorUseAvatarReferences: !illustratorUseAvatarReferences,
     });
   }, [chat.id, illustratorUseAvatarReferences, updateMeta]);
+  const resetIllustratorCharacterAppearance = useCallback(() => {
+    updateMeta.mutate({ id: chat.id, illustratorIncludeCharacterAppearance: null });
+  }, [chat.id, updateMeta]);
+  const resetIllustratorAvatarReferences = useCallback(() => {
+    updateMeta.mutate({ id: chat.id, illustratorUseAvatarReferences: null });
+  }, [chat.id, updateMeta]);
+  const toggleIllustratorAutoBackgrounds = useCallback(() => {
+    updateMeta.mutate({
+      id: chat.id,
+      illustratorAutoBackgroundsEnabled: !illustratorAutoBackgroundsEnabled,
+    });
+  }, [chat.id, illustratorAutoBackgroundsEnabled, updateMeta]);
+  const renderIllustratorImageStyleSelect = (
+    options: { emptyOptionLabel?: string; description?: string } = {},
+  ) => (
+    <label className="flex flex-col gap-1">
+      <span className="text-[0.625rem] font-medium text-[var(--foreground)]">Image Style</span>
+      <select
+        value={(metadata.imageStyleProfileId as string) ?? ""}
+        onChange={(event) =>
+          updateMeta.mutate({ id: chat.id, imageStyleProfileId: event.target.value || null })
+        }
+        className="w-full rounded-lg border border-[var(--border)] bg-[var(--background)] px-2.5 py-2 text-xs text-[var(--foreground)] outline-none transition-colors focus:border-[var(--primary)]/50"
+      >
+        <option value="">{options.emptyOptionLabel ?? "Use default style from Style Profiles in Advanced settings"}</option>
+        {imageStyleProfiles.profiles.map((profile) => (
+          <option key={profile.id} value={profile.id}>
+            {profile.name}
+          </option>
+        ))}
+      </select>
+      {options.description ? (
+        <span className="text-[0.625rem] leading-snug text-[var(--muted-foreground)]">{options.description}</span>
+      ) : null}
+    </label>
+  );
   const proseGuardianBannedWords =
     typeof metadata.proseGuardianBannedWords === "string"
       ? metadata.proseGuardianBannedWords
@@ -2188,12 +2234,51 @@ export function ChatSettingsDrawer({
     setProseGuardianStyleDraft(proseGuardianStyleInstructions);
   }, [proseGuardianStyleInstructions]);
 
+  const updateMetaAsync = updateMeta.mutateAsync;
+  const saveProseGuardianSettings = useCallback(
+    (patch: Record<string, unknown>) =>
+      trackChatMetadataSave(chat.id, () => updateMetaAsync({ id: chat.id, ...patch })),
+    [chat.id, updateMetaAsync],
+  );
   const commitProseGuardianSettings = useCallback(
     (patch: Record<string, unknown>) => {
-      updateMeta.mutate({ id: chat.id, ...patch });
+      void saveProseGuardianSettings(patch).catch(() => {
+        toast.error("Failed to save Prose Guardian changes.");
+      });
     },
-    [chat.id, updateMeta],
+    [saveProseGuardianSettings],
   );
+  const flushProseGuardianDrafts = useCallback(async () => {
+    const patch: Record<string, unknown> = {};
+    const banned = proseGuardianBannedDraft.trim();
+    const avoid = proseGuardianAvoidDraft.trim();
+    const prefer = proseGuardianStyleDraft.trim();
+
+    if (banned !== proseGuardianBannedWords) patch.proseGuardianBannedWords = banned;
+    if (avoid !== proseGuardianAvoidInstructions) patch.proseGuardianAvoidInstructions = avoid;
+    if (prefer !== proseGuardianStyleInstructions) patch.proseGuardianStyleInstructions = prefer;
+    if (Object.keys(patch).length === 0) {
+      await waitForPendingChatMetadataSaves(chat.id);
+      return true;
+    }
+
+    try {
+      await saveProseGuardianSettings(patch);
+      return true;
+    } catch {
+      toast.error("Failed to save Prose Guardian changes.");
+      return false;
+    }
+  }, [
+    chat.id,
+    proseGuardianAvoidDraft,
+    proseGuardianAvoidInstructions,
+    proseGuardianBannedDraft,
+    proseGuardianBannedWords,
+    proseGuardianStyleDraft,
+    proseGuardianStyleInstructions,
+    saveProseGuardianSettings,
+  ]);
   const getKnowledgeAgentSourceSettings = useCallback(
     (agentType: KnowledgeAgentType) => {
       const config = agentConfigsByType.get(agentType);
@@ -2390,7 +2475,7 @@ export function ChatSettingsDrawer({
     })),
   });
 
-  const chatSpriteSubjectsWithSprites = chatSpriteSubjects.filter((subject, index) => {
+  const chatSpriteSubjectsWithSprites = chatSpriteSubjects.filter((_, index) => {
     const sprites = chatSpriteQueries[index]?.data;
     return Array.isArray(sprites) && sprites.length > 0;
   });
@@ -2931,6 +3016,13 @@ export function ChatSettingsDrawer({
     await retryAgents(chat.id, ["lorebook-keeper"], { lorebookKeeperBackfill: true });
   }, [chat.id, retryAgents]);
 
+  const handleRerunCustomAgent = useCallback(
+    async (agentId: string) => {
+      await retryAgents(chat.id, [agentId]);
+    },
+    [chat.id, retryAgents],
+  );
+
   const toggleTool = (toolId: string) => {
     const current = [...activeToolIds];
     const idx = current.indexOf(toolId);
@@ -3056,13 +3148,14 @@ export function ChatSettingsDrawer({
         const canCloseAgentSuite =
           !showAgentSuiteModal || (await (agentSuiteCloseGuardRef.current?.() ?? Promise.resolve(true)));
         if (!canCloseAgentSuite) return;
+        if (!(await flushProseGuardianDrafts())) return;
         setShowAgentSuiteModal(false);
         onClose();
       } finally {
         drawerClosingRef.current = false;
       }
     })();
-  }, [onClose, showAgentSuiteModal]);
+  }, [flushProseGuardianDrafts, onClose, showAgentSuiteModal]);
   // Session-ephemeral: did the user change Day Rollover Hour in this drawer mount?
   // Used to gate the "transitional duplication" warning so it only appears
   // immediately after a change (when the warning is operationally useful) and
@@ -3364,6 +3457,10 @@ export function ChatSettingsDrawer({
         ...buildAgentAddMetadataPatch(agent.id, setup, metadata, {
           allowSecretPlot: supportsNarrativeDirectorSecretPlot,
           defaultPromptTemplateId: resolveDefaultAgentPromptTemplateId(nextSettings),
+          illustratorDefaults: {
+            includeCharacterAppearance: nextSettings.includeCharacterAppearance === true,
+            useAvatarReferences: nextSettings.useAvatarReferences === true,
+          },
         }),
       });
       toast.success(`Added ${agent.name}! You can access its settings in Agents section in Chat Settings!`);
@@ -3387,7 +3484,9 @@ export function ChatSettingsDrawer({
         ...mergeBuiltInAgentSettings("spotify", config?.settings),
         musicProvider: provider,
         musicPlayerSource: provider,
+        customMusicSource,
         customMusicFolder,
+        customMusicExternalFolder,
         enabledTools: provider === "spotify" ? (DEFAULT_AGENT_TOOLS.spotify ?? []) : [],
       };
 
@@ -3406,7 +3505,15 @@ export function ChatSettingsDrawer({
         settings: nextSettings,
       });
     },
-    [agentConfigsByType, createAgent, customMusicFolder, installedAgentManifests, updateAgentConfig],
+    [
+      agentConfigsByType,
+      createAgent,
+      customMusicExternalFolder,
+      customMusicFolder,
+      customMusicSource,
+      installedAgentManifests,
+      updateAgentConfig,
+    ],
   );
 
   const changeMusicDjProvider = useCallback(
@@ -3445,6 +3552,107 @@ export function ChatSettingsDrawer({
       await updateAgentConfig.mutateAsync({ id: config.id, settings: nextSettings });
     },
     [agentConfigsByType, chat.id, updateAgentConfig, updateMeta],
+  );
+
+  const updateCustomMusicLibrary = useCallback(
+    async (patch: { customMusicSource?: CustomMusicSource; customMusicExternalFolder?: string }) => {
+      try {
+        const config = agentConfigsByType.get("spotify") ?? null;
+        if (!config) throw new Error("Music DJ agent settings are missing.");
+        const nextSettings = {
+          ...mergeBuiltInAgentSettings("spotify", config.settings),
+          ...patch,
+        };
+        await updateAgentConfig.mutateAsync({ id: config.id, settings: nextSettings });
+      } catch (error) {
+        await showAlertDialog({
+          title: "Couldn't Update Music Folder",
+          message: error instanceof Error ? error.message : "The custom music folder could not be updated.",
+        });
+      }
+    },
+    [agentConfigsByType, updateAgentConfig],
+  );
+
+  const selectCustomMusicExternalFolder = useCallback(async () => {
+    try {
+      const data = await api.post<{ success: boolean; path: string }>("/game-assets/pick-local-music-folder");
+      if (data.success !== true || !data.path) throw new Error("No folder selected.");
+      await updateCustomMusicLibrary({
+        customMusicSource: "folder",
+        customMusicExternalFolder: data.path,
+      });
+    } catch (error) {
+      await showAlertDialog({
+        title: "Couldn't Select Music Folder",
+        message: error instanceof Error ? error.message : "The music folder could not be selected.",
+      });
+    }
+  }, [updateCustomMusicLibrary]);
+
+  const renderCustomMusicLibrarySettings = (surface: "game" | "roleplay") => (
+    <div className="space-y-2">
+      <label className="flex flex-col gap-1">
+        <span className="text-[0.625rem] font-medium text-[var(--muted-foreground)]">Custom music source</span>
+        <select
+          value={customMusicSource}
+          onChange={(event) =>
+            void updateCustomMusicLibrary({ customMusicSource: event.target.value as CustomMusicSource })
+          }
+          className="w-full rounded-lg border border-[var(--border)] bg-[var(--background)] px-2.5 py-2 text-xs text-[var(--foreground)]"
+        >
+          <option value="game-assets">Game Assets</option>
+          <option value="folder">Folder on this device</option>
+        </select>
+      </label>
+
+      {customMusicSource === "folder" ? (
+        <div className="flex flex-col gap-1">
+          <span className="text-[0.625rem] font-medium text-[var(--muted-foreground)]">
+            Music folder on this device
+          </span>
+          <div className="flex flex-col gap-2 sm:flex-row">
+            <input
+              key={`${chat.id}-${surface}-custom-music-folder-${customMusicExternalFolder}`}
+              defaultValue={customMusicExternalFolder}
+              onBlur={(event) =>
+                void updateCustomMusicLibrary({
+                  customMusicSource: "folder",
+                  customMusicExternalFolder: normalizeCustomMusicExternalFolder(event.target.value),
+                })
+              }
+              placeholder="No folder selected"
+              className="min-w-0 flex-1 rounded-lg border border-[var(--border)] bg-[var(--background)] px-2.5 py-2 font-mono text-xs text-[var(--foreground)] placeholder:text-[var(--muted-foreground)]/50"
+            />
+            <button
+              type="button"
+              onClick={() => void selectCustomMusicExternalFolder()}
+              className="inline-flex min-h-9 items-center justify-center gap-1.5 rounded-lg border border-[var(--border)] bg-[var(--muted)] px-3 text-xs font-medium text-[var(--foreground)] transition-colors hover:bg-[var(--accent)]"
+            >
+              <FolderOpen size="0.75rem" />
+              Choose Folder
+            </button>
+          </div>
+          <span className="text-[0.5625rem] text-[var(--muted-foreground)]">
+            Music DJ will choose from audio files in this folder and its subfolders.
+          </span>
+        </div>
+      ) : (
+        <label className="flex flex-col gap-1">
+          <span className="text-[0.625rem] font-medium text-[var(--muted-foreground)]">Game Assets music folder</span>
+          <input
+            key={`${chat.id}-${surface}-custom-music-${customMusicFolder}`}
+            defaultValue={customMusicFolder}
+            onBlur={(event) => void saveCustomMusicFolder(event.target.value)}
+            placeholder="music"
+            className="w-full rounded-lg border border-[var(--border)] bg-[var(--background)] px-2.5 py-2 font-mono text-xs text-[var(--foreground)] placeholder:text-[var(--muted-foreground)]/50"
+          />
+          <span className="text-[0.5625rem] text-[var(--muted-foreground)]">
+            Reads local audio from Game Assets, for example <code>music</code> or <code>music/combat</code>.
+          </span>
+        </label>
+      )}
+    </div>
   );
 
   const toggleGameMusicDj = useCallback(async () => {
@@ -3808,6 +4016,21 @@ export function ChatSettingsDrawer({
                   </div>
                   <button
                     onClick={() => {
+                      void handleRerunCustomAgent(agent.id);
+                    }}
+                    disabled={agentProcessing}
+                    className={cn(
+                      "flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-[var(--muted-foreground)] transition-colors",
+                      agentProcessing
+                        ? "cursor-not-allowed opacity-40"
+                        : "hover:bg-[var(--primary)]/15 hover:text-[var(--primary)]",
+                    )}
+                    title={`Re-run ${agent.name} on the last message`}
+                  >
+                    <RefreshCw size="0.6875rem" className={cn(agentProcessing && "animate-spin")} />
+                  </button>
+                  <button
+                    onClick={() => {
                       void toggleAgent(agent.id);
                     }}
                     className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-[var(--muted-foreground)] transition-colors hover:bg-[var(--destructive)]/15 hover:text-[var(--destructive)]"
@@ -3819,6 +4042,7 @@ export function ChatSettingsDrawer({
                 <AgentPromptTemplateSelect
                   options={promptOptions}
                   selectedId={agentPromptTemplateSelections[agent.id] ?? getDefaultPromptTemplateIdForAgent(agent.id)}
+                  overridden={typeof agentPromptTemplateSelections[agent.id] === "string"}
                   onChange={(promptTemplateId) => updateAgentPromptTemplateSelection(agent.id, promptTemplateId)}
                 />
               </div>
@@ -4040,8 +4264,7 @@ export function ChatSettingsDrawer({
             </div>
           )}
 
-          {/* Hardcoded — CHAT_MODES.defaultAgents looks like the source of truth but is currently
-              unused, and wouldn't cover non-agent built-ins (GM pipeline, autonomous messaging, etc.) anyway. */}
+          {/* Keep this display tied to the runtime defaults below. */}
           {MODE_INTROS[chatMode as ChatMode] && (
             <div
               style={{ order: CHAT_SETTINGS_ORDER.modeIntro }}
@@ -4971,7 +5194,7 @@ export function ChatSettingsDrawer({
             </Section>
           )}
 
-          {/* Group Chat Settings — only when 2+ characters, game mode handles it internally */}
+          {/* Every existing and new multi-character chat gets this section. Missing mode metadata means Grouped. */}
           {chatCharIds.length > 1 && modeCapabilities.supportsGroupChatControls && (
             <Section
               style={{ order: CHAT_SETTINGS_ORDER.groupChat }}
@@ -4979,40 +5202,54 @@ export function ChatSettingsDrawer({
               icon={<Users size="0.875rem" />}
               help={
                 isConversation
-                  ? "Configure whether group conversations reply automatically or wait for a manually triggered character response."
+                  ? "Choose one grouped response or separate character turns. Individual replies use a separate model request for every responding character."
                   : "Configure how multiple characters interact. Merged mode combines all characters into one narrator; Individual mode has each character respond separately."
               }
             >
               {/* Mode selector */}
-              {!isConversation && (
-                <div className="space-y-2">
-                  <label className="text-[0.6875rem] font-medium text-[var(--muted-foreground)]">Mode</label>
-                  <div className="flex rounded-lg ring-1 ring-[var(--border)]">
-                    <button
-                      onClick={() => updateMeta.mutate({ id: chat.id, groupChatMode: "merged" })}
-                      className={cn(
-                        "flex-1 px-3 py-2 text-[0.6875rem] font-medium transition-colors rounded-l-lg",
-                        (metadata.groupChatMode ?? "merged") === "merged"
-                          ? "bg-[var(--primary)] text-white"
-                          : "text-[var(--muted-foreground)] hover:bg-[var(--accent)]",
-                      )}
-                    >
-                      Merged (Narrator)
-                    </button>
-                    <button
-                      onClick={() => updateMeta.mutate({ id: chat.id, groupChatMode: "individual" })}
-                      className={cn(
-                        "flex-1 px-3 py-2 text-[0.6875rem] font-medium transition-colors rounded-r-lg",
-                        metadata.groupChatMode === "individual"
-                          ? "bg-[var(--primary)] text-white"
-                          : "text-[var(--muted-foreground)] hover:bg-[var(--accent)]",
-                      )}
-                    >
-                      Individual
-                    </button>
-                  </div>
+              <div className="space-y-2">
+                <label className="text-[0.6875rem] font-medium text-[var(--muted-foreground)]">Mode</label>
+                <div className="flex rounded-lg ring-1 ring-[var(--border)]">
+                  <button
+                    onClick={() => updateMeta.mutate({ id: chat.id, groupChatMode: "merged" })}
+                    className={cn(
+                      "flex-1 px-3 py-2 text-[0.6875rem] font-medium transition-colors rounded-l-lg",
+                      (metadata.groupChatMode ?? "merged") === "merged"
+                        ? "bg-[var(--primary)] text-white"
+                        : "text-[var(--muted-foreground)] hover:bg-[var(--accent)]",
+                    )}
+                  >
+                    {isConversation ? "Grouped" : "Merged (Narrator)"}
+                  </button>
+                  <button
+                    onClick={() => {
+                      if (metadata.groupChatMode === "individual") return;
+                      updateMeta.mutate({
+                        id: chat.id,
+                        groupChatMode: "individual",
+                        ...(isConversation && metadata.groupResponseOrder === "manual"
+                          ? { groupResponseOrder: "sequential" as const }
+                          : {}),
+                      });
+                      if (isConversation) {
+                        toast.warning("Individual replies can use many tokens", {
+                          description:
+                            "Each responding character uses a separate model request. Large groups with Autonomous Messaging can increase token use quickly.",
+                          duration: 12_000,
+                        });
+                      }
+                    }}
+                    className={cn(
+                      "flex-1 px-3 py-2 text-[0.6875rem] font-medium transition-colors rounded-r-lg",
+                      metadata.groupChatMode === "individual"
+                        ? "bg-[var(--primary)] text-white"
+                        : "text-[var(--muted-foreground)] hover:bg-[var(--accent)]",
+                    )}
+                  >
+                    Individual
+                  </button>
                 </div>
-              )}
+              </div>
 
               {/* Merged mode: speaker color option */}
               {!isConversation && (metadata.groupChatMode ?? "merged") === "merged" && (
@@ -5049,7 +5286,7 @@ export function ChatSettingsDrawer({
               )}
 
               {/* Individual mode: response order */}
-              {!isConversation && metadata.groupChatMode === "individual" && (
+              {metadata.groupChatMode === "individual" && (
                 <div className="mt-2 space-y-2">
                   <label className="text-[0.6875rem] font-medium text-[var(--muted-foreground)]">Response Order</label>
                   <div className="flex rounded-lg ring-1 ring-[var(--border)]">
@@ -5089,10 +5326,16 @@ export function ChatSettingsDrawer({
                   </div>
                   <p className="text-[0.625rem] text-[var(--muted-foreground)]">
                     {metadata.groupResponseOrder === "manual"
-                      ? "No automatic responses — use the character picker in the input bar to trigger responses one at a time."
+                      ? isConversation
+                        ? "No automatic responses — @mention one or more characters to call them into the conversation."
+                        : "No automatic responses — use the character picker in the input bar to trigger responses one at a time."
                       : metadata.groupResponseOrder === "smart"
-                        ? "An AI agent decides which characters should respond based on the scene context."
-                        : "Characters respond one by one in their listed order."}
+                        ? isConversation
+                          ? "Smart chooses one or more available characters using the conversation, schedule status, and talkativeness."
+                          : "An AI agent decides which characters should respond based on the scene context."
+                        : isConversation
+                          ? "Available characters respond one by one in their listed order; offline characters are skipped."
+                          : "Characters respond one by one in their listed order."}
                   </p>
                   <button
                     onClick={() =>
@@ -5128,40 +5371,42 @@ export function ChatSettingsDrawer({
                       />
                     </div>
                   </button>
-                  <button
-                    onClick={() =>
-                      updateMeta.mutate({
-                        id: chat.id,
-                        groupSpeakerNamesInHistory: metadata.groupSpeakerNamesInHistory !== true,
-                      })
-                    }
-                    className={cn(
-                      "mari-chat-option-field flex w-full items-center justify-between rounded-lg px-3 py-2.5 text-left transition-all",
-                      metadata.groupSpeakerNamesInHistory === true && "mari-chat-option-field--active",
-                    )}
-                  >
-                    <div className="min-w-0 flex-1">
-                      <span className="text-[0.6875rem] font-medium">Name Prefix History</span>
-                      <p className="mt-0.5 text-[0.625rem] leading-relaxed text-[var(--muted-foreground)]">
-                        {metadata.groupSpeakerNamesInHistory === true
-                          ? "History turns are sent as Name: message before merged role blocks."
-                          : "History turns keep their stored text before role merging."}
-                      </p>
-                    </div>
-                    <div
+                  {!isConversation && (
+                    <button
+                      onClick={() =>
+                        updateMeta.mutate({
+                          id: chat.id,
+                          groupSpeakerNamesInHistory: metadata.groupSpeakerNamesInHistory !== true,
+                        })
+                      }
                       className={cn(
-                        "mari-chat-option-switch ml-3 h-5 w-9 shrink-0 rounded-full p-0.5 transition-colors",
-                        metadata.groupSpeakerNamesInHistory === true && "mari-chat-option-switch--active",
+                        "mari-chat-option-field flex w-full items-center justify-between rounded-lg px-3 py-2.5 text-left transition-all",
+                        metadata.groupSpeakerNamesInHistory === true && "mari-chat-option-field--active",
                       )}
                     >
+                      <div className="min-w-0 flex-1">
+                        <span className="text-[0.6875rem] font-medium">Name Prefix History</span>
+                        <p className="mt-0.5 text-[0.625rem] leading-relaxed text-[var(--muted-foreground)]">
+                          {metadata.groupSpeakerNamesInHistory === true
+                            ? "History turns are sent as Name: message before merged role blocks."
+                            : "History turns keep their stored text before role merging."}
+                        </p>
+                      </div>
                       <div
                         className={cn(
-                          "h-4 w-4 rounded-full bg-white shadow-sm transition-transform",
-                          metadata.groupSpeakerNamesInHistory === true && "translate-x-3.5",
+                          "mari-chat-option-switch ml-3 h-5 w-9 shrink-0 rounded-full p-0.5 transition-colors",
+                          metadata.groupSpeakerNamesInHistory === true && "mari-chat-option-switch--active",
                         )}
-                      />
-                    </div>
-                  </button>
+                      >
+                        <div
+                          className={cn(
+                            "h-4 w-4 rounded-full bg-white shadow-sm transition-transform",
+                            metadata.groupSpeakerNamesInHistory === true && "translate-x-3.5",
+                          )}
+                        />
+                      </div>
+                    </button>
+                  )}
                 </div>
               )}
 
@@ -5256,68 +5501,50 @@ export function ChatSettingsDrawer({
 
                   {metadata.autonomousMessages && (
                     <div className="border-t border-[var(--border)]/50 px-3 pb-2.5 pt-2">
-                      <label className="space-y-1.5">
+                      <div className="space-y-1.5">
                         <span className="block text-[0.625rem] font-medium text-[var(--muted-foreground)]">
                           Chat Check-In Cap
                         </span>
                         <select
-                          value={autonomousDailyCapOverride ?? ""}
+                          aria-label="Chat check-in cap mode"
+                          value={autonomousDailyCapOverride === null ? "default" : "numeric"}
                           onChange={(e) =>
                             updateMeta.mutate({
                               id: chat.id,
-                              autonomousDailyCapOverride: e.target.value ? Number(e.target.value) : null,
+                              autonomousDailyCapOverride:
+                                e.target.value === "numeric" ? (autonomousDailyCapOverride ?? 8) : null,
                             })
                           }
                           className="w-full rounded-lg bg-[var(--secondary)] px-3 py-2 text-xs outline-none ring-1 ring-transparent transition-shadow focus:ring-[var(--primary)]/40"
                         >
-                          <option value="">Default chat ceiling (talkativeness-based)</option>
-                          {AUTONOMOUS_DAILY_CAP_OPTIONS.map((cap) => (
-                            <option key={cap} value={cap}>
-                              {cap} check-in{cap === 1 ? "" : "s"} / day
-                            </option>
-                          ))}
+                          <option value="default">Default chat ceiling (talkativeness-based)</option>
+                          <option value="numeric">Numeric value</option>
                         </select>
+                        {autonomousDailyCapOverride !== null && (
+                          <label className="flex items-center justify-between gap-3 rounded-md bg-[var(--background)]/35 px-2.5 py-2">
+                            <span className="text-[0.625rem] text-[var(--muted-foreground)]">Check-ins per day</span>
+                            <DraftNumberInput
+                              value={autonomousDailyCapOverride}
+                              min={1}
+                              onCommit={(value) =>
+                                updateMeta.mutate({
+                                  id: chat.id,
+                                  autonomousDailyCapOverride: value,
+                                })
+                              }
+                              ariaLabel="Numeric chat check-in ceiling"
+                              className="w-24 rounded-md bg-[var(--secondary)] px-2 py-1.5 text-right text-xs outline-none ring-1 ring-transparent transition-shadow focus:ring-[var(--primary)]/40"
+                            />
+                          </label>
+                        )}
                         <p className="text-[0.55rem] text-[var(--muted-foreground)]">
-                          Sets the chat-wide ceiling; character caps can only lower it.
+                          Sets the chat-wide ceiling; character caps can only lower it. Higher ceilings may create many
+                          model requests and notifications.
                         </p>
-                      </label>
+                      </div>
                     </div>
                   )}
                 </div>
-
-                <button
-                  onClick={() => {
-                    const onlyWhenMentioned = metadata.groupResponseOrder === "manual";
-                    updateMeta.mutate({
-                      id: chat.id,
-                      groupResponseOrder: onlyWhenMentioned ? "sequential" : "manual",
-                    });
-                  }}
-                  className={cn(
-                    "mari-chat-option-field flex w-full items-center justify-between rounded-lg px-3 py-2.5 text-left transition-all",
-                    metadata.groupResponseOrder === "manual" && "mari-chat-option-field--active",
-                  )}
-                >
-                  <div className="flex-1 min-w-0">
-                    <span className="text-xs font-medium">Reply When Mentioned</span>
-                    <p className="text-[0.625rem] text-[var(--muted-foreground)]">
-                      Characters wait for direct mentions or manual response triggers
-                    </p>
-                  </div>
-                  <div
-                    className={cn(
-                      "mari-chat-option-switch h-5 w-9 shrink-0 rounded-full p-0.5 transition-colors",
-                      metadata.groupResponseOrder === "manual" && "mari-chat-option-switch--active",
-                    )}
-                  >
-                    <div
-                      className={cn(
-                        "h-4 w-4 rounded-full bg-white shadow-sm transition-transform",
-                        metadata.groupResponseOrder === "manual" && "translate-x-3.5",
-                      )}
-                    />
-                  </div>
-                </button>
 
                 {/* Character exchanges toggle (group chats only) */}
                 {chatCharIds.length > 1 && (
@@ -5477,7 +5704,7 @@ export function ChatSettingsDrawer({
               style={{ order: CHAT_SETTINGS_ORDER.agents }}
               label="Agents"
               icon={<Sparkles size="0.875rem" />}
-              help="Configure Conversation commands and the settings supplied by installed feature packages."
+              help="Configure Conversation commands, custom agents, and settings supplied by installed feature packages."
             >
               <div className="space-y-3">
                 {hasConversationCommands && (
@@ -5599,23 +5826,7 @@ export function ChatSettingsDrawer({
                               </select>
                             </label>
                             {renderIllustratorPromptConnectionSelect()}
-                            <label className="flex flex-col gap-1">
-                              <span className="text-[0.625rem] font-medium text-[var(--foreground)]">Image Style</span>
-                              <select
-                                value={(metadata.imageStyleProfileId as string) ?? ""}
-                                onChange={(e) =>
-                                  updateMeta.mutate({ id: chat.id, imageStyleProfileId: e.target.value || null })
-                                }
-                                className="w-full rounded-lg border border-[var(--border)] bg-[var(--background)] px-2.5 py-2 text-xs text-[var(--foreground)] outline-none transition-colors focus:border-[var(--primary)]/50"
-                              >
-                                <option value="">Use default style from Style Profiles in Advanced settings</option>
-                                {imageStyleProfiles.profiles.map((profile) => (
-                                  <option key={profile.id} value={profile.id}>
-                                    {profile.name}
-                                  </option>
-                                ))}
-                              </select>
-                            </label>
+                            {renderIllustratorImageStyleSelect()}
                             <AgentSettingsToggle
                               label="Send Avatar References"
                               description="Send the matching character avatar or sprite as a reference image for generated selfies when the provider supports it."
@@ -5750,51 +5961,9 @@ export function ChatSettingsDrawer({
                     )}
                   </div>
                 )}
+                {renderCustomAgentPicker()}
+                {renderActiveCustomAgentSettingsCard()}
               </div>
-            </Section>
-          )}
-
-          {/* Cross-Chat Awareness — conversation mode only */}
-          {isConversation && (
-            <Section
-              label="Cross-Chat Awareness"
-              icon={<Link size="0.875rem" />}
-              help="Characters remember and reference conversations from other chats they're in. Pulls recent messages from sibling chats and injects them as context."
-            >
-              <button
-                onClick={() => {
-                  updateMeta.mutate({
-                    id: chat.id,
-                    crossChatAwareness: metadata.crossChatAwareness === false ? true : false,
-                  });
-                }}
-                className={cn(
-                  "flex w-full items-center justify-between rounded-lg px-3 py-2.5 text-left transition-all",
-                  metadata.crossChatAwareness !== false
-                    ? "bg-[var(--primary)]/10 ring-1 ring-[var(--primary)]/30"
-                    : "bg-[var(--secondary)] hover:bg-[var(--accent)]",
-                )}
-              >
-                <div className="flex-1 min-w-0">
-                  <span className="text-xs font-medium">Cross-Chat Awareness</span>
-                  <p className="text-[0.625rem] text-[var(--muted-foreground)]">
-                    Characters know what happens in their other chats
-                  </p>
-                </div>
-                <div
-                  className={cn(
-                    "h-5 w-9 shrink-0 rounded-full p-0.5 transition-colors",
-                    metadata.crossChatAwareness !== false ? "bg-[var(--primary)]" : "bg-[var(--muted-foreground)]/50",
-                  )}
-                >
-                  <div
-                    className={cn(
-                      "h-4 w-4 rounded-full bg-white shadow-sm transition-transform",
-                      metadata.crossChatAwareness !== false && "translate-x-3.5",
-                    )}
-                  />
-                </div>
-              </button>
             </Section>
           )}
 
@@ -5804,9 +5973,45 @@ export function ChatSettingsDrawer({
               style={{ order: CHAT_SETTINGS_ORDER.connectedChat }}
               label="Connected Chats"
               icon={<ArrowRightLeft size="0.875rem" />}
-              help="Link this conversation to a roleplay or game. Recent messages from the linked chat are pulled into context here automatically. To send something the other direction, the character uses `<influence>` (steers the next linked turn, one-shot) or `<note>` (persists on every future linked turn until cleared)."
+              help="Control awareness of sibling chats or link this conversation to a roleplay or game. Linked messages are pulled into context automatically; `<influence>` steers one linked turn and `<note>` persists until cleared."
             >
               <div className="space-y-2">
+                <button
+                  onClick={() => {
+                    updateMeta.mutate({
+                      id: chat.id,
+                      crossChatAwareness: metadata.crossChatAwareness === false ? true : false,
+                    });
+                  }}
+                  className={cn(
+                    "flex w-full items-center justify-between rounded-lg px-3 py-2.5 text-left transition-all",
+                    metadata.crossChatAwareness !== false
+                      ? "bg-[var(--primary)]/10 ring-1 ring-[var(--primary)]/30"
+                      : "bg-[var(--secondary)] hover:bg-[var(--accent)]",
+                  )}
+                >
+                  <div className="flex-1 min-w-0">
+                    <span className="text-xs font-medium">Cross-Chat Awareness</span>
+                    <p className="text-[0.625rem] text-[var(--muted-foreground)]">
+                      Characters know what happens in their other chats
+                    </p>
+                  </div>
+                  <div
+                    className={cn(
+                      "h-5 w-9 shrink-0 rounded-full p-0.5 transition-colors",
+                      metadata.crossChatAwareness !== false
+                        ? "bg-[var(--primary)]"
+                        : "bg-[var(--muted-foreground)]/50",
+                    )}
+                  >
+                    <div
+                      className={cn(
+                        "h-4 w-4 rounded-full bg-white shadow-sm transition-transform",
+                        metadata.crossChatAwareness !== false && "translate-x-3.5",
+                      )}
+                    />
+                  </div>
+                </button>
                 {chat.connectedChatId ? (
                   (() => {
                     const linked = (allChats ?? []).find((c: Chat) => c.id === chat.connectedChatId);
@@ -6521,24 +6726,7 @@ export function ChatSettingsDrawer({
                         </div>
                       )}
 
-                      {gameMusicDjEnabled && musicPlayerSource === "custom" && (
-                        <label className="flex flex-col gap-1">
-                          <span className="text-[0.625rem] font-medium text-[var(--muted-foreground)]">
-                            Custom music folder
-                          </span>
-                          <input
-                            key={`${chat.id}-game-custom-music-${customMusicFolder}`}
-                            defaultValue={customMusicFolder}
-                            onBlur={(event) => void saveCustomMusicFolder(event.target.value)}
-                            placeholder="music"
-                            className="w-full rounded-lg border border-[var(--border)] bg-[var(--background)] px-2.5 py-2 font-mono text-xs text-[var(--foreground)] placeholder:text-[var(--muted-foreground)]/50"
-                          />
-                          <span className="text-[0.5625rem] text-[var(--muted-foreground)]">
-                            Reads local audio from Game Assets, for example <code>music</code> or{" "}
-                            <code>music/combat</code>.
-                          </span>
-                        </label>
-                      )}
+                      {gameMusicDjEnabled && musicPlayerSource === "custom" && renderCustomMusicLibrarySettings("game")}
                     </AgentSettingsCard>
                   )}
 
@@ -7171,6 +7359,7 @@ export function ChatSettingsDrawer({
                               agentPromptTemplateSelections["echo-chamber"] ??
                               getDefaultPromptTemplateIdForAgent("echo-chamber")
                             }
+                            overridden={typeof agentPromptTemplateSelections["echo-chamber"] === "string"}
                             onChange={(promptTemplateId) =>
                               updateAgentPromptTemplateSelection("echo-chamber", promptTemplateId)
                             }
@@ -7209,22 +7398,41 @@ export function ChatSettingsDrawer({
                               agentPromptTemplateSelections["illustrator"] ??
                               getDefaultPromptTemplateIdForAgent("illustrator")
                             }
+                            overridden={typeof agentPromptTemplateSelections["illustrator"] === "string"}
                             onChange={(promptTemplateId) =>
                               updateAgentPromptTemplateSelection("illustrator", promptTemplateId)
                             }
                           />
                           {renderIllustratorPromptConnectionSelect()}
                           <AgentSettingsToggle
+                            label="Generate Scene Backgrounds"
+                            description="When the story enters a new location, let Illustrator create a reusable background, add it to Appearance, and make it active."
+                            enabled={illustratorAutoBackgroundsEnabled}
+                            onToggle={toggleIllustratorAutoBackgrounds}
+                          />
+                          {renderIllustratorImageStyleSelect({
+                            description:
+                              "Shared by Illustrator scenes and generated backgrounds so both keep the same visual language.",
+                          })}
+                          <p className="text-[0.59375rem] leading-snug text-[var(--muted-foreground)]">
+                            Uses the Background resolution from Settings → Generations. Tracker locations are preferred;
+                            recent scene context is used when no location tracker is available.
+                          </p>
+                          <AgentSettingsToggle
                             label="Attach Card Appearance"
                             description="Append matched character appearance lines to image prompts, using only visible/generated names."
                             enabled={illustratorIncludeCharacterAppearance}
                             onToggle={toggleIllustratorCharacterAppearance}
+                            overridden={typeof metadata.illustratorIncludeCharacterAppearance === "boolean"}
+                            onReset={resetIllustratorCharacterAppearance}
                           />
                           <AgentSettingsToggle
                             label="Send Avatar References"
                             description="Send matching character and persona avatars or sprites as reference images when the provider supports them."
                             enabled={illustratorUseAvatarReferences}
                             onToggle={toggleIllustratorAvatarReferences}
+                            overridden={typeof metadata.illustratorUseAvatarReferences === "boolean"}
+                            onReset={resetIllustratorAvatarReferences}
                           />
                           <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg bg-[var(--background)]/75 px-3 py-2 ring-1 ring-[var(--border)]">
                             <p className="min-w-0 flex-1 text-[0.625rem] leading-snug text-[var(--muted-foreground)]">
@@ -7395,31 +7603,16 @@ export function ChatSettingsDrawer({
                             </>
                           )}
 
-                          {musicPlayerSource === "custom" && (
-                            <label className="flex flex-col gap-1">
-                              <span className="text-[0.625rem] font-medium text-[var(--muted-foreground)]">
-                                Custom music folder
-                              </span>
-                              <input
-                                key={`${chat.id}-roleplay-custom-music-${customMusicFolder}`}
-                                defaultValue={customMusicFolder}
-                                onBlur={(event) => void saveCustomMusicFolder(event.target.value)}
-                                placeholder="music"
-                                className="w-full rounded-lg border border-[var(--border)] bg-[var(--background)] px-2.5 py-2 font-mono text-xs text-[var(--foreground)] placeholder:text-[var(--muted-foreground)]/50"
-                              />
-                              <span className="text-[0.5625rem] text-[var(--muted-foreground)]">
-                                Reads local audio from Game Assets, for example <code>music</code> or{" "}
-                                <code>music/combat</code>.
-                              </span>
-                            </label>
-                          )}
+                          {musicPlayerSource === "custom" && renderCustomMusicLibrarySettings("roleplay")}
 
                           <p className="text-[0.625rem] text-[var(--muted-foreground)]">
                             {musicPlayerSource === "spotify"
                               ? "Roleplay DJ queues several fitting tracks when it changes music."
                               : musicPlayerSource === "youtube"
                                 ? "YouTube mode uses the Music DJ agent's YouTube connection and embedded player."
-                                : "Custom mode picks from local Game Assets music and plays it in Marinara Engine."}
+                                : customMusicSource === "folder"
+                                  ? "Custom mode picks from the selected device folder and plays it in Marinara Engine."
+                                  : "Custom mode picks from local Game Assets music and plays it in Marinara Engine."}
                           </p>
                         </AgentSettingsCard>
                       )}
@@ -7604,23 +7797,9 @@ export function ChatSettingsDrawer({
                               ))}
                             </select>
                           </label>
-                          <label className="flex flex-col gap-1">
-                            <span className="text-[0.625rem] font-medium text-[var(--foreground)]">Image Style</span>
-                            <select
-                              value={(metadata.imageStyleProfileId as string) ?? ""}
-                              onChange={(e) =>
-                                updateMeta.mutate({ id: chat.id, imageStyleProfileId: e.target.value || null })
-                              }
-                              className="w-full rounded-lg border border-[var(--border)] bg-[var(--background)] px-2.5 py-2 text-xs text-[var(--foreground)] outline-none transition-colors focus:border-[var(--primary)]/50"
-                            >
-                              <option value="">Use global or connection default</option>
-                              {imageStyleProfiles.profiles.map((profile) => (
-                                <option key={profile.id} value={profile.id}>
-                                  {profile.name}
-                                </option>
-                              ))}
-                            </select>
-                          </label>
+                          {renderIllustratorImageStyleSelect({
+                            emptyOptionLabel: "Use global or connection default",
+                          })}
                           <AgentSettingsToggle
                             label="Use Campaign Art Style"
                             description="Add this game's setup-generated art direction as a separate layer alongside the selected Image Style profile."
@@ -8167,6 +8346,7 @@ export function ChatSettingsDrawer({
                                             agentPromptTemplateSelections[agent.id] ??
                                             getDefaultPromptTemplateIdForAgent(agent.id)
                                           }
+                                          overridden={typeof agentPromptTemplateSelections[agent.id] === "string"}
                                           onChange={(promptTemplateId) =>
                                             updateAgentPromptTemplateSelection(agent.id, promptTemplateId)
                                           }
@@ -8177,12 +8357,18 @@ export function ChatSettingsDrawer({
                                           description="Append matched character appearance lines to image prompts, using only visible/generated names."
                                           enabled={illustratorIncludeCharacterAppearance}
                                           onToggle={toggleIllustratorCharacterAppearance}
+                                          overridden={
+                                            typeof metadata.illustratorIncludeCharacterAppearance === "boolean"
+                                          }
+                                          onReset={resetIllustratorCharacterAppearance}
                                         />
                                         <AgentSettingsToggle
                                           label="Send Avatar References"
                                           description="Send matching character and persona avatars or sprites as reference images when the provider supports them."
                                           enabled={illustratorUseAvatarReferences}
                                           onToggle={toggleIllustratorAvatarReferences}
+                                          overridden={typeof metadata.illustratorUseAvatarReferences === "boolean"}
+                                          onReset={resetIllustratorAvatarReferences}
                                         />
                                       </AgentSettingsCard>
                                     )}
@@ -8524,23 +8710,23 @@ export function ChatSettingsDrawer({
                 {/* Recent message tail */}
                 <div className="space-y-1.5">
                   <span className="text-xs font-medium">Recent Message Tail</span>
-                  <input
-                    type="number"
-                    min={0}
-                    max={50}
-                    step={1}
-                    value={(metadata.summaryTailMessages as number | undefined) ?? 10}
-                    onChange={(e) => {
-                      const raw = Number(e.target.value);
-                      const clamped = Number.isFinite(raw) ? Math.max(0, Math.min(50, Math.floor(raw))) : 10;
-                      updateMeta.mutate({ id: chat.id, summaryTailMessages: clamped });
-                    }}
+                  <DraftNumberInput
+                    value={(metadata.summaryTailMessages as number | undefined) ?? SUMMARY_TAIL_MESSAGES.DEFAULT}
+                    min={SUMMARY_TAIL_MESSAGES.MIN}
+                    onCommit={(value) =>
+                      updateMeta.mutate({
+                        id: chat.id,
+                        summaryTailMessages: value,
+                      })
+                    }
+                    ariaLabel="Recent message tail"
                     className="w-full rounded-lg bg-[var(--secondary)] px-3 py-2 text-xs outline-none ring-1 ring-transparent transition-shadow focus:ring-[var(--primary)]/40"
                   />
                   <p className="text-[0.625rem] text-[var(--muted-foreground)]">
                     How many recent messages to keep word-for-word, even once they&apos;re summarized. Helps characters
                     pick up the actual flow of last night&apos;s conversation instead of just the gist. Set to{" "}
-                    <span className="font-medium">0</span> to disable.
+                    <span className="font-medium">0</span> to disable. Higher values increase prompt size and model
+                    cost.
                   </p>
                 </div>
               </div>
@@ -9357,31 +9543,38 @@ function AgentSettingsToggle({
   description,
   enabled,
   onToggle,
+  overridden = false,
+  onReset,
   surface = "card",
 }: {
   label: string;
   description: string;
   enabled: boolean;
   onToggle: () => void;
+  overridden?: boolean;
+  onReset?: () => void;
   surface?: "card" | "secondary";
 }) {
   return (
-    <SettingsSwitch
-      label={label}
-      description={description}
-      checked={enabled}
-      onChange={() => onToggle()}
-      labelPosition="start"
-      className={cn(
-        "justify-between rounded-lg px-3 py-2.5 text-left",
-        enabled
-          ? "bg-[var(--primary)]/10 ring-1 ring-[var(--primary)]/30"
-          : surface === "secondary"
-            ? "bg-[var(--secondary)] hover:bg-[var(--accent)]"
-            : "bg-[var(--background)]/75 ring-1 ring-[var(--border)] hover:bg-[var(--accent)]",
-      )}
-      labelClassName="text-[0.6875rem] font-medium"
-    />
+    <div className="space-y-1">
+      <SettingsSwitch
+        label={label}
+        description={description}
+        checked={enabled}
+        onChange={() => onToggle()}
+        labelPosition="start"
+        className={cn(
+          "justify-between rounded-lg px-3 py-2.5 text-left",
+          enabled
+            ? "bg-[var(--primary)]/10 ring-1 ring-[var(--primary)]/30"
+            : surface === "secondary"
+              ? "bg-[var(--secondary)] hover:bg-[var(--accent)]"
+              : "bg-[var(--background)]/75 ring-1 ring-[var(--border)] hover:bg-[var(--accent)]",
+        )}
+        labelClassName="text-[0.6875rem] font-medium"
+      />
+      {onReset ? <AgentDefaultStatus overridden={overridden} onReset={onReset} /> : null}
+    </div>
   );
 }
 
@@ -10224,13 +10417,17 @@ function HapticConnectionPanel({
 function AgentPromptTemplateSelect({
   options,
   selectedId,
+  overridden = false,
   onChange,
 }: {
   options: AgentPromptTemplateOption[];
   selectedId: string;
+  overridden?: boolean;
   onChange: (promptTemplateId: string) => void;
 }) {
-  if (options.length <= 1) return null;
+  if (options.length <= 1) {
+    return overridden ? <AgentDefaultStatus overridden onReset={() => onChange("")} /> : null;
+  }
   const activeOption = options.find((option) => option.id === selectedId) ?? options[0];
 
   return (
@@ -10253,6 +10450,24 @@ function AgentPromptTemplateSelect({
         <p className="mt-1.5 text-[0.5625rem] leading-snug text-[var(--muted-foreground)]">
           {activeOption.description}
         </p>
+      ) : null}
+      <AgentDefaultStatus overridden={overridden} onReset={() => onChange("")} />
+    </div>
+  );
+}
+
+function AgentDefaultStatus({ overridden, onReset }: { overridden: boolean; onReset: () => void }) {
+  return (
+    <div className="flex items-center justify-between gap-2 px-1 text-[0.625rem] text-[var(--muted-foreground)]">
+      <span>{overridden ? "Chat override" : "Using agent default"}</span>
+      {overridden ? (
+        <button
+          type="button"
+          onClick={onReset}
+          className="font-medium text-[var(--primary)] transition-opacity hover:opacity-80"
+        >
+          Use agent default
+        </button>
       ) : null}
     </div>
   );

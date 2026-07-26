@@ -280,9 +280,9 @@ function writeChatBackgroundMeta(meta: ChatBackgroundMeta): void {
   atomicWriteText(CHAT_BACKGROUND_META_PATH, JSON.stringify(meta, null, 2));
 }
 
-function chatBackgroundTags(req: ChatBackgroundGenRequest, slug: string): string[] {
-  const tags = new Set<string>(["generated", req.sourceMode === "game" ? "game" : "roleplay", slug.replace(/-/g, " ")]);
-  for (const value of [req.locationSlug, req.reason]) {
+export function chatBackgroundTags(req: ChatBackgroundGenRequest, slug: string): string[] {
+  const tags = new Set<string>(["generated", req.sourceMode ?? "roleplay", slug.replace(/-/g, " ")]);
+  for (const value of [req.locationSlug, req.reason, ...(req.tags ?? [])]) {
     if (!value) continue;
     const clean = value.trim().replace(/\s+/g, " ");
     if (clean) tags.add(clean.slice(0, 80));
@@ -363,10 +363,13 @@ function npcPortraitSlug(req: NpcPortraitRequest): string {
   });
 }
 
-function hasExplicitNonHumanCue(value: string): boolean {
-  return /\b(?:animal|cat|kitten|dog|puppy|wolf|fox|bird|raven|crow|owl|horse|deer|rabbit|rat|mouse|snake|lizard|dragon|beast|creature|monster|spirit|ghost|construct|golem|doll|object|statue|mascot|non[-\s]?human|anthropomorphic|feral|quadruped)\b/i.test(
-    value,
+function deriveExplicitNonHumanCue(value: string): string | null {
+  const match = value.match(
+    /\b(?:xenomorph|extraterrestrial|alien|biomechanical|insectoid|reptilian|avian|amphibian|android|robot|synth(?:etic)?|animal|cat|kitten|dog|puppy|wolf|fox|bird|raven|crow|owl|horse|deer|rabbit|rat|mouse|snake|lizard|dragon|beast|creature|monster|spirit|ghost|construct|golem|doll|object|statue|mascot|non[-\s]?human|anthropomorphic|feral|quadruped)\b/i,
   );
+  if (!match?.[0]) return null;
+  const cue = match[0].toLowerCase().replace(/\s+/g, "-");
+  return cue === "non-human" || cue === "nonhuman" ? "non-human creature" : cue;
 }
 
 function normalizeNpcGenderCue(gender: string | null | undefined, pronouns: string | null | undefined, text: string) {
@@ -443,12 +446,14 @@ function collectNpcVisualAttributeTags(text: string): string[] {
   return tags.slice(0, 4);
 }
 
-function buildNpcAppearanceLine(req: NpcPortraitRequest, explicitNonHuman: boolean): string {
+function buildNpcAppearanceLine(req: NpcPortraitRequest, nonHumanCue: string | null): string {
   const context = req.appearance.trim();
-  if (explicitNonHuman && !context) return "Appearance: non-human creature.";
+  if (nonHumanCue && !context) return `Appearance: ${nonHumanCue}.`;
 
   const identityTags: string[] = [];
-  if (!explicitNonHuman) {
+  if (nonHumanCue) {
+    identityTags.push(nonHumanCue);
+  } else {
     identityTags.push(deriveNpcAgeCue(context) ?? "adult");
     identityTags.push(normalizeNpcGenderCue(req.gender, req.pronouns, context) ?? "androgynous");
     identityTags.push("human or humanoid person");
@@ -462,15 +467,15 @@ function buildNpcAppearanceLine(req: NpcPortraitRequest, explicitNonHuman: boole
 
 function npcPortraitVariables(req: NpcPortraitRequest) {
   const context = req.appearance.trim();
-  const explicitNonHuman = hasExplicitNonHumanCue(`${req.npcName} ${context}`);
+  const nonHumanCue = deriveExplicitNonHumanCue(`${req.npcName} ${context}`);
   return {
     npcName: req.npcName,
-    appearanceLine: buildNpcAppearanceLine(req, explicitNonHuman),
-    nonHumanRule: explicitNonHuman
+    appearanceLine: buildNpcAppearanceLine(req, nonHumanCue),
+    nonHumanRule: nonHumanCue
       ? "The description explicitly indicates a non-human subject. Preserve that exact species, body plan, age category, and silhouette; do not turn it into a human or kemonomimi character unless the description says humanoid."
       : "Unless the description explicitly says otherwise, depict this NPC as a human or humanoid person. Do not infer an animal species from the name, mood, speech verbs, or setting.",
     artStyleLine: req.artStyle ? `Art style: ${req.artStyle}.` : "",
-    compositionRule: explicitNonHuman
+    compositionRule: nonHumanCue
       ? "Use a centered avatar composition appropriate to the subject, including a creature portrait or full head-and-body crop only when that best preserves the described non-human form."
       : "Use a centered human/humanoid avatar composition: face and shoulders, readable expression, clear outfit cues.",
   };
@@ -560,13 +565,19 @@ export async function buildNpcPortraitProviderPrompt(req: NpcPortraitRequest): P
     maxCharacters: 1400,
     assetContext: [
       `NPC name: ${req.npcName}`,
-      req.appearance ? `Required canonical NPC visual profile: ${req.appearance}` : "",
+      req.appearance ? `Appearance traits: ${req.appearance}` : "",
       req.gender ? `Gender: ${req.gender}` : "",
       req.pronouns ? `Pronouns: ${req.pronouns}` : "",
       req.artStyle ? `Art style: ${req.artStyle}` : "",
     ],
   });
-  return compileGameImagePrompt(req, "portrait", prompt, 1400, GAME_PORTRAIT_NEGATIVE_PROMPT);
+  return compileGameImagePrompt(
+    req.dynamicPromptGenerator ? { ...req, appearance: null } : req,
+    "portrait",
+    prompt,
+    1400,
+    GAME_PORTRAIT_NEGATIVE_PROMPT,
+  );
 }
 
 export async function buildNpcPortraitImagePrompt(req: NpcPortraitRequest): Promise<string> {
@@ -688,10 +699,11 @@ async function maybeGenerateDynamicGameImagePrompt(
   if (!generator) return request.sourcePrompt;
   try {
     const generated = cleanDynamicGameImagePrompt(await generator(request), request.maxCharacters);
-    return generated || request.sourcePrompt;
+    if (!generated) throw new Error("Dynamic image prompt generation returned no usable prompt");
+    return generated;
   } catch (err) {
-    logger.warn(err, "[game-asset-gen] Dynamic image prompt generation failed; using deterministic prompt");
-    return request.sourcePrompt;
+    logger.warn(err, "[game-asset-gen] Dynamic image prompt generation failed");
+    throw err;
   }
 }
 
@@ -832,6 +844,8 @@ export interface BackgroundGenRequest {
 export interface ChatBackgroundGenRequest extends BackgroundGenRequest {
   /** Why the background agent asked for generation. Stored as background metadata. */
   reason?: string;
+  /** Searchable library tags supplied by the prompt writer. */
+  tags?: string[];
   /** Source chat mode used for library tags. */
   sourceMode?: "roleplay" | "visual_novel" | "game";
 }

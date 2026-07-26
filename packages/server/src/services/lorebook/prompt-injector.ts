@@ -4,7 +4,7 @@
 // them into the prompt at the correct positions
 // (WORLD_INFO_BEFORE / WORLD_INFO_AFTER / depth).
 // ──────────────────────────────────────────────
-import type { LorebookEntry, LorebookRole } from "@marinara-engine/shared";
+import type { LorebookRole } from "@marinara-engine/shared";
 import type { ActivatedEntry } from "./keyword-scanner.js";
 
 /** A prompt message ready for injection. */

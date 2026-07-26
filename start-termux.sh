@@ -13,19 +13,6 @@ echo ""
 # Navigate to script directory
 cd "$(dirname "$0")"
 
-# Load launcher settings before the update decision. Server settings are reused below.
-if [ -f .env ]; then
-  set -a
-  . ./.env
-  set +a
-fi
-
-AUTO_UPDATE_ENABLED_NORMALIZED=$(printf '%s' "${AUTO_UPDATE_ENABLED:-true}" | tr '[:upper:]' '[:lower:]' | tr -d '\r ')
-case "$AUTO_UPDATE_ENABLED_NORMALIZED" in
-  0|false|no|off) AUTO_UPDATE_DISABLED=1 ;;
-  *) AUTO_UPDATE_DISABLED=0 ;;
-esac
-
 SKIP_UPDATE=0
 for arg in "$@"; do
     case "$arg" in
@@ -120,6 +107,29 @@ if [ "$NODE_VERSION" -lt 24 ]; then
     echo "  [OK] Node.js $(node -v) ready"
 fi
 
+load_launcher_setting() {
+    local setting_name="$1"
+    local setting_value
+    if setting_value=$(node scripts/read-launcher-env.mjs .env "$setting_name"); then
+        printf -v "$setting_name" '%s' "$setting_value"
+        export "$setting_name"
+    fi
+}
+
+# Read only settings used by this launcher. The server loads every other .env
+# value itself. Node parses these as inert dotenv data; no shell code is sourced.
+if [ -f .env ]; then
+    for setting_name in AUTO_UPDATE_ENABLED PORT HOST SSL_CERT SSL_KEY AUTO_OPEN_BROWSER; do
+        load_launcher_setting "$setting_name"
+    done
+fi
+
+AUTO_UPDATE_ENABLED_NORMALIZED=$(printf '%s' "${AUTO_UPDATE_ENABLED:-true}" | tr '[:upper:]' '[:lower:]' | tr -d '\r ')
+case "$AUTO_UPDATE_ENABLED_NORMALIZED" in
+  0|false|no|off) AUTO_UPDATE_DISABLED=1 ;;
+  *) AUTO_UPDATE_DISABLED=0 ;;
+esac
+
 # ── Check pnpm ──
 PNPM_VERSION=$(node -p "JSON.parse(require('fs').readFileSync('package.json','utf8')).packageManager?.split('@')[1] || '10.33.2'")
 PNPM_RUNNER="pnpm"
@@ -208,6 +218,7 @@ if [ "$SKIP_UPDATE" = "1" ]; then
     echo "  [OK] Skipping update check; starting the current local install."
 elif [ "$AUTO_UPDATE_DISABLED" = "1" ]; then
     echo "  [OK] Automatic Engine updates disabled by AUTO_UPDATE_ENABLED=false."
+    node scripts/check-launcher-update.mjs
 elif [ -d ".git" ]; then
     echo "  [..] Checking for updates..."
     OLD_HEAD=$(git rev-parse HEAD 2>/dev/null)

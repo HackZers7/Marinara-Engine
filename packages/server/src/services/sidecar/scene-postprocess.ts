@@ -19,40 +19,6 @@ import type {
 import { normalizeLocationKind, normalizeMusicGenre, normalizeMusicIntensity } from "@marinara-engine/shared";
 import { logger } from "../../lib/logger.js";
 
-// ── Expression normalization ──
-
-const VALID_EXPRESSIONS = new Set([
-  "happy",
-  "sad",
-  "angry",
-  "smirk",
-  "surprised",
-  "neutral",
-  "worried",
-  "thinking",
-  "amused",
-  "battle_stance",
-  "frightened",
-  "determined",
-  "exhausted",
-]);
-
-/** keyword fragments → canonical expression  */
-const EXPRESSION_MAP: [string[], string][] = [
-  [["happy", "joy", "cheerful", "delighted", "pleased", "bright", "grinning"], "happy"],
-  [["sad", "sorrow", "grief", "melanchol", "tearful", "dejected", "mournful"], "sad"],
-  [["angry", "rage", "fury", "furious", "hostile", "irritat", "livid"], "angry"],
-  [["smirk", "sly", "smug", "sardonic", "wry", "cunning", "scheming"], "smirk"],
-  [["surprise", "shock", "startl", "astonish", "stun", "bewild"], "surprised"],
-  [["worri", "anxious", "concern", "nervous", "uneasy", "apprehen"], "worried"],
-  [["think", "ponder", "contemplat", "thoughtful", "calculat", "consider"], "thinking"],
-  [["amuse", "playful", "entertai", "mischiev", "bemuse", "ironic", "clinical"], "amused"],
-  [["battle", "fight", "combat", "stance", "ready", "poised", "brace"], "battle_stance"],
-  [["fright", "fear", "terror", "scare", "horrif", "panic", "vulnerable"], "frightened"],
-  [["determin", "resolv", "command", "precise", "focus", "steel", "stoic", "stern"], "determined"],
-  [["exhaust", "tired", "fatigue", "weary", "drain", "spent", "collaps", "concuss", "disorient"], "exhausted"],
-];
-
 const VALID_DIRECTION_EFFECTS = new Set<DirectionCommand["effect"]>([
   "fade_from_black",
   "fade_to_black",
@@ -76,19 +42,6 @@ const VALID_DIRECTION_EFFECTS = new Set<DirectionCommand["effect"]>([
 
 const VALID_DIRECTION_TARGETS = new Set<NonNullable<DirectionCommand["target"]>>(["background", "content", "all"]);
 const VALID_SCENE_TIME_OF_DAY = new Set(["dawn", "morning", "afternoon", "evening", "night", "midnight"]);
-
-function normalizeExpression(value: string): string {
-  const lower = value.toLowerCase().trim();
-  // Direct hit (e.g. "amused")
-  const firstWord = lower.split(/[\s,;.]+/)[0] ?? "";
-  if (VALID_EXPRESSIONS.has(firstWord)) return firstWord;
-  if (VALID_EXPRESSIONS.has(lower)) return lower;
-  // Keyword scan
-  for (const [keywords, expr] of EXPRESSION_MAP) {
-    if (keywords.some((k) => lower.includes(k))) return expr;
-  }
-  return "neutral";
-}
 
 function normalizeSceneTimeOfDay(value: unknown): string | null {
   if (typeof value !== "string") return null;

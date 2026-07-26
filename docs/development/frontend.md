@@ -69,8 +69,8 @@ The only persisted store (localStorage via the Zustand `persist` middleware). It
 
 - Theme: `visualTheme` ("default" or "sillytavern"), the `data-theme` value (dark or light), and custom color overrides.
 - Appearance: `fontSize`, `chatFontSize`, `fontFamily`, custom fonts, and cursor style.
-- Chat display: `boldDialogue`, `showTimestamps`, `showModelName`, `messageGrouping`, and `messagesPerPage`.
-- Text styling: narration font color and opacity, chat font color and opacity, and text stroke.
+- Chat display: `boldDialogue`, `showTimestamps`, `showModelName`, and `messagesPerPage`.
+- Text styling: chat text color, roleplay message background opacity, and text stroke.
 - Streaming: `enableStreaming` and `streamingSpeed`.
 - Conversation theme: gradient colors for message bubbles.
 - Sound: `convoNotificationSound` and `rpNotificationSound`.
@@ -285,7 +285,7 @@ Each resource type has a full-page editor that replaces the chat area:
 
 | Editor            | File                                          | Manages                                                                         |
 | ----------------- | --------------------------------------------- | ------------------------------------------------------------------------------- |
-| Character Editor  | `components/characters/CharacterEditor.tsx`   | Character card fields, avatar, greeting, personality, system prompt, extensions |
+| Character Editor  | `components/characters/CharacterEditor.tsx`   | Character card fields, avatar, greeting, personality, system prompt, metadata   |
 | Lorebook Editor   | `components/lorebooks/LorebookEditor.tsx`     | Lorebook metadata and entries with keys, activation rules, injection settings   |
 | Preset Editor     | `components/presets/PresetEditor.tsx`         | Prompt sections, groups, markers, generation parameters, choice blocks          |
 | Connection Editor | `components/connections/ConnectionEditor.tsx` | API provider, base URL, model, context window, flags                            |
@@ -400,7 +400,6 @@ Key files in `packages/shared/src/constants/`:
 
 - `defaults.ts`: exports such as `APP_VERSION`, `PROFESSOR_MARI_ID`, `DEFAULT_CONNECTION_ID`, `DEFAULT_GENERATION_PARAMS`, `MAX_FILE_SIZES`, and `LIMITS`. This is the version source and holds default generation settings.
 - `providers.ts`: exports `PROVIDERS`, the API provider configs (OpenAI, Anthropic, Google, and more) with URLs and auth.
-- `chat-modes.ts`: exports `CHAT_MODES`, the definition record for each chat mode.
 - `model-lists.ts`: static model catalogs per provider, plus `IMAGE_GENERATION_SOURCES` for image generation providers.
 - `agent-prompts.ts`: base-only summary and secret-plot prompts plus runtime lookup for prompts supplied by installed agent packages.
 
@@ -411,7 +410,7 @@ All input validation uses Zod schemas from `packages/shared/src/schemas/`. Repre
 | Schema file             | Entities                                                           |
 | ----------------------- | ------------------------------------------------------------------ |
 | `agent.schema.ts`       | AgentConfig create and update, agent phases, result types          |
-| `character.schema.ts`   | Character card, extensions, character books, groups                |
+| `character.schema.ts`   | Character cards, compatibility metadata, character books, groups   |
 | `chat.schema.ts`        | Chat create, message create, generation request                   |
 | `connection.schema.ts`  | API connection create and update                                   |
 | `custom-tool.schema.ts` | Custom tool definitions                                            |
@@ -419,7 +418,7 @@ All input validation uses Zod schemas from `packages/shared/src/schemas/`. Repre
 | `prompt.schema.ts`      | Preset, section, group, choice block, generation parameters        |
 | `regex.schema.ts`       | Regex script create and update                                     |
 
-The folder also holds schemas for app settings, chat presets, conversation calls, custom emojis and stickers, extensions, Noodle, and themes.
+The folder also holds schemas for app settings, chat presets, conversation calls, custom emojis and stickers, Noodle, and themes.
 
 ### Types
 
@@ -428,7 +427,7 @@ Entity type definitions live in `packages/shared/src/types/`. A sample of the ke
 | Type file             | Key interfaces                                                                                              |
 | --------------------- | ---------------------------------------------------------------------------------------------------------- |
 | `agent.ts`            | `AgentConfig`, `AgentResult`, `AgentContext`, `ToolDefinition`, `ToolCall`, `ToolResult`, `BUILT_IN_AGENTS` |
-| `character.ts`        | `Character`, `CharacterCardV2`, `CharacterData`, `CharacterExtensions`, `RPGStatsConfig`                    |
+| `character.ts`        | `Character`, `CharacterCardV2`, `CharacterData`, `RPGStatsConfig`                                           |
 | `chat.ts`             | `Chat`, `ChatMetadata`, `Message`, `MessageExtra`, `GenerationInfo`, `StreamEvent`                          |
 | `connection.ts`       | `APIConnection`, `ModelInfo`, `ModelCapabilities`, `ConnectionTestResult`                                   |
 | `combat-encounter.ts` | `CombatPartyMember`, `CombatEnemy`, `CombatActionResult`, `EncounterSettings`                               |
@@ -527,7 +526,6 @@ Agent memory tools use `/api/agents/memory/:agentType/:chatId`, where `agentType
 | `/api/import/*`                 | SillyTavern and Marinara profile import |
 | `/api/admin/clear-all`          | Full data clear                         |
 | `/api/themes`                   | Synced custom themes                    |
-| `/api/extensions`               | Installed extensions                    |
 | `/api/app-settings`             | Server-side app settings                |
 | `/api/sidecar`                  | Local model runtime                     |
 | `/api/chat-presets`             | Chat settings presets                   |

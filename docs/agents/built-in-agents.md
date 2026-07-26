@@ -98,11 +98,11 @@ Manages quest objectives, completion, and rewards. Use it for adventure style pl
 
 ### Background
 
-Picks the best matching background image for the current scene from your uploaded backgrounds. It can also generate a new background when nothing fits, if you turn that on.
+Picks the best matching background image for the current scene from your uploaded backgrounds. It does not generate images; use Illustrator when you want automatic scene background generation.
 
 - **Phase**: Post-Processing.
 - **Where it works**: Roleplay.
-- **Key settings**: a **Background Image Generation** toggle. Generated backgrounds are saved into your normal background library for reuse.
+- **Key settings**: standard Agent connection and context controls. Background selection uses only images already available in your background library.
 
 ### Character Tracker
 
@@ -137,6 +137,7 @@ Adds persistent nested locations and spatial relationships to a story. You can a
 - **Integration**: Feature package; it contributes map UI and chat runtime context instead of running as a normal generation-phase agent.
 - **Where it works**: Roleplay and Game.
 - **Key settings**: enable it for the Roleplay chat from **Chat Settings → Agents**, or select it during Game creation and manage it later from that game's settings. Installing or removing it requires a Marinara restart.
+- **Full guide**: [Hierarchical Maps: Setup, Authoring, and Travel](hierarchical-maps.md).
 
 ## Misc agents
 

@@ -36,13 +36,10 @@ import { audioManager } from "../../lib/game-audio";
 import { resolveAssetTag } from "../../lib/asset-fuzzy-match";
 import { parseChatMetadata } from "../../lib/chat-display";
 import { findReplayableGameSessionChat } from "../../lib/game-session-resolution";
+import { findReplayStoryboardKeyframe } from "../../lib/game-storyboard-keyframes";
 import type { CharacterMap, PersonaInfo } from "../chat/chat-area.types";
 import type { AvatarCrop, LegacyAvatarCrop } from "../../lib/utils";
-import {
-  buildGameSessionReplayTurns,
-  findReplayStoryboardKeyframe,
-  type GameReplayPresentationCue,
-} from "../../lib/game-session-replay";
+import { buildGameSessionReplayTurns, type GameReplayPresentationCue } from "../../lib/game-session-replay";
 import { useGameAssetStore } from "../../stores/game-asset.store";
 import { useChatStore } from "../../stores/chat.store";
 import { ttsService } from "../../lib/tts-service";

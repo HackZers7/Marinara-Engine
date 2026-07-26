@@ -260,7 +260,7 @@ export function RoleplayHUDActionsMenu({
               <div className="space-y-1">
                 {displayedFailures.map((failure) => (
                   <div
-                    key={failure.agentType}
+                    key={`${failure.agentType}:${failure.retryTarget ?? "agent"}`}
                     className="rounded-md border border-amber-400/15 bg-amber-500/10 px-2 py-1.5 text-[0.625rem]"
                     title={failure.error ?? undefined}
                   >

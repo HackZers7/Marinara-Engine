@@ -166,6 +166,8 @@ export const FILE_BACKED_TABLES = [
   "persona_groups",
   "noodle_accounts",
   "noodle_posts",
+  "noodle_account_subscriptions",
+  "noodle_post_unlocks",
   "noodle_interactions",
   "noodle_activity_digests",
   "noodle_refresh_runs",
@@ -215,7 +217,6 @@ export const FILE_BACKED_TABLES = [
 type FileBackedTable = (typeof FILE_BACKED_TABLES)[number];
 
 const FILE_BACKED_TABLE_SET = new Set<string>(FILE_BACKED_TABLES);
-const TABLES_REVERSE = [...FILE_BACKED_TABLES].reverse();
 const isWindows = process.platform === "win32";
 const warnedFlushFailures = new Set<string>();
 
@@ -224,6 +225,22 @@ const warnedFlushFailures = new Set<string>();
 // dangling-reference validator, so every new relation added here reaches both.
 export const CASCADES: Array<{ parent: FileBackedTable; child: FileBackedTable; parentKey: string; childKey: string }> =
   [
+    {
+      parent: "noodle_accounts",
+      child: "noodle_account_subscriptions",
+      parentKey: "id",
+      childKey: "viewerAccountId",
+    },
+    {
+      parent: "noodle_accounts",
+      child: "noodle_account_subscriptions",
+      parentKey: "id",
+      childKey: "creatorAccountId",
+    },
+    { parent: "noodle_accounts", child: "noodle_post_unlocks", parentKey: "id", childKey: "viewerAccountId" },
+    { parent: "noodle_accounts", child: "noodle_accounts", parentKey: "id", childKey: "publicAccountId" },
+    { parent: "noodle_accounts", child: "noodle_posts", parentKey: "id", childKey: "authorAccountId" },
+    { parent: "noodle_posts", child: "noodle_post_unlocks", parentKey: "id", childKey: "postId" },
     { parent: "chats", child: "messages", parentKey: "id", childKey: "chatId" },
     { parent: "chats", child: "conversation_call_sessions", parentKey: "id", childKey: "chatId" },
     { parent: "chats", child: "conversation_call_messages", parentKey: "id", childKey: "chatId" },
@@ -859,7 +876,6 @@ class FileTableStore {
   private debounceTimer: NodeJS.Timeout | null = null;
   private safetyTimer: NodeJS.Timeout | null = null;
   private beforeExitHandler: (() => void) | null = null;
-  private loadedManifest: TableSnapshotManifest | null = null;
   // Rollback state for the active transaction lives in this AsyncLocalStorage so
   // it is bound to the transaction's own async call path. Writes from other
   // async call paths wait for the transaction to finish and are therefore never
@@ -1236,12 +1252,10 @@ class FileTableStore {
     // hard crash mid-write) shouldn't block startup. Table files recover from
     // .bak when possible, then fall back to [] only when both files are
     // unreadable so startup can still reach the UI.
-    let loadedManifest: TableSnapshotManifest | null = null;
     let needsManifestRewrite = false;
     try {
       const path = manifestPath(this.rootDir);
       const result = parseJsonFile<TableSnapshotManifest | null>(path, null);
-      loadedManifest = result.value;
       needsManifestRewrite = result.recoveredFromBackup || result.recoveredFromFallback;
       if (result.recoveredFromBackup || result.recoveredFromFallback) {
         this.backupRecoveredPaths.add(path);
@@ -1254,7 +1268,6 @@ class FileTableStore {
       );
       needsManifestRewrite = true;
     }
-    this.loadedManifest = loadedManifest;
     if (needsManifestRewrite) {
       // Force a manifest rewrite on next save so the corrupt main file gets
       // replaced rather than persistently triggering the .bak fallback path.

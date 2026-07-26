@@ -1,7 +1,6 @@
 import {
   getFolderManifestConfig,
   isJsonRecord,
-  sanitizeFolderSegment,
 } from "@marinara-engine/shared";
 import type { CustomToolRow } from "../hooks/use-custom-tools";
 import type { ZipFileInput } from "./download-zip";
@@ -191,10 +190,6 @@ export function createCustomToolFolderPackageFiles(tools: CustomToolTransferConf
     },
     ...entries.flatMap(({ files }) => files),
   ];
-}
-
-export function createCustomToolFolderPackageFilename(name: string, fallback = "marinara-functions") {
-  return `${sanitizeFolderSegment(name, fallback)}.functions.zip`;
 }
 
 export async function importCustomToolEntries(

@@ -194,13 +194,3 @@ export function HelpTooltip({
     </span>
   );
 }
-
-/** Helper: label text followed by a help tooltip icon */
-export function LabelWithHelp({ label, help, className }: { label: string; help: string; className?: string }) {
-  return (
-    <span className={cn("inline-flex items-center gap-1", className)}>
-      {label}
-      <HelpTooltip text={help} />
-    </span>
-  );
-}

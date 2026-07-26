@@ -353,14 +353,6 @@ export function splitTTSChunks(value: string): string[] {
     .flatMap((chunk) => splitCleanTTSInputIntoChunks(chunk));
 }
 
-export function buildTTSMessageText(text: string, config: TTSConfig, fallbackSpeaker?: string | null): string {
-  const normalized = decodeEncodedSpeakerTags(text);
-  if (!config.dialogueOnly) return cleanTTSInputText(normalized);
-  return extractDialogueUtterances(normalized, fallbackSpeaker)
-    .map((utterance) => utterance.text)
-    .join("\n");
-}
-
 export function buildTTSVoiceRequests(
   text: string,
   config: TTSConfig,

@@ -151,6 +151,7 @@ export const packagedAgentDefinitionSchema = z.object({
   category: z.enum(["writer", "tracker", "misc"]),
   libraryHidden: z.boolean().optional(),
   runtimeDisabled: z.boolean().optional(),
+  /** @deprecated Legacy package compatibility; author resultType in defaultSettings instead. */
   resultType: agentResultTypeSchema.optional(),
   modeAllowlist: z.array(z.enum(["conversation", "roleplay", "visual_novel", "game"])).optional(),
   defaultTools: z.array(z.string()).optional(),
@@ -168,6 +169,37 @@ export type CapabilityCatalogPackage = z.infer<typeof capabilityCatalogPackageSc
 export type CapabilityCatalog = z.infer<typeof capabilityCatalogSchema>;
 export type InstalledCapabilityPackage = z.infer<typeof installedCapabilityPackageSchema>;
 export type PackagedAgentDefinition = z.infer<typeof packagedAgentDefinitionSchema>;
+
+export interface CustomAgentRepository {
+  id: string;
+  url: string;
+  owner: string;
+  name: string;
+  lastDigest: string | null;
+  lastSyncedAt: string | null;
+  agentCount: number;
+}
+
+export type CustomAgentRepositoryChangeStatus = "new" | "updated" | "unchanged" | "removed";
+
+export interface CustomAgentRepositoryChange {
+  agentId: string;
+  name: string;
+  status: CustomAgentRepositoryChangeStatus;
+  changedFields: string[];
+  definition?: PackagedAgentDefinition;
+}
+
+export interface CustomAgentRepositoryPreview {
+  repository: Pick<CustomAgentRepository, "id" | "url" | "owner" | "name">;
+  digest: string;
+  changes: CustomAgentRepositoryChange[];
+}
+
+export interface CustomAgentRepositoryState {
+  enabled: boolean;
+  repositories: CustomAgentRepository[];
+}
 
 export function getCapabilityApiCompatibilityIssue(manifest: CapabilityPackageManifest): string | null {
   if (manifest.schemaVersion === 1) return null;

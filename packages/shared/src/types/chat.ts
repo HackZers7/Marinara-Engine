@@ -7,6 +7,9 @@ import type { GenerationGuideSource } from "../utils/generation-guide.js";
 import type { HapticFeedbackSensitivity } from "./haptic.js";
 import type { CustomEmojiSelectionPrefs } from "../schemas/custom-emoji.schema.js";
 import type { DiceRollResult } from "./game.js";
+import type { SpotifySourceType } from "./spotify.js";
+
+export type { SpotifySourceType } from "./spotify.js";
 
 /** The four primary chat modes the engine supports. */
 export type ChatMode = "conversation" | "roleplay" | "visual_novel" | "game";
@@ -16,9 +19,6 @@ export type GroupChatMode = "merged" | "individual";
 
 /** How individual-mode group chats decide response order. */
 export type GroupResponseOrder = "sequential" | "smart" | "manual";
-
-/** Spotify source constraints used by Music DJ. */
-export type SpotifySourceType = "liked" | "playlist" | "artist" | "any";
 
 export interface KnowledgeAgentSourceSettings {
   /** When true/omitted, this agent uses the chat's active lorebooks unless fixed sources are selected. */
@@ -69,10 +69,8 @@ export const CONVERSATION_COMMAND_AGENT_IDS: Partial<Record<ConversationCommandK
 
 export type ConversationPresenceStatus = "online" | "idle" | "dnd" | "offline";
 
-export type ConversationManualPresenceStatus = ConversationPresenceStatus;
-
 export interface ConversationStatusOverride {
-  status: ConversationManualPresenceStatus;
+  status: ConversationPresenceStatus;
   activity?: string | null;
   createdAt: string;
   expiresAt?: string | null;
@@ -211,12 +209,20 @@ export interface ChatMemoryChunk {
 }
 
 /**
- * Bounds for `ChatMetadata.summaryTailMessages` — the single source of truth for
- * the tail limits, shared by the server resolver (read) and the popover slider
- * (write) so display and persistence can't drift. `DEFAULT` applies only when the
- * value is unset; an explicit `MIN` (0) means "hide the whole batch".
+ * Defaults for `ChatMetadata.summaryTailMessages`. `DEFAULT` applies only when
+ * the value is unset; an explicit `MIN` (0) means "hide the whole batch".
+ * There is intentionally no upper limit because the user controls the context
+ * and model budget for this local app.
  */
-export const SUMMARY_TAIL_MESSAGES = { MIN: 0, MAX: 50, DEFAULT: 10 } as const;
+export const SUMMARY_TAIL_MESSAGES = { MIN: 0, DEFAULT: 10 } as const;
+
+export function normalizeSummaryTailMessages(value: unknown): number {
+  const { MIN, DEFAULT } = SUMMARY_TAIL_MESSAGES;
+  if (value === undefined || value === null) return DEFAULT;
+  const parsed = Math.floor(Number(value));
+  if (!Number.isFinite(parsed) || parsed < MIN) return MIN;
+  return parsed;
+}
 export const CHAT_SUMMARY_OUTPUT_TOKENS = { MIN: 1, MAX: 32768, DEFAULT: 4096 } as const;
 
 export type GameStoryboardViewerDisplayMode = "floating" | "background";
@@ -270,6 +276,8 @@ export interface ChatMetadata {
   illustratorUseAvatarReferences?: boolean;
   /** Optional per-chat LLM connection override used only to write Illustrator/selfie image prompts. */
   illustratorPromptConnectionId?: string | null;
+  /** Whether Roleplay Illustrator may generate and activate a reusable background after a scene-location change. */
+  illustratorAutoBackgroundsEnabled?: boolean;
   /** Whether Conversation selfie commands should send the matching character avatar as a reference image. */
   selfieUseAvatarReferences?: boolean;
   /** Whether Conversation selfie commands should append matched character card appearance text to image prompts. */
@@ -353,9 +361,7 @@ export interface ChatMetadata {
   spritePlacements?: Record<string, SpritePlacement>;
   /** When true, roleplay message avatars use the per-message Expression Engine sprite when one is available. */
   expressionAvatarsEnabled?: boolean;
-  /** When true, a shared group scenario replaces individual character card scenarios */
-  groupScenarioOverride?: boolean;
-  /** The shared scenario text used when groupScenarioOverride is enabled */
+  /** Non-empty text replaces individual character card scenarios for this group chat. */
   groupScenarioText?: string;
   /** Prose Guardian per-chat banned words/settings applied to the rewrite prompt. */
   proseGuardianBannedWords?: string | null;
@@ -616,7 +622,7 @@ export interface ChatMetadata {
    * gist. In roleplay/visual-novel mode it is the protected tail for
    * `hideSummarisedMessages`: the last N messages stay visible (never hidden)
    * when the auto-summary hides the rest. 0 disables (hide the whole batch).
-   * Valid range: 0-50. Default: 10.
+   * Any non-negative whole number is accepted. Default: 10.
    */
   summaryTailMessages?: number;
   /** When true or omitted, prior provider reasoning metadata is not replayed into future prompts. */
@@ -743,6 +749,8 @@ export interface MessageExtra {
   hiddenFromUser?: boolean;
   /** When true, the visible message is excluded from future AI prompt context */
   hiddenFromAI?: boolean;
+  /** Character IDs whose generation context excludes this message. Global hiddenFromAI takes precedence. */
+  hiddenFromAICharacterIds?: string[];
   /** When true, Roleplay renders this generated assistant turn as a fresh bubble instead of grouping with the previous assistant turn. */
   startsNewAssistantBubble?: boolean;
   /** Structured dice roll payload rendered by the chat UI. */
@@ -804,6 +812,8 @@ export interface GenerateRequest {
   continueMessageId?: string | null;
   /** Override connection for this generation */
   connectionId: string | null;
+  /** Background currently displayed on the active chat surface. */
+  currentBackground?: string | null;
   /** Validated owner-mode movement committed with the user turn. */
   pendingSpatialTransition?: import("./spatial-context.js").PendingSpatialTransition | null;
   /** One-shot attachments sent with the user message. */

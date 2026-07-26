@@ -5,7 +5,6 @@ import {
   BUILT_IN_TOOLS,
   DEFAULT_AGENT_TOOLS,
   getDefaultAgentPrompt,
-  getBuiltInAgentDefaultPrompt,
   applyQuestUpdatesToPlayerStats,
   applyTrackerFieldLocksToGameStatePatch,
   getDefaultBuiltInAgentSettings,
@@ -68,13 +67,17 @@ import { createPromptsStorage } from "../../services/storage/prompts.storage.js"
 import { findLastUserMessageIdBefore } from "../../services/generation/message-history.js";
 import { textRewriteDropsProtectedMarkup } from "../../services/generation/text-rewrite-safety.js";
 import { resolveConnectionImageDefaults } from "../../services/image/image-generation-defaults.js";
-import { loadImageGenerationUserSettings } from "../../services/image/image-generation-settings.js";
+import {
+  loadImageGenerationUserSettings,
+  resolveIllustratorImageSize,
+} from "../../services/image/image-generation-settings.js";
 import { compileImagePrompt } from "../../services/image/image-prompt-compiler.js";
 import { persistGeneratedImageToEntityGalleries } from "../../services/image/generated-image-entity-gallery.js";
 import { resolveImageConnectionFallback } from "../../services/generation/media-connection-fallback.js";
 import type { GenerationFallbackNotifier } from "../../services/generation/fallback-notification.js";
 import { createReplyFallbackNotifier } from "./fallback-notification.js";
 import { runImageGenerationRequest } from "../../services/image/image-generation-queue.js";
+import { resolveImagePromptReviewSize } from "../../services/image/image-prompt-review.js";
 import {
   parseIllustratorPromptReviewOverride,
   resolveIllustratorPromptSubmission,
@@ -140,7 +143,7 @@ import {
   validateSpriteExpressionEntries,
 } from "./expression-agent-utils.js";
 import {
-  isNovelAiImageConnection,
+  suppressesReferencePromptLine,
   mergeIllustratorNegativePrompt,
   resolveIllustratorCharacterReferences,
 } from "./illustrator-references.js";
@@ -151,6 +154,17 @@ import {
   normalizeProseGuardianPromptTemplate,
 } from "../../services/generation/prose-guardian-settings.js";
 import { applyKnowledgeAgentChatSettings } from "../../services/generation/knowledge-agent-settings.js";
+import {
+  generateIllustratorSceneBackground,
+  illustratorBackgroundGenerationEnabled,
+  illustratorRequestedBackground,
+  illustratorTrackerLocationChanged,
+} from "../../services/generation/illustrator-background-generation.js";
+import {
+  parseIllustratorRetryTargets,
+  shouldRetryIllustratorTarget,
+  type IllustratorRetryTarget,
+} from "../../services/generation/illustrator-retry-targets.js";
 import { normalizeContextInjections } from "./agent-normalizers.js";
 import { executeToolCalls, type MetadataPatchInput } from "../../services/tools/tool-executor.js";
 
@@ -163,26 +177,6 @@ type PersonaContext = {
   personaStats: any;
   rpgStats: any;
 };
-
-function resolveIllustratorImageSize(
-  size: { width: number; height: number },
-  aspectRatio: unknown,
-): { width: number; height: number } {
-  const width = Math.max(1, Math.round(size.width));
-  const height = Math.max(1, Math.round(size.height));
-  const aspect = typeof aspectRatio === "string" ? aspectRatio.trim().toLowerCase() : "";
-  if (aspect === "portrait") {
-    return width <= height ? { width, height } : { width: height, height: width };
-  }
-  if (aspect === "landscape") {
-    return width >= height ? { width, height } : { width: height, height: width };
-  }
-  if (aspect === "square") {
-    const side = Math.min(width, height);
-    return { width: side, height: side };
-  }
-  return { width, height };
-}
 
 function cardPromptText(value: unknown): string {
   return typeof value === "string" ? stripMacroComments(value).trim() : "";
@@ -452,10 +446,6 @@ function applyRetryMusicPlayerSource(
   };
 }
 
-function resolveRetryAgentRuntimePhase(_agentType: string, configuredPhase: string): string {
-  return normalizeAgentPhaseValue(configuredPhase);
-}
-
 function getRetryAgentFallbackPrompt(agentType: string, settings: Record<string, unknown>): string {
   if (agentType === "spotify" && musicAgentUsesYoutube(settings)) {
     return getDefaultAgentPrompt("youtube");
@@ -463,7 +453,7 @@ function getRetryAgentFallbackPrompt(agentType: string, settings: Record<string,
   if (agentType === "spotify" && musicAgentUsesCustom(settings)) {
     return getDefaultAgentPrompt("local-music");
   }
-  return getBuiltInAgentDefaultPrompt(agentType) || getDefaultAgentPrompt(agentType);
+  return getDefaultAgentPrompt(agentType);
 }
 
 function getGameImageStylePrompt(chat: any, chatMeta: Record<string, unknown>): string {
@@ -546,6 +536,7 @@ async function buildRetryAgentContext(args: {
   db: Parameters<typeof buildPromptMacroContext>[0]["db"];
   chat: any;
   chatMeta: Record<string, unknown>;
+  currentBackground: string | null;
   recentMessages: any[];
   enabledConfigs: any[];
   resolvedAgentTypes: Set<string>;
@@ -555,6 +546,7 @@ async function buildRetryAgentContext(args: {
   lorebooksStore: ReturnType<typeof createLorebooksStorage>;
   streaming: boolean;
   wrapFormat: WrapFormat;
+  forceIllustratorBackgroundGeneration: boolean;
   /**
    * When retrying agents for a specific assistant message (e.g. refreshing cached prompt injections),
    * use the game-state snapshot committed for that message+swipe — not the latest chat snapshot.
@@ -569,6 +561,7 @@ async function buildRetryAgentContext(args: {
     db,
     chat,
     chatMeta,
+    currentBackground,
     recentMessages,
     enabledConfigs,
     resolvedAgentTypes,
@@ -578,6 +571,7 @@ async function buildRetryAgentContext(args: {
     lorebooksStore,
     streaming,
     wrapFormat,
+    forceIllustratorBackgroundGeneration,
     historicalGameStateAnchor,
     useLatestGameStateFallback = true,
   } = args;
@@ -758,7 +752,6 @@ async function buildRetryAgentContext(args: {
             ...(personaContext.rpgStats ? { rpgStats: personaContext.rpgStats } : {}),
           }
         : null,
-    activatedLorebookEntries: null,
     writableLorebookIds: null,
     chatSummary: resolveRoleplayChatSummary(chatMode, chatMeta),
     streaming,
@@ -948,10 +941,19 @@ async function buildRetryAgentContext(args: {
           })),
       );
       agentContext.memory._availableBackgrounds = availableBackgrounds;
-      agentContext.memory._currentBackground = chatMeta.background ?? null;
+      agentContext.memory._currentBackground = currentBackground;
     } catch (err) {
       logger.warn(err, "[retry-agents] Failed to load available backgrounds for retry");
     }
+  }
+
+  if (
+    resolvedAgentTypes.has("illustrator") &&
+    (forceIllustratorBackgroundGeneration ||
+      illustratorBackgroundGenerationEnabled((chat as { mode?: unknown }).mode, chatMeta))
+  ) {
+    agentContext.memory._illustratorBackgroundGenerationEnabled = true;
+    agentContext.memory._currentBackground = currentBackground;
   }
 
   const spotifyRetryConfig = enabledConfigs.find((config) => config.type === "spotify");
@@ -1039,13 +1041,17 @@ async function resolveRetryAgents(args: {
   chat: any;
   conns: ReturnType<typeof createConnectionsStorage>;
   agentsStore: ReturnType<typeof createAgentsStorage>;
+  agentPromptTemplateIds?: unknown;
   activeMusicPlayerSource?: "spotify" | "youtube" | "custom" | null;
   onFallback?: GenerationFallbackNotifier;
 }): Promise<ResolvedRetryAgents> {
-  const { agentTypes, chat, conns, agentsStore, activeMusicPlayerSource, onFallback } = args;
+  const { agentTypes, chat, conns, agentsStore, agentPromptTemplateIds, activeMusicPlayerSource, onFallback } = args;
   const chatMode = ((chat as { mode?: ChatMode }).mode ?? "conversation") as ChatMode;
   const chatMeta = parseExtra((chat as { metadata?: unknown }).metadata);
-  const agentPromptTemplateSelections = normalizeAgentPromptTemplateSelectionMap(chatMeta.agentPromptTemplateIds);
+  const agentPromptTemplateSelections = {
+    ...normalizeAgentPromptTemplateSelectionMap(chatMeta.agentPromptTemplateIds),
+    ...normalizeAgentPromptTemplateSelectionMap(agentPromptTemplateIds),
+  };
   const activeAgentTypeSet = resolveActiveRetryAgentTypes(chatMode, chatMeta);
   const normalizedAgentTypes = agentTypes.map(normalizeRetryAgentTypeId);
   const agentTypeSet = new Set(
@@ -1189,6 +1195,7 @@ async function resolveRetryAgents(args: {
     return resolveStoredRetryConnection(null, fallbackConn);
   };
   const fallbackConnection = await resolveFallbackRetryConnection();
+  const retryAgentConnectionCache = new Map<string, RetryAgentConnectionResolution>();
   const resolvedAgents: ResolvedRetryAgent[] = [];
   const skippedLocalSidecarAgents: string[] = [];
   const defaultAgentConnectionAgents: string[] = [];
@@ -1220,9 +1227,13 @@ async function resolveRetryAgents(args: {
       return fallbackConnection;
     }
 
+    const cachedConnection = retryAgentConnectionCache.get(connectionId);
+    if (cachedConnection) return cachedConnection;
+
+    let resolution: RetryAgentConnectionResolution;
     if (isLocalSidecarConnectionId(connectionId) && localSidecarAvailableForTrackers) {
       const primaryProvider = getLocalSidecarProvider();
-      return {
+      resolution = {
         entry: {
           connectionId,
           provider: wrapRetryAgentProvider(primaryProvider, connectionId),
@@ -1235,14 +1246,15 @@ async function resolveRetryAgents(args: {
           cachingAtDepth: 5,
         },
       };
+    } else {
+      const agentConn = await conns.getWithKey(connectionId);
+      resolution = agentConn
+        ? resolveStoredRetryConnection(connectionId, agentConn)
+        : { entry: null, unavailableReason: "the configured connection was deleted" };
     }
 
-    const agentConn = await conns.getWithKey(connectionId);
-    if (!agentConn) {
-      return { entry: null, unavailableReason: "the configured connection was deleted" };
-    }
-
-    return resolveStoredRetryConnection(connectionId, agentConn);
+    retryAgentConnectionCache.set(connectionId, resolution);
+    return resolution;
   };
   const defaultAgentConnection = defaultAgentConn
     ? await resolveRetryAgentConnection(defaultAgentConn.id as string)
@@ -1288,7 +1300,6 @@ async function resolveRetryAgents(args: {
     settings = applyTextRewriteAgentChatSettings(cfg.type as string, settings, chatMeta);
     settings = applyKnowledgeAgentChatSettings(cfg.type as string, settings, chatMeta);
     const selectedPromptTemplate = resolveAgentPromptTemplate({
-      agentType: cfg.type as string,
       promptTemplate: normalizeProseGuardianPromptTemplate(cfg.type as string, cfg.promptTemplate),
       fallbackPromptTemplate: getRetryAgentFallbackPrompt(cfg.type as string, settings),
       settings,
@@ -1301,7 +1312,7 @@ async function resolveRetryAgents(args: {
         id: cfg.id,
         type: cfg.type,
         name: cfg.name,
-        phase: resolveRetryAgentRuntimePhase(cfg.type as string, cfg.phase as string),
+        phase: normalizeAgentPhaseValue(cfg.phase),
         promptTemplate: selectedPromptTemplate,
         connectionId: effectiveConnectionId,
         settings,
@@ -1362,7 +1373,6 @@ async function resolveRetryAgents(args: {
     settings = applyTextRewriteAgentChatSettings(builtIn.id, settings, chatMeta);
     settings = applyKnowledgeAgentChatSettings(builtIn.id, settings, chatMeta);
     const selectedPromptTemplate = resolveAgentPromptTemplate({
-      agentType: builtIn.id,
       promptTemplate: "",
       fallbackPromptTemplate: getRetryAgentFallbackPrompt(builtIn.id, settings),
       settings,
@@ -1375,7 +1385,7 @@ async function resolveRetryAgents(args: {
         id: `builtin:${builtIn.id}`,
         type: builtIn.id,
         name: builtIn.name,
-        phase: resolveRetryAgentRuntimePhase(builtIn.id, builtIn.phase),
+        phase: normalizeAgentPhaseValue(builtIn.phase),
         promptTemplate: selectedPromptTemplate,
         connectionId: builtInConnection.entry.connectionId,
         settings,
@@ -2578,6 +2588,7 @@ async function applyRetryResultEffects(args: {
   queueImageGenerationRequests: boolean;
   reviewImagePromptsBeforeSend: boolean;
   illustratorPromptReviewOverride: IllustratorPromptReviewOverride | null;
+  illustratorRetryTargets: IllustratorRetryTarget[] | undefined;
   debugMode: boolean;
   secretPlotRerollMode?: "full" | "turn_only";
 }) {
@@ -2599,6 +2610,7 @@ async function applyRetryResultEffects(args: {
     queueImageGenerationRequests,
     reviewImagePromptsBeforeSend,
     illustratorPromptReviewOverride,
+    illustratorRetryTargets,
     debugMode,
     secretPlotRerollMode,
   } = args;
@@ -2608,6 +2620,8 @@ async function applyRetryResultEffects(args: {
   const chats = createChatsStorage(app.db);
   const agentsStore = createAgentsStorage(app.db);
   const chatMeta = parseExtra(chat.metadata) as Record<string, unknown>;
+  const isManualIllustratorBackgroundRequest =
+    illustratorRetryTargets?.length === 1 && illustratorRetryTargets[0] === "background";
   let currentResponseForRewrite = agentContext.mainResponse;
   const retryOwnerSpatialProjection =
     (retryMessageId
@@ -2643,14 +2657,58 @@ async function applyRetryResultEffects(args: {
       .then((snapshot) => projectGameSnapshotLocation(snapshot, retryOwnerSpatialProjection));
     return retryBaseGameStateSnapshotPromise;
   };
+  const buildSnapshotUpdateOptions = async () => ({
+    baseSnapshot: await loadRetryBaseGameStateSnapshot(),
+    ...(retryCompatibilityLocation !== null ? { compatibilityLocation: retryCompatibilityLocation } : {}),
+  });
   const loadRetryTargetGameStateSnapshot = async () => {
-    if (!retryMessageId) return null;
+    if (!retryMessageId) {
+      const latest = await gameStateStore.getLatest(chatId);
+      if (latest) return projectGameSnapshotLocation(latest, retryOwnerSpatialProjection);
+
+      await gameStateStore.create({
+        chatId,
+        messageId: "",
+        swipeIndex: 0,
+        date: null,
+        time: null,
+        location: retryCompatibilityLocation,
+        weather: null,
+        temperature: null,
+        worldCustomFields: [],
+        presentCharacters: [],
+        recentEvents: [],
+        playerStats: null,
+        personaStats: null,
+        fieldLocks: null,
+        hiddenTrackerFields: null,
+      });
+      return projectGameSnapshotLocation(await gameStateStore.getLatest(chatId), retryOwnerSpatialProjection);
+    }
     const existing = await gameStateStore.getByMessage(retryMessageId, retrySwipeIndex);
     if (existing) return projectGameSnapshotLocation(existing, retryOwnerSpatialProjection);
-    return gameStateStore.updateByMessage(retryMessageId, retrySwipeIndex, chatId, {}, undefined, {
-      baseSnapshot: await loadRetryBaseGameStateSnapshot(),
-      ...(retryCompatibilityLocation !== null ? { compatibilityLocation: retryCompatibilityLocation } : {}),
-    });
+    return gameStateStore.updateByMessage(
+      retryMessageId,
+      retrySwipeIndex,
+      chatId,
+      {},
+      undefined,
+      await buildSnapshotUpdateOptions(),
+    );
+  };
+  const updateRetryTargetGameStateSnapshot = async (fields: Record<string, unknown>) => {
+    if (retryMessageId) {
+      return gameStateStore.updateByMessage(
+        retryMessageId,
+        retrySwipeIndex,
+        chatId,
+        fields as any,
+        undefined,
+        await buildSnapshotUpdateOptions(),
+      );
+    }
+    await loadRetryTargetGameStateSnapshot();
+    return gameStateStore.updateLatest(chatId, fields as any);
   };
 
   for (const result of sortedResults) {
@@ -2717,7 +2775,6 @@ async function applyRetryResultEffects(args: {
     }
 
     if (
-      retryMessageId &&
       result.success &&
       result.type === "game_state_update" &&
       result.agentType !== "combat" &&
@@ -2748,17 +2805,7 @@ async function applyRetryResultEffects(args: {
           lockedWorldStatePatch.location = retryCompatibilityLocation;
         }
         if (Object.keys(worldStatePatch).length > 0 || retryCompatibilityLocation !== null) {
-          await gameStateStore.updateByMessage(
-            retryMessageId,
-            retrySwipeIndex,
-            chatId,
-            lockedWorldStatePatch as any,
-            undefined,
-            {
-              baseSnapshot: await loadRetryBaseGameStateSnapshot(),
-              ...(retryCompatibilityLocation !== null ? { compatibilityLocation: retryCompatibilityLocation } : {}),
-            },
-          );
+          await updateRetryTargetGameStateSnapshot(lockedWorldStatePatch);
         }
 
         const nextLocation = typeof lockedWorldStatePatch.location === "string" ? lockedWorldStatePatch.location : null;
@@ -2817,7 +2864,6 @@ async function applyRetryResultEffects(args: {
     }
 
     if (
-      retryMessageId &&
       result.success &&
       result.type === "character_tracker_update" &&
       result.data &&
@@ -2857,16 +2903,7 @@ async function applyRetryResultEffects(args: {
         presentCharacters = Array.isArray(lockedCharacterPatch.presentCharacters)
           ? lockedCharacterPatch.presentCharacters
           : presentCharacters;
-        await gameStateStore.updateByMessage(
-          retryMessageId,
-          retrySwipeIndex,
-          chatId,
-          {
-            presentCharacters,
-          },
-          undefined,
-          { baseSnapshot: await loadRetryBaseGameStateSnapshot() },
-        );
+        await updateRetryTargetGameStateSnapshot({ presentCharacters });
         sendSseEvent(reply, { type: "game_state_patch", data: { presentCharacters } });
       } catch (err) {
         logger.error(err, "[retry-agents] Failed to apply character-tracker update");
@@ -2874,7 +2911,6 @@ async function applyRetryResultEffects(args: {
     }
 
     if (
-      retryMessageId &&
       result.success &&
       result.type === "persona_stats_update" &&
       result.data &&
@@ -2975,7 +3011,6 @@ async function applyRetryResultEffects(args: {
     }
 
     if (
-      retryMessageId &&
       result.success &&
       result.type === "quest_update" &&
       result.data &&
@@ -3045,7 +3080,6 @@ async function applyRetryResultEffects(args: {
     }
 
     if (
-      retryMessageId &&
       result.success &&
       result.type === "custom_tracker_update" &&
       result.data &&
@@ -3080,7 +3114,13 @@ async function applyRetryResultEffects(args: {
     }
 
     // ── ILLUSTRATOR: generate image from agent prompt ──
-    if (result.success && result.type === "image_prompt" && result.data && typeof result.data === "object") {
+    if (
+      shouldRetryIllustratorTarget(illustratorRetryTargets, "illustration") &&
+      result.success &&
+      result.type === "image_prompt" &&
+      result.data &&
+      typeof result.data === "object"
+    ) {
       const illustratorFailureName =
         resolvedAgents.find((a) => a.resolved.id === result.agentId || a.resolved.type === "illustrator")?.cfg.name ??
         "Illustrator";
@@ -3123,14 +3163,17 @@ async function applyRetryResultEffects(args: {
             const imgApiKey = imgConnFull.apiKey || "";
             const imgSource = (imgConnFull as any).imageGenerationSource || imgModel;
             const imgServiceHint = imgConnFull.imageService || imgSource;
-            const suppressReferencePromptLine = isNovelAiImageConnection({
-              model: imgModel,
-              baseUrl: imgBaseUrl,
-              imageService: imgServiceHint,
-              imageGenerationSource: imgSource,
-            });
-            const imageDefaults = resolveConnectionImageDefaults(imgConnFull);
             const imageFallback = await resolveImageConnectionFallback(conns, imgConnFull.id);
+            const suppressReferencePromptLine = suppressesReferencePromptLine(
+              {
+                model: imgModel,
+                baseUrl: imgBaseUrl,
+                imageService: imgServiceHint,
+                imageGenerationSource: imgSource,
+              },
+              imageFallback,
+            );
+            const imageDefaults = resolveConnectionImageDefaults(imgConnFull);
             const imageSettings = await loadImageGenerationUserSettings(app.db);
 
             const chatMeta = typeof chat.metadata === "string" ? JSON.parse(chat.metadata) : (chat.metadata ?? {});
@@ -3232,6 +3275,13 @@ async function applyRetryResultEffects(args: {
             });
 
             if (reviewImagePromptsBeforeSend && !illustratorPromptReviewOverride) {
+              const previewSize = resolveImagePromptReviewSize({
+                connection: imgConnFull,
+                prompt: promptSubmission.prompt,
+                width: imgWidth,
+                height: imgHeight,
+                imageDefaults,
+              });
               sendSseEvent(reply, {
                 type: "image_prompt_review",
                 data: {
@@ -3242,8 +3292,8 @@ async function applyRetryResultEffects(args: {
                     title: "Scene illustration",
                     prompt: promptSubmission.prompt,
                     ...(promptSubmission.negativePrompt ? { negativePrompt: promptSubmission.negativePrompt } : {}),
-                    width: imgWidth,
-                    height: imgHeight,
+                    width: previewSize.width,
+                    height: previewSize.height,
                   },
                   resultData: illData,
                 },
@@ -3270,6 +3320,10 @@ async function applyRetryResultEffects(args: {
               queueImageGenerationRequests ? "enabled" : "disabled",
               imageConnectionQueueKey,
             );
+            sendSseEvent(reply, {
+              type: "illustration_queued",
+              data: { messageId: retryMessageId },
+            });
             const imageResult = await runImageGenerationRequest({
               connectionKey: imageConnectionQueueKey,
               queue: queueImageGenerationRequests,
@@ -3366,6 +3420,7 @@ async function applyRetryResultEffects(args: {
               data: {
                 agentType: "illustrator",
                 agentName: illustratorFailureName,
+                retryTarget: "illustration",
                 error:
                   "No image generation connection is set on the Illustrator agent or under Settings -> Connections -> Defaults -> Images. Choose one there, or assign one directly in Settings -> Agents -> Illustrator.",
               },
@@ -3379,6 +3434,7 @@ async function applyRetryResultEffects(args: {
           data: {
             agentType: "illustrator",
             agentName: illustratorFailureName,
+            retryTarget: "illustration",
             error: illErr instanceof Error ? illErr.message : "Image generation failed",
           },
         });
@@ -3423,6 +3479,145 @@ async function applyRetryResultEffects(args: {
       }
     }
   }
+
+  const illustratorResult = sortedResults.find(
+    (result) =>
+      result.success &&
+      result.type === "image_prompt" &&
+      result.data &&
+      typeof result.data === "object" &&
+      (result.agentType === "illustrator" ||
+        resolvedAgents.some((entry) => entry.resolved.id === result.agentId && entry.resolved.type === "illustrator")),
+  );
+  const resultEntry = illustratorResult
+    ? resolvedAgents.find((entry) => entry.resolved.id === illustratorResult.agentId)
+    : null;
+  const illustratorEntry = illustratorResult
+    ? resultEntry?.resolved.type === "illustrator"
+      ? resultEntry
+      : resolvedAgents.find((entry) => entry.resolved.type === "illustrator")
+    : null;
+  if (
+    illustratorResult &&
+    illustratorEntry &&
+    !illustratorPromptReviewOverride &&
+    shouldRetryIllustratorTarget(illustratorRetryTargets, "background") &&
+    (isManualIllustratorBackgroundRequest ||
+      illustratorBackgroundGenerationEnabled((chat as { mode?: unknown }).mode, chatMeta))
+  ) {
+    const backgroundAtDecision =
+      typeof chatMeta.background === "string" && chatMeta.background.trim() ? chatMeta.background.trim() : null;
+    try {
+      const freshChat = await chats.getById(chatId);
+      const freshMeta = parseExtra(freshChat?.metadata) as Record<string, unknown>;
+      const backgroundBeforeGeneration =
+        typeof freshMeta.background === "string" && freshMeta.background.trim() ? freshMeta.background.trim() : null;
+      if (backgroundBeforeGeneration !== backgroundAtDecision) {
+        logger.info(
+          "[retry-agents/illustrator-background] Skipping automatic background because the active background changed after the Illustrator decision",
+        );
+        return;
+      }
+
+      const latestSnapshot = await loadRetryTargetGameStateSnapshot();
+      const latestGameState = latestSnapshot
+        ? parseGameStateRow(latestSnapshot as Record<string, unknown>)
+        : agentContext.gameState;
+      const illData = illustratorResult.data as Record<string, unknown>;
+      const requestedBackground =
+        isManualIllustratorBackgroundRequest || illustratorRequestedBackground(illData.generateBackground);
+      const trackerLocationChanged = illustratorTrackerLocationChanged(
+        agentContext.gameState?.location,
+        latestGameState?.location,
+      );
+      if (!requestedBackground && !trackerLocationChanged) return;
+      const backgroundDecisionReason = isManualIllustratorBackgroundRequest
+        ? "Manual Gallery background request"
+        : requestedBackground
+        ? typeof illData.reason === "string"
+          ? illData.reason
+          : undefined
+        : `Tracker location changed from ${agentContext.gameState?.location || "an unspecified location"} to ${latestGameState?.location}.`;
+      if (trackerLocationChanged && !requestedBackground) {
+        logger.info(
+          '[retry-agents/illustrator-background] Tracker location changed from "%s" to "%s"; generating despite a false Illustrator background decision',
+          agentContext.gameState?.location || "(none)",
+          latestGameState?.location,
+        );
+      }
+      const generated = await generateIllustratorSceneBackground({
+        db: app.db,
+        chatId,
+        chatName: chat.name,
+        chatMode: (chat as { mode?: unknown }).mode === "visual_novel" ? "visual_novel" : "roleplay",
+        chatMetadata: freshMeta,
+        currentBackground:
+          backgroundBeforeGeneration ??
+          (typeof agentContext.memory._currentBackground === "string"
+            ? agentContext.memory._currentBackground
+            : null),
+        illustratorAgent: illustratorEntry.resolved,
+        assistantResponse: agentContext.mainResponse ?? "",
+        decisionReason: backgroundDecisionReason,
+        gameState: latestGameState,
+        recentMessages: agentContext.recentMessages,
+        signal: agentContext.signal,
+        debugLog: (message, ...values) =>
+          logDebugOverride(debugMode || isDebugAgentsEnabled(), message, ...values),
+      });
+
+      const chatAfterGeneration = await chats.getById(chatId);
+      const metaAfterGeneration = parseExtra(chatAfterGeneration?.metadata) as Record<string, unknown>;
+      const backgroundAfterGeneration =
+        typeof metaAfterGeneration.background === "string" && metaAfterGeneration.background.trim()
+          ? metaAfterGeneration.background.trim()
+          : null;
+      if (backgroundAfterGeneration !== backgroundAtDecision) {
+        logger.info(
+          "[retry-agents/illustrator-background] Saved %s without activating it because the background changed during generation",
+          generated.filename,
+        );
+        return;
+      }
+
+      await chats.patchMetadata(chatId, { background: generated.filename });
+      sendSseEvent(reply, {
+        type: "agent_result",
+        data: {
+          agentType: "illustrator",
+          agentName: illustratorEntry.cfg?.name ?? illustratorEntry.resolved.name ?? "Illustrator",
+          resultType: "background_change",
+          data: {
+            chosen: generated.filename,
+            generated: true,
+            location: generated.locationName,
+            reason: generated.reason,
+            tags: generated.tags,
+          },
+          success: true,
+          error: null,
+        },
+      });
+      logger.info(
+        '[retry-agents/illustrator-background] Generated and activated "%s" for %s',
+        generated.filename,
+        generated.locationName,
+      );
+    } catch (backgroundError) {
+      logger.error(backgroundError, "[retry-agents/illustrator-background] Automatic scene background failed");
+      sendSseEvent(reply, {
+        type: "agent_error",
+        data: {
+          agentType: "illustrator",
+          agentName: illustratorEntry.cfg?.name ?? illustratorEntry.resolved.name ?? "Illustrator",
+          retryTarget: "background",
+          error: `Background generation failed: ${
+            backgroundError instanceof Error ? backgroundError.message : String(backgroundError)
+          }`,
+        },
+      });
+    }
+  }
 }
 
 export async function registerRetryAgentsRoute(app: FastifyInstance) {
@@ -3440,12 +3635,18 @@ export async function registerRetryAgentsRoute(app: FastifyInstance) {
       agentTypes: string[];
       streaming?: boolean;
       debugMode?: boolean;
+      /** Background currently displayed on the active chat surface. */
+      currentBackground?: string | null;
       /** Serialize Roleplay Illustrator provider calls when enabled. */
       queueImageGenerationRequests?: boolean;
       /** Pause a manual Illustrator retry after prompt compilation so the client can review it. */
       reviewImagePromptsBeforeSend?: boolean;
+      /** Override prompt modes for this retry without changing the chat's saved selections. */
+      agentPromptTemplateIds?: unknown;
       /** Resume a reviewed Illustrator retry without running the Illustrator LLM a second time. */
       illustratorPromptReviewOverride?: unknown;
+      /** Limit an Illustrator retry to visual jobs that failed in the original run. */
+      illustratorRetryTargets?: unknown;
       lorebookKeeperBackfill?: boolean;
       /** When set, scope history and game state to this assistant message (as at original generation), not the latest turn. */
       forMessageId?: string;
@@ -3460,9 +3661,12 @@ export async function registerRetryAgentsRoute(app: FastifyInstance) {
       agentTypes,
       streaming = true,
       debugMode = false,
+      currentBackground: requestedCurrentBackground,
       queueImageGenerationRequests = true,
       reviewImagePromptsBeforeSend = false,
+      agentPromptTemplateIds,
       illustratorPromptReviewOverride: rawIllustratorPromptReviewOverride,
+      illustratorRetryTargets: rawIllustratorRetryTargets,
       lorebookKeeperBackfill = false,
       forMessageId,
       musicPlayerSource = "spotify",
@@ -3472,12 +3676,21 @@ export async function registerRetryAgentsRoute(app: FastifyInstance) {
     const illustratorPromptReviewOverride = rawIllustratorPromptReviewOverride
       ? parseIllustratorPromptReviewOverride(rawIllustratorPromptReviewOverride)
       : null;
+    const illustratorRetryTargets = parseIllustratorRetryTargets(rawIllustratorRetryTargets);
     if (!chatId || !agentTypes?.length) {
       return reply.status(400).send({ error: "chatId and agentTypes are required" });
     }
     if (rawIllustratorPromptReviewOverride && !illustratorPromptReviewOverride) {
       return reply.status(400).send({ error: "Invalid Illustrator prompt review override" });
     }
+    if (illustratorRetryTargets === null) {
+      return reply.status(400).send({ error: "Invalid Illustrator retry targets" });
+    }
+    if (illustratorRetryTargets && !agentTypes.includes("illustrator")) {
+      return reply.status(400).send({ error: "Illustrator retry targets require an Illustrator retry" });
+    }
+    const isManualIllustratorBackgroundRequest =
+      illustratorRetryTargets?.length === 1 && illustratorRetryTargets[0] === "background";
 
     startSseReply(reply, { "X-Accel-Buffering": "no" });
     const onFallback = createReplyFallbackNotifier(reply);
@@ -3512,6 +3725,12 @@ export async function registerRetryAgentsRoute(app: FastifyInstance) {
       }
 
       const chatMeta = parseExtra(chat.metadata);
+      const currentBackgroundSource =
+        requestedCurrentBackground !== undefined ? requestedCurrentBackground : chatMeta.background;
+      const currentBackground =
+        typeof currentBackgroundSource === "string" && currentBackgroundSource.trim()
+          ? currentBackgroundSource.trim()
+          : null;
       const requireAgentWriteApproval = agentWriteApprovalRequired(chatMeta);
       const allMessages = await chats.listMessages(chatId);
       let startIdx = 0;
@@ -3574,6 +3793,7 @@ export async function registerRetryAgentsRoute(app: FastifyInstance) {
         chat,
         conns,
         agentsStore,
+        agentPromptTemplateIds,
         activeMusicPlayerSource:
           musicPlayerEnabled === false
             ? null
@@ -3617,6 +3837,7 @@ export async function registerRetryAgentsRoute(app: FastifyInstance) {
         db: app.db,
         chat,
         chatMeta,
+        currentBackground,
         recentMessages,
         enabledConfigs,
         resolvedAgentTypes: new Set(resolvedAgents.map((a) => a.resolved.type)),
@@ -3626,6 +3847,7 @@ export async function registerRetryAgentsRoute(app: FastifyInstance) {
         lorebooksStore,
         streaming,
         wrapFormat: retryWrapFormat,
+        forceIllustratorBackgroundGeneration: isManualIllustratorBackgroundRequest,
         historicalGameStateAnchor,
       });
       agentContext.signal = abortController.signal;
@@ -3638,6 +3860,7 @@ export async function registerRetryAgentsRoute(app: FastifyInstance) {
               db: app.db,
               chat,
               chatMeta,
+              currentBackground,
               recentMessages: preGenerationRecentMessages,
               enabledConfigs,
               resolvedAgentTypes: new Set(resolvedAgents.map((a) => a.resolved.type)),
@@ -3647,6 +3870,7 @@ export async function registerRetryAgentsRoute(app: FastifyInstance) {
               lorebooksStore,
               streaming,
               wrapFormat: retryWrapFormat,
+              forceIllustratorBackgroundGeneration: isManualIllustratorBackgroundRequest,
               historicalGameStateAnchor: preGenerationGameStateAnchor,
               useLatestGameStateFallback: false,
             })
@@ -3993,6 +4217,7 @@ export async function registerRetryAgentsRoute(app: FastifyInstance) {
         queueImageGenerationRequests,
         reviewImagePromptsBeforeSend,
         illustratorPromptReviewOverride,
+        illustratorRetryTargets,
         debugMode,
         secretPlotRerollMode,
       });

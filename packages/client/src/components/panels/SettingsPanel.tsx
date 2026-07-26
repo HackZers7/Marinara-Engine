@@ -21,15 +21,8 @@ import {
   type VisualTheme,
 } from "../../stores/ui.store";
 import { cn, copyToClipboard } from "../../lib/utils";
-import { useExtensions, useCreateExtension, useDeleteExtension, useUpdateExtension } from "../../hooks/use-extensions";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import {
-  ADMIN_SECRET_STORAGE_KEY,
-  ApiError,
-  api,
-  getAdminSecretHeader,
-  getPrivilegedActionErrorMessage,
-} from "../../lib/api-client";
+import { ADMIN_SECRET_STORAGE_KEY, ApiError, api, getPrivilegedActionErrorMessage } from "../../lib/api-client";
 import { chatBackgroundUrlToMetadata } from "../../lib/backgrounds";
 import { normalizeThemeCss, sanitizeAppCss } from "../../lib/theme-css";
 import { forceRefreshSpa } from "@/lib/browser-runtime";
@@ -52,13 +45,12 @@ import {
   createFolderEntry,
   getFolderImportEntries,
   getFolderManifestConfig,
-  isJsonRecord,
+  type AppSettingsResponse,
   type ConversationCallCharacterVideoClipKind,
   type ImagePromptKind,
   type ImagePromptMode,
   type ImageStyleProfile,
   type ImageStyleProfileSettings,
-  type InstalledExtension,
   type QuoteFormat,
   type Theme,
   type VideoGenerationUserSettings,
@@ -88,7 +80,6 @@ import {
   FileCode2,
   FileText,
   Power,
-  PowerOff,
   Paintbrush,
   AlertTriangle,
   Tag,
@@ -137,18 +128,11 @@ import { ExportFormatDialog, type ExportFormatChoice } from "../ui/ExportFormatD
 import { inspectCharacterFilesForEmbeddedLorebooks } from "../../lib/character-import";
 import { showConfirmDialog } from "../../lib/app-dialogs";
 import { downloadJsonFile, sanitizeExportFilenamePart } from "../../lib/download-json";
-import { downloadZipFile } from "../../lib/download-zip";
-import { createExtensionFolderPackageFilename, createExtensionFolderPackageFiles } from "../../lib/extension-transfer";
 import {
-  collectFolderPackageEntries,
-  getPackagePathBasename,
-  readTextFilesFromFileList,
-  resolvePackageTextPaths,
-  type FolderPackageImportEntry,
-  type PackageTextFile,
-} from "../../lib/folder-package-transfer";
-import { HOST_DEVICE_FILE_MANAGER_MESSAGE } from "../../lib/host-device";
-import { isZipFile as isZipArchiveFile, readTextFilesFromZip } from "../../lib/read-zip-text";
+  HOST_DEVICE_FILE_MANAGER_MESSAGE,
+  HostDeviceFileManagerError,
+  isHostDeviceBrowser,
+} from "../../lib/host-device";
 
 type CustomFontFace = {
   filename: string;
@@ -173,7 +157,7 @@ const TABS = [
     icon: WandSparkles,
     description: "Image/video defaults and prompt templates.",
   },
-  { id: "addons", label: "Addons", icon: Puzzle, description: "Themes, extensions, and custom behavior." },
+  { id: "addons", label: "Addons", icon: Puzzle, description: "Custom themes and theme CSS." },
   { id: "import", label: "Imports", icon: Download, description: "Imports, asset folders, and data transfer." },
   {
     id: "advanced",
@@ -206,7 +190,6 @@ type SettingsSectionId =
   | "chat-backgrounds"
   | "prompt-overrides"
   | "theme-library"
-  | "extension-library"
   | "profile-marinara"
   | "sillytavern-import"
   | "admin-access"
@@ -401,13 +384,6 @@ const SETTINGS_SECTIONS: readonly SettingsSectionMeta[] = [
     label: "Prompt Overrides",
     description: "Reusable image and video prompt templates.",
     aliases: ["prompt", "template", "override", "video prompt", "image prompt"],
-  },
-  {
-    id: "extension-library",
-    tab: "addons",
-    label: "Extension Library",
-    description: "Trusted browser and server extensions.",
-    aliases: ["extensions", "addons", "tools", "browser", "server"],
   },
   {
     id: "theme-library",
@@ -859,6 +835,14 @@ const SETTINGS_SEARCHABLE_CONTROLS: readonly SettingsSearchableControlMeta[] = [
     kind: "Picker",
   },
   {
+    id: "default-dialogue-color",
+    sectionId: "text-scale",
+    label: "Default Dialogue Color",
+    description: "Choose the dialogue highlight used by cards without their own dialogue color.",
+    aliases: ["quote color", "character dialogue", "persona dialogue"],
+    kind: "Toggle",
+  },
+  {
     id: "chat-chrome-text-color",
     sectionId: "text-scale",
     label: "Chat Chrome Text Color",
@@ -955,6 +939,14 @@ const SETTINGS_SEARCHABLE_CONTROLS: readonly SettingsSearchableControlMeta[] = [
     kind: "Slider",
   },
   {
+    id: "roleplay-reduced-paint-effects",
+    sectionId: "roleplay-messages",
+    label: "Reduced paint effects",
+    description: "Flatten costly Roleplay transparency, shadows, and scene overlays.",
+    aliases: ["roleplay", "performance", "firefox", "slow", "paint", "effects"],
+    kind: "Toggle",
+  },
+  {
     id: "scrollable-avatars",
     sectionId: "roleplay-messages",
     label: "Scrollable Avatars",
@@ -1009,6 +1001,14 @@ const SETTINGS_SEARCHABLE_CONTROLS: readonly SettingsSearchableControlMeta[] = [
     description: "Choose a classic dialogue box or segment history display.",
     aliases: ["game", "vn", "history"],
     kind: "Button group",
+  },
+  {
+    id: "game-text-effects",
+    sectionId: "game-presentation",
+    label: "Game text effects",
+    description: "Animate dramatic words and explicit text-effect tags in Game mode.",
+    aliases: ["game", "text", "animation", "effects", "accessibility", "motion"],
+    kind: "Toggle",
   },
   {
     id: "weather-effects",
@@ -3079,8 +3079,6 @@ function ImageGenerationSettings() {
   );
 }
 
-type AppSettingsValueResponse = { value: string | null };
-
 const VIDEO_GENERATION_SETTINGS_QUERY_KEY = ["app-settings", VIDEO_GENERATION_SETTINGS_KEY] as const;
 
 function serializeVideoGenerationSettings(settings: VideoGenerationUserSettings): string {
@@ -3089,7 +3087,7 @@ function serializeVideoGenerationSettings(settings: VideoGenerationUserSettings)
 
 function VideoGenerationSettings() {
   const qc = useQueryClient();
-  const videoSettingsQuery = useQuery<AppSettingsValueResponse>({
+  const videoSettingsQuery = useQuery<AppSettingsResponse>({
     queryKey: VIDEO_GENERATION_SETTINGS_QUERY_KEY,
     queryFn: () => api.get(`/app-settings/${VIDEO_GENERATION_SETTINGS_KEY}`),
     staleTime: 60_000,
@@ -3104,9 +3102,9 @@ function VideoGenerationSettings() {
     setDraft(savedSettings);
   }, [savedSettings]);
 
-  const saveVideoSettings = useMutation<AppSettingsValueResponse, Error, VideoGenerationUserSettings>({
+  const saveVideoSettings = useMutation<AppSettingsResponse, Error, VideoGenerationUserSettings>({
     mutationFn: (next) =>
-      api.put<AppSettingsValueResponse>(`/app-settings/${VIDEO_GENERATION_SETTINGS_KEY}`, {
+      api.put<AppSettingsResponse>(`/app-settings/${VIDEO_GENERATION_SETTINGS_KEY}`, {
         value: serializeVideoGenerationSettings(next),
       }),
     onSuccess: (data) => {
@@ -3302,8 +3300,8 @@ function GameAssetsSettings() {
   const handleOpenGameAssetFolder = (subfolder: string) => {
     openGameAssetsFolder.mutate(subfolder, {
       onError: (error) => {
-        if (error instanceof Error && error.message === HOST_DEVICE_FILE_MANAGER_MESSAGE) return;
-        toast.error("Failed to open game assets folder.");
+        if (error instanceof HostDeviceFileManagerError) return;
+        toast.error(getPrivilegedActionErrorMessage(error, "Failed to open game assets folder."));
       },
     });
   };
@@ -3500,6 +3498,17 @@ function AppearanceSettings() {
   const activeChatId = useChatStore((s) => s.activeChatId);
   const updateMeta = useUpdateChatMetadata();
   const setActiveSyncedTheme = useSetActiveTheme();
+  const handleOpenFontsFolder = async () => {
+    if (!isHostDeviceBrowser()) {
+      toast.info(HOST_DEVICE_FILE_MANAGER_MESSAGE);
+      return;
+    }
+    try {
+      await api.post("/fonts/open-folder");
+    } catch (error) {
+      toast.error(getPrivilegedActionErrorMessage(error, "Could not open fonts folder."));
+    }
+  };
   const handleAppBackgroundColorChange = useCallback(
     (color: string) => {
       const normalized = color.trim();
@@ -3672,10 +3681,16 @@ function AppearanceSettings() {
   // Text appearance
   const chatFontColor = useUIStore((s) => s.chatFontColor);
   const setChatFontColor = useUIStore((s) => s.setChatFontColor);
+  const defaultDialogueColorEnabled = useUIStore((s) => s.defaultDialogueColorEnabled);
+  const setDefaultDialogueColorEnabled = useUIStore((s) => s.setDefaultDialogueColorEnabled);
+  const defaultDialogueColor = useUIStore((s) => s.defaultDialogueColor);
+  const setDefaultDialogueColor = useUIStore((s) => s.setDefaultDialogueColor);
   const chatChromeTextColor = useUIStore((s) => s.chatChromeTextColor);
   const setChatChromeTextColor = useUIStore((s) => s.setChatChromeTextColor);
   const chatFontOpacity = useUIStore((s) => s.chatFontOpacity);
   const setChatFontOpacity = useUIStore((s) => s.setChatFontOpacity);
+  const roleplayReducedPaintEffects = useUIStore((s) => s.roleplayReducedPaintEffects);
+  const setRoleplayReducedPaintEffects = useUIStore((s) => s.setRoleplayReducedPaintEffects);
   const roleplayAvatarStyle = useUIStore((s) => s.roleplayAvatarStyle);
   const setRoleplayAvatarStyle = useUIStore((s) => s.setRoleplayAvatarStyle);
   const roleplayAvatarScale = useUIStore((s) => s.roleplayAvatarScale);
@@ -3686,6 +3701,8 @@ function AppearanceSettings() {
   const setRoleplaySpriteScale = useUIStore((s) => s.setRoleplaySpriteScale);
   const gameDialogueDisplayMode = useUIStore((s) => s.gameDialogueDisplayMode);
   const setGameDialogueDisplayMode = useUIStore((s) => s.setGameDialogueDisplayMode);
+  const gameTextEffectsEnabled = useUIStore((s) => s.gameTextEffectsEnabled);
+  const setGameTextEffectsEnabled = useUIStore((s) => s.setGameTextEffectsEnabled);
   const gameAvatarScale = useUIStore((s) => s.gameAvatarScale);
   const setGameAvatarScale = useUIStore((s) => s.setGameAvatarScale);
   const gameFullBodySpriteScale = useUIStore((s) => s.gameFullBodySpriteScale);
@@ -3936,7 +3953,7 @@ function AppearanceSettings() {
               </p>
             )}
             <button
-              onClick={() => api.post("/fonts/open-folder").catch(() => {})}
+              onClick={handleOpenFontsFolder}
               className={cn(SETTINGS_BUTTON_CLASS, "mt-1 self-start")}
             >
               <FolderOpen size="0.75rem" />
@@ -4036,6 +4053,32 @@ function AppearanceSettings() {
               emptyText={`Scheme default ${getDefaultChatTextColor(theme)}`}
               emptyPreviewValue={getDefaultChatTextColor(theme)}
               clearLabel="Reset to default"
+            />
+          </SearchableSettingTarget>
+
+          <SearchableSettingTarget controlId="default-dialogue-color">
+            <ColorPicker
+              value={defaultDialogueColor}
+              onChange={setDefaultDialogueColor}
+              compact
+              label="Default Dialogue Color"
+              helpText="When enabled, this colors dialogue for character and persona cards that do not have their own Dialogue Highlight Color. A card's own dialogue color always overrides it."
+              emptyText={`Scheme default ${getDefaultChatTextColor(theme)}`}
+              emptyPreviewValue={getDefaultChatTextColor(theme)}
+              clearLabel="Reset to scheme default"
+              disabled={!defaultDialogueColorEnabled}
+              headerAction={
+                <SettingsSwitch
+                  checked={defaultDialogueColorEnabled}
+                  onChange={setDefaultDialogueColorEnabled}
+                  ariaLabel={
+                    defaultDialogueColorEnabled
+                      ? "Disable the default dialogue color"
+                      : "Enable the default dialogue color"
+                  }
+                  className="p-0 hover:bg-transparent"
+                />
+              }
             />
           </SearchableSettingTarget>
 
@@ -4227,6 +4270,14 @@ function AppearanceSettings() {
               Reset opacity to default
             </button>
           </label>
+
+          <ToggleSetting
+            anchorId={getSettingsControlAnchorId("roleplay-reduced-paint-effects")}
+            label="Reduced paint effects"
+            checked={roleplayReducedPaintEffects}
+            onChange={setRoleplayReducedPaintEffects}
+            help="Flattens costly Roleplay transparency, shadows, and scene overlays to keep navigation responsive, especially in Firefox. Applies immediately in every browser."
+          />
 
           <div className="flex flex-col gap-2">
             <div className="flex items-center gap-1.5">
@@ -4501,6 +4552,14 @@ function AppearanceSettings() {
               ))}
             </div>
           </div>
+
+          <ToggleSetting
+            anchorId={getSettingsControlAnchorId("game-text-effects")}
+            label="Game text effects"
+            checked={gameTextEffectsEnabled}
+            onChange={setGameTextEffectsEnabled}
+            help="Animates dramatic words, ALL CAPS emphasis, parenthetical asides, and explicit text-effect tags in Game mode. Turn this off for plain, stable text."
+          />
         </div>
       </SettingsSection>
 
@@ -4774,15 +4833,7 @@ function GenerationsSettings() {
 }
 
 function AddonsSettings() {
-  return (
-    <div className="flex flex-col gap-3">
-      <SettingsIntro>
-        Extensions add trusted browser or server behavior; custom themes change Marinara's look.
-      </SettingsIntro>
-      <ExtensionsSettings showIntro={false} />
-      <ThemesSettings showIntro={false} />
-    </div>
-  );
+  return <ThemesSettings />;
 }
 
 function ThemesSettings({ showIntro = true }: { showIntro?: boolean } = {}) {
@@ -5142,7 +5193,7 @@ function ThemesSettings({ showIntro = true }: { showIntro?: boolean } = {}) {
                   className="flex flex-1 items-center gap-2 min-w-0"
                 >
                   <FileCode2 size="0.75rem" className="shrink-0" />
-                  <span className="truncate">{t.name}</span>
+                  <span className="mari-chrome-text truncate">{t.name}</span>
                   {activeCustomTheme?.id === t.id && <Check size="0.75rem" className="shrink-0" />}
                 </button>
                 <button
@@ -5321,138 +5372,6 @@ function parseThemeJsonWithControlCharFallback(text: string) {
   }
 }
 
-function createInlineFolderPackageImportEntry(raw: unknown, path: string): FolderPackageImportEntry {
-  return {
-    raw,
-    path,
-    basePath: "",
-    resolveTextFile: () => null,
-  };
-}
-
-function getExtensionImportKind(raw: unknown) {
-  if (!isJsonRecord(raw)) return "";
-  const manifest = isJsonRecord(raw.manifest) ? raw.manifest : raw;
-  return typeof manifest.kind === "string" ? manifest.kind : "";
-}
-
-function getExtensionImportRuntime(raw: unknown, record: Record<string, unknown>): "client" | "server" {
-  const runtime = typeof record.runtime === "string" ? record.runtime.toLowerCase() : "";
-  const kind = getExtensionImportKind(raw).toLowerCase();
-  return runtime === "server" || kind === "marinara.server-extension" ? "server" : "client";
-}
-
-function normalizeExtensionImportEntry(entry: FolderPackageImportEntry, fallbackName: string) {
-  const source = getFolderManifestConfig(entry.raw);
-  if (!source || typeof source !== "object" || Array.isArray(source)) return null;
-  const record = source as Record<string, unknown>;
-  const folderName = getPackagePathBasename(entry.basePath) || fallbackName;
-  const name = typeof record.name === "string" && record.name.trim() ? record.name.trim() : folderName;
-  if (!name) return null;
-  const runtime = getExtensionImportRuntime(entry.raw, record);
-
-  if (runtime === "server") {
-    const serverJsFromFiles = resolvePackageTextPaths(
-      entry.resolveTextFile,
-      record.serverJsPath ?? record.serverJsPaths ?? record.jsPath ?? record.jsPaths,
-    );
-    return {
-      name,
-      description: typeof record.description === "string" ? record.description : "",
-      runtime,
-      css: null,
-      js: null,
-      serverJs:
-        serverJsFromFiles ??
-        (typeof record.serverJs === "string" ? record.serverJs : typeof record.js === "string" ? record.js : null),
-      enabled: false,
-    };
-  }
-
-  return {
-    name,
-    description: typeof record.description === "string" ? record.description : "",
-    runtime,
-    css:
-      resolvePackageTextPaths(entry.resolveTextFile, record.cssPath ?? record.cssPaths) ??
-      (typeof record.css === "string" ? record.css : null),
-    js:
-      resolvePackageTextPaths(entry.resolveTextFile, record.jsPath ?? record.jsPaths) ??
-      (typeof record.js === "string" ? record.js : null),
-    serverJs: null,
-    enabled: typeof record.enabled === "boolean" ? record.enabled : false,
-  };
-}
-
-function createLooseExtensionFolderImportEntries(
-  files: PackageTextFile[],
-  fallbackName: string,
-): FolderPackageImportEntry[] {
-  const serverJs = files
-    .filter((file) => /\.server\.(js|mjs|cjs)$/i.test(file.path))
-    .map((file) => file.text)
-    .join("\n\n");
-  if (serverJs) {
-    return [
-      createInlineFolderPackageImportEntry(
-        {
-          name: fallbackName || "extension",
-          description: "Server extension imported from folder",
-          runtime: "server",
-          serverJs,
-          enabled: false,
-        },
-        fallbackName || "extension",
-      ),
-    ];
-  }
-
-  const css = files
-    .filter((file) => file.path.toLowerCase().endsWith(".css"))
-    .map((file) => file.text)
-    .join("\n\n");
-  const js = files
-    .filter((file) => /\.(js|mjs|cjs)$/i.test(file.path) && !/\.server\.(js|mjs|cjs)$/i.test(file.path))
-    .map((file) => file.text)
-    .join("\n\n");
-  if (!css && !js) return [];
-  return [
-    createInlineFolderPackageImportEntry(
-      {
-        name: fallbackName || "extension",
-        description: "Extension imported from folder",
-        runtime: "client",
-        css: css || null,
-        js: js || null,
-        serverJs: null,
-        enabled: false,
-      },
-      fallbackName || "extension",
-    ),
-  ];
-}
-
-function getLooseExtensionFolderName(files: PackageTextFile[], fallbackName: string) {
-  const firstPath = files[0]?.path;
-  if (!firstPath) return fallbackName;
-  const firstSlash = firstPath.indexOf("/");
-  return firstSlash > 0 ? firstPath.slice(0, firstSlash) : fallbackName;
-}
-
-function describeExtensionImportError(error: unknown, name?: string) {
-  const rawMessage =
-    error instanceof ApiError && error.message
-      ? error.message
-      : error instanceof Error && error.message
-        ? error.message
-        : "Failed to import extension.";
-  const subject = name ? `Failed to install "${name}": ${rawMessage}` : rawMessage;
-  if (error instanceof ApiError && error.status === 403) {
-    return `${subject} Installing extensions requires loopback access or admin access. Open Marinara Engine through localhost, or set ADMIN_SECRET=<secret> in the server .env and paste the same value in Settings → Advanced → Admin Access. Marinara sends it as the X-Admin-Secret header.`;
-  }
-  return subject;
-}
-
 function triggerFilePicker(options: {
   accept?: string;
   multiple?: boolean;
@@ -5493,389 +5412,6 @@ function triggerFilePicker(options: {
 
   document.body.appendChild(el);
   el.click();
-}
-
-function ExtensionsSettings({ showIntro = true }: { showIntro?: boolean } = {}) {
-  const { data: extensions, isLoading } = useExtensions();
-  const extensionList = extensions ?? [];
-  const createExtension = useCreateExtension();
-  const updateExtension = useUpdateExtension();
-  const deleteExtension = useDeleteExtension();
-
-  const importExtensionEntries = async (
-    entries: FolderPackageImportEntry[],
-    installedAt: string,
-    fallbackName: string,
-  ) => {
-    let imported = 0;
-    let importedEnabled = 0;
-    let failed = 0;
-    let skipped = 0;
-    const failureMessages: string[] = [];
-    for (const entry of entries) {
-      const normalized = normalizeExtensionImportEntry(entry, fallbackName);
-      if (!normalized) {
-        skipped++;
-        failureMessages.push("Skipped an extension entry because it did not contain importable extension data.");
-        continue;
-      }
-      try {
-        await createExtension.mutateAsync({
-          ...normalized,
-          installedAt,
-        });
-        imported++;
-        if (normalized.enabled) importedEnabled++;
-      } catch (err) {
-        failed++;
-        failureMessages.push(describeExtensionImportError(err, normalized.name));
-        console.warn("[ExtensionsSettings] Failed to import extension entry:", normalized.name, err);
-      }
-    }
-    if (imported === 0 && failed === 0 && skipped === 0) throw new Error("No valid extensions found in file");
-    const skipNote = skipped > 0 ? ` (${skipped} skipped — no importable entry)` : "";
-    // "Review before enabling" would be misleading when a manifest imported
-    // with enabled:true — those extensions are already running.
-    const reviewNote =
-      importedEnabled > 0
-        ? ` ${importedEnabled === imported ? "They are" : `${importedEnabled} of them are`} already enabled — review in the Extension Library.`
-        : " Review before enabling.";
-    if (failed > 0) {
-      const more = failureMessages.length > 1 ? ` (+${failureMessages.length - 1} more)` : "";
-      toast.error(
-        imported > 0
-          ? `Imported ${imported} extension${imported === 1 ? "" : "s"}${skipNote}; ${failed} failed — ${failureMessages[0]}${more}`
-          : `Failed to import ${failed} extension${failed === 1 ? "" : "s"}${skipNote} — ${failureMessages[0]}${more}`,
-        { duration: 12_000 },
-      );
-    } else if (skipped > 0) {
-      toast.warning(
-        imported > 0
-          ? `Imported ${imported} extension${imported === 1 ? "" : "s"}${skipNote}.${reviewNote}`
-          : `Skipped ${skipped} extension entr${skipped === 1 ? "y" : "ies"}.`,
-        {
-          description: failureMessages[0],
-          duration: 12_000,
-        },
-      );
-    } else {
-      toast.success(`Imported ${imported} extension${imported === 1 ? "" : "s"}${skipNote}.${reviewNote}`);
-    }
-  };
-
-  const handleImportExtensionFile = async (file: File) => {
-    try {
-      const installedAt = new Date().toISOString();
-      const fallbackName = file.name
-        .replace(/\.server\.(js|mjs|cjs)$/i, "")
-        .replace(/\.(json|css|js|mjs|cjs|zip)$/i, "");
-      const lowerName = file.name.toLowerCase();
-
-      if (isZipArchiveFile(file)) {
-        const files = await readTextFilesFromZip(file);
-        const entries = collectFolderPackageEntries(files, {
-          rootFilenames: ["marinara-extensions.json", "marinara-extension.json"],
-          collectionKeys: ["extensions"],
-        });
-        await importExtensionEntries(
-          entries.length > 0 ? entries : createLooseExtensionFolderImportEntries(files, fallbackName),
-          installedAt,
-          fallbackName,
-        );
-      } else if (lowerName.endsWith(".json")) {
-        const text = await file.text();
-        const parsed = JSON.parse(text);
-        const entries = getFolderImportEntries(parsed, ["extensions"]).map((entry) =>
-          createInlineFolderPackageImportEntry(entry, file.name),
-        );
-        await importExtensionEntries(entries, installedAt, fallbackName);
-      } else if (/\.server\.(js|mjs|cjs)$/i.test(lowerName)) {
-        const text = await file.text();
-        const name = file.name.replace(/\.server\.(js|mjs|cjs)$/i, "");
-        try {
-          await createExtension.mutateAsync({
-            name,
-            description: "Server extension imported from file",
-            runtime: "server",
-            serverJs: text,
-            enabled: false,
-            installedAt,
-          });
-        } catch (err) {
-          throw new Error(describeExtensionImportError(err, name));
-        }
-        toast.success(`Server extension "${name}" imported and left disabled for review`);
-      } else if (/\.(js|mjs|cjs)$/i.test(lowerName)) {
-        const text = await file.text();
-        const name = file.name.replace(/\.(js|mjs|cjs)$/i, "");
-        try {
-          await createExtension.mutateAsync({
-            name,
-            description: "JS extension imported from file",
-            runtime: "client",
-            js: text,
-            enabled: false,
-            installedAt,
-          });
-        } catch (err) {
-          throw new Error(describeExtensionImportError(err, name));
-        }
-        toast.success(`Extension "${name}" imported and left disabled for review`);
-      } else if (lowerName.endsWith(".css")) {
-        const text = await file.text();
-        const name = file.name.replace(/\.css$/i, "");
-        try {
-          await createExtension.mutateAsync({
-            name,
-            description: "CSS extension imported from file",
-            runtime: "client",
-            css: text,
-            enabled: false,
-            installedAt,
-          });
-        } catch (err) {
-          throw new Error(describeExtensionImportError(err, name));
-        }
-        toast.success(`Extension "${name}" imported and left disabled for review`);
-      } else {
-        toast.error(
-          "Only .zip, .json, .css, .js, .mjs, .cjs, .server.js, .server.mjs, and .server.cjs files are supported.",
-        );
-      }
-    } catch (err) {
-      toast.error(getPrivilegedActionErrorMessage(err, "Failed to import extension."));
-    }
-  };
-
-  const handleImportExtensionFolder = async (selectedFiles: FileList | null) => {
-    try {
-      const installedAt = new Date().toISOString();
-      const files = await readTextFilesFromFileList(selectedFiles);
-      const folderName = getLooseExtensionFolderName(files, "extension");
-      const entries = collectFolderPackageEntries(files, {
-        rootFilenames: ["marinara-extensions.json", "marinara-extension.json"],
-        collectionKeys: ["extensions"],
-      });
-      await importExtensionEntries(
-        entries.length > 0 ? entries : createLooseExtensionFolderImportEntries(files, folderName),
-        installedAt,
-        folderName,
-      );
-    } catch (err) {
-      toast.error(getPrivilegedActionErrorMessage(err, "Failed to import extension folder."));
-    }
-  };
-
-  const handleToggleExtension = async (ext: InstalledExtension) => {
-    const nextEnabled = !ext.enabled;
-    if (nextEnabled && ext.runtime === "server") {
-      const confirmed = await showConfirmDialog({
-        title: "Enable Server Extension",
-        message: `Enable "${ext.name}"? This runs trusted JavaScript inside the Marinara Node.js server process and can affect this server until disabled. Only enable code you trust.`,
-        confirmLabel: "Enable Server Extension",
-        tone: "destructive",
-      });
-      if (!confirmed) return;
-    } else if (nextEnabled && ext.js?.trim()) {
-      const confirmed = await showConfirmDialog({
-        title: "Enable Extension",
-        message: `Enable "${ext.name}"? This runs the extension's JavaScript inside Marinara Engine.`,
-        confirmLabel: "Enable",
-        tone: "destructive",
-      });
-      if (!confirmed) return;
-    }
-
-    try {
-      await updateExtension.mutateAsync({ id: ext.id, enabled: nextEnabled });
-    } catch (err) {
-      toast.error(getPrivilegedActionErrorMessage(err, "Failed to update extension."));
-    }
-  };
-
-  const handleDeleteExtension = async (ext: InstalledExtension) => {
-    const confirmed = await showConfirmDialog({
-      title: "Delete Extension",
-      message: `Delete "${ext.name}"? This permanently removes its saved extension code from this server.`,
-      confirmLabel: "Delete",
-      tone: "destructive",
-    });
-    if (!confirmed) return;
-
-    try {
-      await deleteExtension.mutateAsync(ext.id);
-      toast.success(`Extension "${ext.name}" removed`);
-    } catch (err) {
-      toast.error(getPrivilegedActionErrorMessage(err, "Failed to remove extension."));
-    }
-  };
-
-  return (
-    <div className="flex flex-col gap-3">
-      {showIntro && (
-        <SettingsIntro>Install browser or trusted server extensions to add custom behavior or styling.</SettingsIntro>
-      )}
-
-      <SettingsSection
-        title="Extension Library"
-        description="Import, enable, disable, export, or remove installed extensions."
-        icon={<Puzzle size="0.875rem" />}
-        {...getSettingsSectionAnchorProps("extension-library")}
-      >
-        <div className="flex flex-col gap-3">
-          {/* Import button */}
-          <button
-            onClick={() => {
-              triggerFilePicker({
-                accept:
-                  ".zip,.json,.css,.js,.mjs,.cjs,.server.js,.server.mjs,.server.cjs,application/zip,application/json",
-                onSelect: (files) => {
-                  const file = files[0];
-                  if (file) void handleImportExtensionFile(file);
-                },
-              });
-            }}
-            className="flex items-center justify-center gap-1.5 rounded-lg border-2 border-dashed border-[var(--border)] p-3 text-xs text-[var(--muted-foreground)] transition-all hover:border-[var(--primary)]/40 hover:bg-[var(--secondary)]/50"
-          >
-            <Download size="0.875rem" /> Import Extension File (.zip, .json, .css, .js, .mjs, .cjs, or .server.js)
-          </button>
-          <button
-            onClick={() => {
-              triggerFilePicker({
-                multiple: true,
-                webkitdirectory: true,
-                onSelect: (files) => void handleImportExtensionFolder(files),
-              });
-            }}
-            className="flex items-center justify-center gap-1.5 rounded-lg border-2 border-dashed border-[var(--border)] p-3 text-xs text-[var(--muted-foreground)] transition-all hover:border-[var(--primary)]/40 hover:bg-[var(--secondary)]/50"
-          >
-            <FolderOpen size="0.875rem" /> Import Extension Folder
-          </button>
-
-          {/* Extension list */}
-          <div className="flex flex-col gap-1.5">
-            <span className="text-xs font-medium">Installed Extensions</span>
-
-            {extensionList.map((ext) => (
-              <div
-                key={ext.id}
-                className={cn(
-                  "flex items-center gap-2 rounded-lg px-3 py-2 text-xs transition-all",
-                  ext.enabled
-                    ? "bg-[var(--secondary)] text-[var(--secondary-foreground)]"
-                    : "bg-[var(--secondary)]/40 text-[var(--muted-foreground)]",
-                )}
-              >
-                <button
-                  onClick={() => void handleToggleExtension(ext)}
-                  className={cn(
-                    "rounded p-0.5 transition-colors",
-                    ext.enabled
-                      ? "text-emerald-400 hover:text-emerald-300"
-                      : "text-[var(--muted-foreground)] hover:text-[var(--foreground)]",
-                  )}
-                  title={ext.enabled ? "Disable extension" : "Enable extension"}
-                >
-                  {ext.enabled ? <Power size="0.75rem" /> : <PowerOff size="0.75rem" />}
-                </button>
-                <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-                  <div className="flex min-w-0 items-center gap-1.5">
-                    <span className="truncate font-medium">{ext.name}</span>
-                    <span
-                      className={cn(
-                        "shrink-0 rounded px-1 py-px text-[0.5625rem] font-semibold",
-                        ext.runtime === "server"
-                          ? "bg-amber-500/12 text-amber-300 ring-1 ring-amber-500/20"
-                          : "bg-[var(--secondary)] text-[var(--muted-foreground)] ring-1 ring-[var(--border)]",
-                      )}
-                    >
-                      {ext.runtime === "server" ? "Server" : "Browser"}
-                    </span>
-                    {ext.runtime === "server" && ext.enabled && (
-                      <span
-                        className={cn(
-                          "shrink-0 rounded px-1 py-px text-[0.5625rem] font-semibold ring-1",
-                          ext.serverStatus === "running"
-                            ? "bg-emerald-500/12 text-emerald-300 ring-emerald-500/20"
-                            : ext.serverStatus === "error"
-                              ? "bg-[var(--destructive)]/12 text-[var(--destructive)] ring-[var(--destructive)]/20"
-                              : "bg-[var(--secondary)] text-[var(--muted-foreground)] ring-[var(--border)]",
-                        )}
-                      >
-                        {ext.serverStatus === "running"
-                          ? "Running"
-                          : ext.serverStatus === "error"
-                            ? "Error"
-                            : "Stopped"}
-                      </span>
-                    )}
-                  </div>
-                  {ext.description && (
-                    <span className="truncate text-[0.625rem] text-[var(--muted-foreground)]">{ext.description}</span>
-                  )}
-                  {ext.runtime === "server" && ext.serverError && (
-                    <span className="truncate text-[0.625rem] text-[var(--destructive)]">{ext.serverError}</span>
-                  )}
-                </div>
-                <button
-                  onClick={() => {
-                    downloadZipFile(
-                      createExtensionFolderPackageFiles([
-                        {
-                          name: ext.name,
-                          description: ext.description ?? "",
-                          runtime: ext.runtime,
-                          css: ext.css ?? null,
-                          js: ext.js ?? null,
-                          serverJs: ext.serverJs ?? null,
-                          enabled: ext.enabled,
-                        },
-                      ]),
-                      createExtensionFolderPackageFilename(ext.name, "extension"),
-                    );
-                  }}
-                  className="rounded p-0.5 text-[var(--muted-foreground)] transition-colors hover:bg-emerald-500/10 hover:text-emerald-400"
-                  title="Export extension"
-                >
-                  <Upload size="0.6875rem" />
-                </button>
-                <button
-                  onClick={() => void handleDeleteExtension(ext)}
-                  className="rounded p-0.5 text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)]"
-                  title="Remove extension"
-                >
-                  <Trash2 size="0.6875rem" />
-                </button>
-              </div>
-            ))}
-
-            {!isLoading && extensionList.length === 0 && (
-              <p className="mari-chrome-text-muted py-2 text-center text-[0.625rem]">
-                No extensions installed. Import an extension file or folder above.
-              </p>
-            )}
-          </div>
-
-          {/* Info box */}
-          <div className="rounded-lg bg-[var(--secondary)]/50 p-2.5 text-[0.625rem] text-[var(--muted-foreground)] ring-1 ring-[var(--border)]">
-            <strong>Folder format:</strong>{" "}
-            <code className="rounded bg-[var(--secondary)] px-1">Extensions/My Extension/manifest.json</code>. Browser
-            extensions can include CSS and/or JavaScript files to modify the UI.
-          </div>
-          <div className="rounded-lg bg-[var(--secondary)]/50 p-2.5 text-[0.625rem] leading-relaxed text-[var(--muted-foreground)] ring-1 ring-[var(--border)]">
-            <strong>Server extensions:</strong> use{" "}
-            <code className="rounded bg-[var(--secondary)] px-1">runtime: "server"</code> with{" "}
-            <code className="rounded bg-[var(--secondary)] px-1">serverJsPath</code>, or import a{" "}
-            <code className="rounded bg-[var(--secondary)] px-1">.server.js</code> file. They run in the Node.js server
-            process and should only come from trusted sources.
-          </div>
-          <div className="rounded-lg bg-[var(--secondary)]/35 p-2.5 text-[0.625rem] leading-relaxed text-[var(--muted-foreground)] ring-1 ring-[var(--border)]">
-            Extensions can be downloaded from the official Marinara Engine Discord server.
-          </div>
-        </div>
-      </SettingsSection>
-    </div>
-  );
 }
 
 type ProfileImportStats = {
@@ -6773,9 +6309,8 @@ function AdvancedSettings() {
   const handleCreateBackup = async () => {
     setCreatingBackup(true);
     try {
-      const res = await fetch("/api/backup/download", {
+      const res = await api.raw("/backup/download", {
         method: "POST",
-        headers: getAdminSecretHeader(),
       });
       if (!res.ok) throw new Error(await readSettingsResponseError(res, "Backup failed"));
 

@@ -26,6 +26,7 @@ import { createPromptOverridesStorage } from "../services/storage/prompt-overrid
 import { buildBackgroundProviderPrompt, generateChatBackground } from "../services/game/game-asset-generation.js";
 import { resolveConnectionImageDefaults } from "../services/image/image-generation-defaults.js";
 import { loadImageGenerationUserSettings } from "../services/image/image-generation-settings.js";
+import { resolveImagePromptReviewSize } from "../services/image/image-prompt-review.js";
 import { resolveImageConnectionFallback } from "../services/generation/media-connection-fallback.js";
 import { resolveGameSetupArtStylePrompt } from "@marinara-engine/shared";
 
@@ -163,11 +164,10 @@ function readTrimmedString(value: unknown): string | null {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
 }
 
-async function readAgentImageConnectionId(
+async function readIllustratorImageConnectionId(
   agents: ReturnType<typeof createAgentsStorage>,
-  type: "background" | "illustrator",
 ): Promise<string | null> {
-  const agent = await agents.getByType(type);
+  const agent = await agents.getByType("illustrator");
   return readTrimmedString(parseRecord(agent?.settings).imageConnectionId);
 }
 
@@ -184,11 +184,8 @@ async function resolveSceneBackgroundImageConnection(
 
   if (mode === "game") {
     pushCandidate(readTrimmedString(metadata.gameImageConnectionId));
-    pushCandidate(await readAgentImageConnectionId(agents, "illustrator"));
-  } else {
-    pushCandidate(await readAgentImageConnectionId(agents, "background"));
-    pushCandidate(await readAgentImageConnectionId(agents, "illustrator"));
   }
+  pushCandidate(await readIllustratorImageConnectionId(agents));
 
   for (const id of candidates) {
     const conn = await connections.getWithKey(id);
@@ -401,8 +398,7 @@ export async function backgroundsRoutes(app: FastifyInstance) {
     if (!imgConn) {
       return {
         response: reply.status(400).send({
-          error:
-            "Choose an image generation connection for the Background/Illustrator agent, or mark an image generation connection as the default for agents.",
+          error: "Choose an image generation connection for the Illustrator agent, or mark one as the default image connection.",
         }),
       };
     }
@@ -472,6 +468,13 @@ export async function backgroundsRoutes(app: FastifyInstance) {
       promptOverride: context.promptOverride?.prompt,
       negativePromptOverride: context.promptOverride?.negativePrompt,
     });
+    const previewSize = resolveImagePromptReviewSize({
+      connection: context.imgConn,
+      prompt: compiled.prompt,
+      width: context.imageSettings.background.width,
+      height: context.imageSettings.background.height,
+      imageDefaults: resolveConnectionImageDefaults(context.imgConn),
+    });
 
     return {
       items: [
@@ -481,8 +484,8 @@ export async function backgroundsRoutes(app: FastifyInstance) {
           title: "Scene background",
           prompt: compiled.prompt,
           negativePrompt: compiled.negativePrompt,
-          width: context.imageSettings.background.width,
-          height: context.imageSettings.background.height,
+          width: previewSize.width,
+          height: previewSize.height,
         },
       ],
     };

@@ -91,10 +91,18 @@ import {
   Scissors,
   MessageCircle,
 } from "lucide-react";
-import { cn, generateClientId, getAvatarCropStyle, type AvatarCrop, type LegacyAvatarCrop } from "../../lib/utils";
+import {
+  cn,
+  copyToClipboard,
+  generateClientId,
+  getAvatarCropStyle,
+  type AvatarCrop,
+  type LegacyAvatarCrop,
+} from "../../lib/utils";
 import { extractColorsFromImage } from "../../lib/avatar-color-extraction";
 import { HelpTooltip } from "../ui/HelpTooltip";
 import { api } from "../../lib/api-client";
+import { downloadSpriteFile } from "../../lib/sprite-download";
 import { ColorPicker } from "../ui/ColorPicker";
 import { MacroTextarea } from "../ui/MacroTextarea";
 import { Modal } from "../ui/Modal";
@@ -181,7 +189,7 @@ const CHARACTER_STATS_HELP =
   "HP is injected into the prompt so the AI knows the character's current health. Attributes are custom stats, like STR or DEX, that define the character's capabilities. The Character Tracker agent can adjust values based on combat, healing, and narrative events. Values set here serve as the initial/default state for new conversations.";
 
 const CHARACTER_COLORS_HELP =
-  "Name color is applied to the character's display name in chat. Gradients use CSS linear-gradient. Dialogue color applies to text inside dialogue quotation marks and can optionally be bolded from Settings. Box color sets the background color of the character's message bubble in roleplay mode. Leave any field empty to use the default theme colors.";
+  "Name color is applied to the character's display name in chat. Gradients use CSS linear-gradient. Dialogue color applies to text inside dialogue quotation marks and can optionally be bolded from Settings. Box color sets the background color of the character's message bubble in roleplay mode. An empty dialogue color uses the default from Settings > Appearance when enabled; other empty fields use theme colors.";
 
 const CHARACTER_LOREBOOK_HELP =
   "Attach lorebook/world-info entries to this character. Entries trigger from keywords during conversation; embedded card lorebooks can be imported into Marinara as linked lorebooks for deeper editing.";
@@ -936,7 +944,7 @@ export function CharacterEditor() {
               <img
                 src={avatarPreview}
                 alt={formData.name}
-                className="h-full w-full object-cover"
+                className="pointer-events-none h-full w-full object-cover"
                 style={getAvatarCropStyle(formData.extensions.avatarCrop as AvatarCrop | LegacyAvatarCrop | undefined)}
               />
             ) : (
@@ -1365,7 +1373,7 @@ function MetadataTab({
               <img
                 src={avatarPreview}
                 alt=""
-                className="h-full w-full object-cover"
+                className="pointer-events-none h-full w-full object-cover"
                 style={getAvatarCropStyle(savedCrop ?? undefined)}
               />
             ) : (
@@ -1401,9 +1409,10 @@ function MetadataTab({
           </code>
           <button
             type="button"
-            onClick={() => {
-              void navigator.clipboard?.writeText(characterId);
-              toast.success("Character ID copied");
+            onClick={async () => {
+              const copied = await copyToClipboard(characterId);
+              if (copied) toast.success("Character ID copied");
+              else toast.error("Could not copy the character ID");
             }}
             className="mari-editor-action inline-flex h-8 px-2 text-[0.6875rem]"
             title="Copy character ID"
@@ -3272,8 +3281,9 @@ function SpritesTab({
     e.target.value = "";
   };
 
+  /** Open the sprite picker unless another single-file upload is already running. */
   const startUpload = (expression: string) => {
-    if (!expression) return;
+    if (uploading || !expression) return;
     pendingExpressionRef.current = expression;
     fileInputRef.current?.click();
   };
@@ -3337,23 +3347,6 @@ function SpritesTab({
       setDeletingSprites(null);
     }
   }, [characterId, deleteSprite, visibleSprites]);
-
-  const downloadSpriteFile = useCallback(async (sprite: SpriteInfo) => {
-    const response = await fetch(sprite.url);
-    if (!response.ok) {
-      throw new Error(`Failed to download ${sprite.expression}`);
-    }
-
-    const blob = await response.blob();
-    const objectUrl = URL.createObjectURL(blob);
-    const anchor = document.createElement("a");
-    anchor.href = objectUrl;
-    anchor.download = sprite.filename || `${sprite.expression}.png`;
-    document.body.appendChild(anchor);
-    anchor.click();
-    anchor.remove();
-    URL.revokeObjectURL(objectUrl);
-  }, []);
 
   const handleExportSprites = useCallback(
     async (spritesToExport: SpriteInfo[], modeLabel: "visible" | "all") => {
@@ -3671,7 +3664,7 @@ function SpritesTab({
             {backgroundCleanupReason}
           </div>
         )}
-        <div className="flex gap-2">
+        <div className="flex flex-col gap-2 sm:flex-row">
           <input
             value={newExpression}
             onChange={(e) => setNewExpression(e.target.value)}
@@ -3680,7 +3673,7 @@ function SpritesTab({
                 ? "Pose name (e.g. idle, walk, battle_stance)…"
                 : "Expression name (e.g. happy, sad, angry)…"
             }
-            className="flex-1 rounded-xl border border-[var(--border)] bg-[var(--secondary)] px-3 py-2 text-sm outline-none focus:border-[var(--primary)]/40 focus:ring-1 focus:ring-[var(--primary)]/20"
+            className="min-w-0 flex-1 rounded-xl border border-[var(--border)] bg-[var(--secondary)] px-3 py-2 text-sm outline-none focus:border-[var(--primary)]/40 focus:ring-1 focus:ring-[var(--primary)]/20"
             onKeyDown={(e) => {
               if (e.key === "Enter" && newExpression.trim()) {
                 startUpload(normalizeExpressionForCategory(newExpression));
@@ -3691,7 +3684,7 @@ function SpritesTab({
             type="button"
             onClick={() => newExpression.trim() && startUpload(normalizeExpressionForCategory(newExpression))}
             disabled={!newExpression.trim() || uploading}
-            className="flex items-center gap-1.5 rounded-xl bg-[var(--primary)] px-4 py-2 text-xs font-medium text-[var(--primary-foreground)] shadow-sm transition-all hover:shadow-md disabled:opacity-40"
+            className="flex w-full items-center justify-center gap-1.5 rounded-xl bg-[var(--primary)] px-4 py-2 text-xs font-medium text-[var(--primary-foreground)] shadow-sm transition-all hover:shadow-md disabled:opacity-40 sm:w-auto"
           >
             <Plus size="0.8125rem" />
             Upload

@@ -1081,7 +1081,7 @@ export function GameCombatUI({
 
     lastAutoPlayedCombatVoiceGroupRef.current = groupKey;
     playCombatVoiceKeys(
-      combatVoiceLines.filter((line, index) => entries[index]?.status === "ready").map((line) => line.voiceKey),
+      combatVoiceLines.filter((_, index) => entries[index]?.status === "ready").map((line) => line.voiceKey),
     );
   }, [combatVoiceLines, combatVoiceVersion, playCombatVoiceKeys, stopCombatVoicePlayback]);
 

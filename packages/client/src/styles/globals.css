@@ -1566,6 +1566,7 @@
 }
 
 .mari-editor-avatar-tile {
+  position: relative;
   cursor: pointer;
 }
 
@@ -2502,7 +2503,16 @@ strong {
 }
 
 /* Chat message narration text color */
+.mari-message-body,
+.mari-message-bubble {
+  min-width: 0;
+  max-width: 100%;
+}
+
 .mari-message-content {
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
   color: var(--foreground);
 }
 
@@ -2566,6 +2576,7 @@ strong {
   border-radius: 4px;
   padding: 0.1em 0.35em;
   color: #e8e6e3;
+  overflow-wrap: anywhere;
   word-break: break-word;
 }
 
@@ -2578,6 +2589,9 @@ strong {
 /* Fenced code blocks */
 .mari-message-content .mari-md-codeblock {
   position: relative;
+  box-sizing: border-box;
+  display: block;
+  width: 100%;
   font-family: "Consolas", "Monaco", "Courier New", monospace;
   font-size: 0.85em;
   line-height: 1.45;
@@ -2586,7 +2600,10 @@ strong {
   border-radius: 8px;
   padding: 0.75em 1em;
   margin: 0.5em 0;
+  min-width: 0;
+  max-width: 100%;
   overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
   white-space: pre;
   color: #d4d4d4;
 }
@@ -2597,6 +2614,23 @@ strong {
   font-size: inherit;
   color: inherit;
 }
+
+@media (max-width: 767px) {
+  .mari-message-content .mari-md-inline-code {
+    word-break: break-all;
+  }
+
+  .mari-message-content .mari-md-codeblock {
+    overflow-x: hidden;
+    overflow-wrap: anywhere;
+    white-space: pre-wrap;
+  }
+
+  .mari-message-content .mari-md-codeblock code {
+    white-space: inherit;
+  }
+}
+
 .mari-message-content .mari-md-codeblock-lang {
   position: absolute;
   top: 0;
@@ -2615,7 +2649,7 @@ strong {
   padding: 0.5em 0.75em;
   margin: 0.35em 0;
   background: color-mix(in srgb, var(--card) 94%, var(--accent));
-  color: var(--muted-foreground);
+  color: inherit;
   font-style: italic;
 }
 
@@ -2851,6 +2885,100 @@ strong {
   scrollbar-color: color-mix(in srgb, var(--primary) 42%, transparent) transparent;
 }
 
+/* Keep constrained desktop Tracker typography in normal layout flow. Scaling the
+   panel's whole rendering canvas causes its far edge to be clipped by the shell. */
+.mari-tracker-panel-scroll[data-tracker-content-constrained="true"] {
+  font-size: calc(1rem * var(--tracker-panel-font-scale));
+}
+
+.mari-tracker-panel-scroll[data-tracker-content-constrained="true"] [class~="text-[0.5625rem]"] {
+  font-size: calc(0.5625rem * var(--tracker-panel-font-scale));
+}
+
+.mari-tracker-panel-scroll[data-tracker-content-constrained="true"] [class~="text-[0.59375rem]"] {
+  font-size: calc(0.59375rem * var(--tracker-panel-font-scale));
+}
+
+.mari-tracker-panel-scroll[data-tracker-content-constrained="true"] [class~="text-[0.625rem]"] {
+  font-size: calc(0.625rem * var(--tracker-panel-font-scale));
+}
+
+.mari-tracker-panel-scroll[data-tracker-content-constrained="true"] [class~="text-[0.6875rem]"] {
+  font-size: calc(0.6875rem * var(--tracker-panel-font-scale));
+}
+
+.mari-tracker-panel-scroll[data-tracker-content-constrained="true"] [class~="text-[0.75rem]"] {
+  font-size: calc(0.75rem * var(--tracker-panel-font-scale));
+}
+
+.mari-tracker-panel-scroll[data-tracker-content-constrained="true"] [class~="text-[0.8125rem]"] {
+  font-size: calc(0.8125rem * var(--tracker-panel-font-scale));
+}
+
+.mari-tracker-panel-scroll[data-tracker-content-constrained="true"] [class~="text-[1.0625rem]"] {
+  font-size: calc(1.0625rem * var(--tracker-panel-font-scale));
+}
+
+.mari-tracker-panel-scroll[data-tracker-content-constrained="true"] [class~="text-[1.1875rem]"] {
+  font-size: calc(1.1875rem * var(--tracker-panel-font-scale));
+}
+
+.mari-tracker-panel-scroll[data-tracker-content-constrained="true"] :is(.text-xs, .text-sm, .text-lg, .text-2xl) {
+  font-size: calc(var(--tracker-panel-base-font-size) * var(--tracker-panel-font-scale));
+}
+
+.mari-tracker-panel-scroll[data-tracker-content-constrained="true"] .text-xs {
+  --tracker-panel-base-font-size: 0.75rem;
+}
+
+.mari-tracker-panel-scroll[data-tracker-content-constrained="true"] .text-sm {
+  --tracker-panel-base-font-size: 0.875rem;
+}
+
+.mari-tracker-panel-scroll[data-tracker-content-constrained="true"] .text-lg {
+  --tracker-panel-base-font-size: 1.125rem;
+}
+
+.mari-tracker-panel-scroll[data-tracker-content-constrained="true"] .text-2xl {
+  --tracker-panel-base-font-size: 1.5rem;
+}
+
+.mari-tracker-panel-scroll[data-tracker-content-constrained="true"] [class~="leading-[0.6875rem]"] {
+  line-height: calc(0.6875rem * var(--tracker-panel-font-scale));
+}
+
+.mari-tracker-panel-scroll[data-tracker-content-constrained="true"] [class~="leading-[0.875rem]"] {
+  line-height: calc(0.875rem * var(--tracker-panel-font-scale));
+}
+
+.mari-tracker-panel-scroll[data-tracker-content-constrained="true"] [class~="leading-[0.95rem]"] {
+  line-height: calc(0.95rem * var(--tracker-panel-font-scale));
+}
+
+.mari-tracker-panel-scroll[data-tracker-content-constrained="true"] [class~="leading-[1.35rem]"] {
+  line-height: calc(1.35rem * var(--tracker-panel-font-scale));
+}
+
+.mari-tracker-panel-scroll[data-tracker-content-constrained="true"] :is(.leading-3, .leading-4, .leading-5, .leading-6) {
+  line-height: calc(var(--tracker-panel-base-line-height) * var(--tracker-panel-font-scale));
+}
+
+.mari-tracker-panel-scroll[data-tracker-content-constrained="true"] .leading-3 {
+  --tracker-panel-base-line-height: 0.75rem;
+}
+
+.mari-tracker-panel-scroll[data-tracker-content-constrained="true"] .leading-4 {
+  --tracker-panel-base-line-height: 1rem;
+}
+
+.mari-tracker-panel-scroll[data-tracker-content-constrained="true"] .leading-5 {
+  --tracker-panel-base-line-height: 1.25rem;
+}
+
+.mari-tracker-panel-scroll[data-tracker-content-constrained="true"] .leading-6 {
+  --tracker-panel-base-line-height: 1.5rem;
+}
+
 .mari-tracker-panel-scroll::-webkit-scrollbar {
   width: 0.25rem;
 }
@@ -2949,6 +3077,13 @@ strong {
 /* Firefox on Windows can rasterize text inside large blurred/translucent layout layers,
    which shows up most clearly on high-DPI displays. Fall back to opaque shell chrome there. */
 @supports (-moz-appearance: none) {
+  @media (min-width: 768px) {
+    .mari-shell-panel-slot,
+    .mari-shell-panel-motion {
+      transition: none;
+    }
+  }
+
   :root {
     --marinara-topbar-surface: var(--card);
   }
@@ -4035,6 +4170,22 @@ strong {
   background-color: var(--mari-rp-bubble-bg);
 }
 
+/* Optional low-paint Roleplay profile. Keep these selectors deliberately low
+   specificity so custom Card CSS can still replace message backgrounds. */
+.mari-rp-reduced-paint :where(.mari-rp-bubble) {
+  --tw-shadow: 0 0 #0000;
+  --tw-shadow-colored: 0 0 #0000;
+}
+
+.mari-rp-reduced-paint :where(.mari-rp-bubble:not([data-roleplay-bubble-transparent="true"])) {
+  background: linear-gradient(var(--mari-rp-bubble-bg), var(--mari-rp-bubble-bg)), var(--background);
+}
+
+.mari-rp-reduced-paint :where(.mari-rp-bubble[data-roleplay-bubble-transparent="true"]) {
+  background-color: transparent;
+  background-image: none;
+}
+
 /* ─────────────────────────────────────────────
    15. CHAT: ROLEPLAY MODE
    ───────────────────────────────────────────── */
@@ -4177,12 +4328,24 @@ strong {
   );
 }
 
+.mari-rp-reduced-paint > .rpg-overlay {
+  background: rgba(8, 8, 18, 0.5);
+}
+
+[data-theme="light"] .mari-rp-reduced-paint > .rpg-overlay {
+  background: rgba(250, 248, 255, 0.35);
+}
+
 .rpg-vignette {
   background: radial-gradient(ellipse at center, transparent 50%, rgba(0, 0, 0, 0.3) 100%);
 }
 
 [data-theme="light"] .rpg-vignette {
   background: radial-gradient(ellipse at center, transparent 60%, rgba(120, 100, 160, 0.12) 100%);
+}
+
+.mari-rp-reduced-paint > .rpg-vignette {
+  display: none;
 }
 
 .rpg-avatar-glow {
@@ -4300,20 +4463,31 @@ strong {
   box-shadow:
     0 0 0 2px rgba(96, 165, 250, 0.25),
     0 0 16px rgba(96, 165, 250, 0.1);
-  animation: rpg-stream-pulse 2s ease-in-out infinite;
+}
+
+.rpg-streaming::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  border: 1px solid rgba(96, 165, 250, 0.5);
+  border-radius: inherit;
+  box-shadow: inset 0 0 16px rgba(96, 165, 250, 0.18);
+  opacity: 0.25;
+  animation: rpg-stream-pulse 1.6s cubic-bezier(0.16, 1, 0.3, 1) infinite alternate;
+  will-change: opacity;
 }
 
 @keyframes rpg-stream-pulse {
-  0%,
-  100% {
-    box-shadow:
-      0 0 0 2px rgba(96, 165, 250, 0.25),
-      0 0 16px rgba(96, 165, 250, 0.1);
+  to {
+    opacity: 0.8;
   }
-  50% {
-    box-shadow:
-      0 0 0 3px rgba(96, 165, 250, 0.4),
-      0 0 24px rgba(96, 165, 250, 0.2);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rpg-streaming::after {
+    animation: none;
+    opacity: 0.45;
   }
 }
 

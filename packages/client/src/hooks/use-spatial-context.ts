@@ -5,7 +5,6 @@ import type {
   Message,
   MessageAttachment,
   PendingSpatialTransition,
-  SpatialContextDefinition,
   SpatialContextResponse,
   SpatialDefinitionIssue,
 } from "@marinara-engine/shared";
@@ -17,14 +16,6 @@ export const spatialContextKeys = {
   all: ["spatial-context"] as const,
   detail: (chatId: string) => [...spatialContextKeys.all, chatId] as const,
 };
-
-export interface UpdateSpatialContextInput {
-  chatId: string;
-  expectedRevision: number;
-  expectedCurrentLocationId: string | null;
-  replacementCurrentLocationId?: string | null;
-  definition: SpatialContextDefinition;
-}
 
 export interface GenerateSpatialMapDraftInput extends GenerateSpatialMapDraftRequest {
   chatId: string;
@@ -119,22 +110,6 @@ export function useSpatialContext(chatId: string | null, enabled = true) {
   });
 }
 
-export function useUpdateSpatialContext() {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: ({ chatId, ...request }: UpdateSpatialContextInput) =>
-      api.put<SpatialContextResponse>(`/chats/${chatId}/spatial-context`, request),
-    onSuccess: (response, variables) => {
-      queryClient.setQueryData(spatialContextKeys.detail(variables.chatId), response);
-    },
-    onError: (error, variables) => {
-      if (getSpatialContextProblem(error).conflict) {
-        void queryClient.invalidateQueries({ queryKey: spatialContextKeys.detail(variables.chatId) });
-      }
-    },
-  });
-}
-
 export function useCommitSpatialOwnerTurn() {
   const queryClient = useQueryClient();
   return useMutation({
@@ -142,9 +117,7 @@ export function useCommitSpatialOwnerTurn() {
       api.post<CommitSpatialOwnerTurnResponse>(`/chats/${chatId}/spatial-context/turn`, request),
     onSuccess: (response, variables) => {
       queryClient.setQueryData(spatialContextKeys.detail(variables.chatId), response.spatial);
-      useChatStore
-        .getState()
-        .clearPendingSpatialTransition(variables.chatId, variables.transition.commandId);
+      useChatStore.getState().clearPendingSpatialTransition(variables.chatId, variables.transition.commandId);
       void queryClient.invalidateQueries({ queryKey: chatKeys.messages(variables.chatId) });
       void queryClient.invalidateQueries({ queryKey: chatKeys.messageCount(variables.chatId) });
       void queryClient.invalidateQueries({ queryKey: chatKeys.list() });

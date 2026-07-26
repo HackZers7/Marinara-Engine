@@ -24,12 +24,11 @@ import {
   normalizeTrackerHiddenFields,
   normalizeCustomAgentCapabilities,
   getDefaultAgentPrompt,
-  getBuiltInAgentDefaultPrompt,
   normalizeRpgStatPools,
   resolveMacros,
 } from "@marinara-engine/shared";
 import { getMaxToolRounds, isDebugAgentsEnabled } from "../../config/runtime-config.js";
-import { logger } from "../../lib/logger.js";
+import { logger, logDebugOverride } from "../../lib/logger.js";
 import { wrapContent } from "../prompt/format-engine.js";
 import { sanitizePromptLeaf } from "../prompt/prompt-escaping.js";
 import { settleAgentJobsWithConcurrencyLimit } from "./agent-concurrency.js";
@@ -97,7 +96,8 @@ function getMusicProvider(settings: Record<string, unknown> | null | undefined):
 }
 
 function getCustomMusicSource(settings: Record<string, unknown> | null | undefined): CustomMusicSource {
-  return settings?.customMusicSource === "folder" || settings?.localMusicSource === "folder" ? "folder" : "game-assets";
+  const source = settings?.customMusicSource ?? settings?.localMusicSource;
+  return source === "folder" ? "folder" : "game-assets";
 }
 
 function normalizeAgentContextWrapFormat(value: unknown): WrapFormat {
@@ -124,7 +124,7 @@ function musicDjUsesJsonOnlyProvider(config: Pick<AgentExecConfig, "type" | "set
 function getDefaultPromptForAgent(config: Pick<AgentExecConfig, "type" | "settings">): string {
   if (musicDjUsesYoutube(config)) return getDefaultAgentPrompt("youtube");
   if (musicDjUsesCustom(config)) return getDefaultAgentPrompt("local-music");
-  return getBuiltInAgentDefaultPrompt(config.type) || getDefaultAgentPrompt(config.type);
+  return getDefaultAgentPrompt(config.type);
 }
 
 function stringifyAgentSettingMacroValue(value: unknown): string {
@@ -563,6 +563,17 @@ function debugUsage(usage?: LLMUsage): Partial<AgentCallDebugEvent> {
 }
 
 function emitAgentDebug(context: AgentContext, event: AgentCallDebugEvent): void {
+  if ((event.stage === "response" || event.stage === "retry_response") && typeof event.response === "string") {
+    logDebugOverride(
+      Boolean(context.agentDebug) || isDebugAgentsEnabled(),
+      "[agent-debug] %s %s response (%d chars):\n%s",
+      event.agentType,
+      event.stage === "retry_response" ? "retry" : "raw",
+      event.response.length,
+      event.response,
+    );
+  }
+
   try {
     context.agentDebug?.(event);
   } catch (err) {
@@ -1501,7 +1512,6 @@ export function shouldRunAgentIndividually(config: Pick<AgentExecConfig, "type" 
   // These agents either need compact prompts or carry large private extras that
   // must not be merged into unrelated batched agent requests.
   return (
-    config.type === "expression" ||
     config.type === "illustrator" ||
     config.type === "lorebook-keeper" ||
     resolveAgentResultType(config) === "text_rewrite" ||
@@ -2164,9 +2174,9 @@ function buildLoreBlock(context: AgentContext): string {
     for (const char of context.characters) {
       parts.push(`<character id="${char.id}" name="${char.name}">`);
       pushLoreField(parts, "Description", char.description, CHARACTER_LORE_DESCRIPTION_LIMIT);
-      pushLoreField(parts, "Appearance", char.appearance, CHARACTER_LORE_FIELD_LIMIT);
       pushLoreField(parts, "Personality", char.personality, CHARACTER_LORE_FIELD_LIMIT);
       pushLoreField(parts, "Backstory", char.backstory, CHARACTER_LORE_FIELD_LIMIT);
+      pushLoreField(parts, "Appearance", char.appearance, CHARACTER_LORE_FIELD_LIMIT);
       pushLoreField(parts, "Scenario", char.scenario, CHARACTER_LORE_FIELD_LIMIT);
       if (char.rpgStats?.enabled) {
         const pools = normalizeRpgStatPools(char.rpgStats);
@@ -2340,6 +2350,23 @@ function buildAgentExtras(context: AgentContext, agentTypes: string[] = []): str
     parts.push(`</game_image_instructions>`);
   }
 
+  if (agentTypes.includes("illustrator") && context.memory._illustratorBackgroundGenerationEnabled === true) {
+    parts.push(`<illustrator_background_generation enabled="true">`);
+    parts.push(
+      `Independently set the Illustrator JSON field "generateBackground" to true only when the latest assistant scene enters a meaningfully different reusable location or setting. This decision is separate from "shouldGenerate"; both may be true on the same turn.`,
+    );
+    parts.push(
+      `Prefer a changed location in current or committed tracker state. When tracker location is unavailable, infer conservatively from recent scene context. Keep generateBackground false for movement within the same place, camera changes, mood, weather, lighting, or time-of-day changes alone.`,
+    );
+    if (typeof context.memory._currentBackground === "string" && context.memory._currentBackground.trim()) {
+      parts.push(`Currently active background: ${escapeXml(context.memory._currentBackground.trim())}`);
+    } else {
+      parts.push(`Currently active background: none`);
+    }
+    parts.push(`The host writes a separate background-only prompt after this decision; do not replace the normal illustration prompt.`);
+    parts.push(`</illustrator_background_generation>`);
+  }
+
   if (agentTypes.includes("expression")) {
     const availableSpritesBlock = buildAvailableSpritesBlock(context);
     if (availableSpritesBlock) parts.push(availableSpritesBlock);
@@ -2363,41 +2390,6 @@ function buildAgentExtras(context: AgentContext, agentTypes: string[] = []): str
     if (context.memory._currentBackground) {
       parts.push(`<current_background>${context.memory._currentBackground}</current_background>`);
     }
-  }
-
-  if (agentTypes.includes("background") && context.memory._backgroundGenerationEnabled === true) {
-    parts.push(`<background_generation enabled="true">`);
-    parts.push(
-      `If no listed background fits a changed or new location, request a generated reusable location background instead of forcing a weak match.`,
-    );
-    const worldContext =
-      context.memory._backgroundWorldContext &&
-      typeof context.memory._backgroundWorldContext === "object" &&
-      !Array.isArray(context.memory._backgroundWorldContext)
-        ? (context.memory._backgroundWorldContext as Record<string, unknown>)
-        : null;
-    if (worldContext) {
-      const fields = [
-        ["genre", worldContext.genre],
-        ["setting", worldContext.setting],
-        ["location", worldContext.location],
-        ["weather", worldContext.weather],
-        ["timeOfDay", worldContext.timeOfDay],
-        ["world", worldContext.worldOverview],
-      ]
-        .map(([label, value]) => {
-          const text = typeof value === "string" ? value.replace(/\s+/g, " ").trim().slice(0, 180) : "";
-          return text ? `${label}: ${escapeXml(text)}` : "";
-        })
-        .filter(Boolean);
-      if (fields.length > 0) {
-        parts.push(`World context for generated backgrounds: ${fields.join("; ")}.`);
-        parts.push(
-          `Generated background prompts must include the setting era/genre and concrete location details. Do not request modern scenery, technology, signage, UI, or objects unless this world context supports them.`,
-        );
-      }
-    }
-    parts.push(`</background_generation>`);
   }
 
   if (agentTypes.includes("spotify") && context.memory._spotifyDjConstraints) {
@@ -2639,7 +2631,7 @@ const JSON_AGENTS = new Set([
  * directive. Strip that leaked content before it can be injected into the
  * main prompt.
  */
-function sanitizeTextAgentResponse(agentType: string, text: string): string {
+function sanitizeTextAgentResponse(text: string): string {
   const cleaned = text
     .replace(/<committed_tracker_state\b[^>]*>[\s\S]*?<\/committed_tracker_state\s*>/gi, "")
     .replace(/<assistant_response\b[^>]*>[\s\S]*?<\/assistant_response\s*>/gi, "")
@@ -2672,7 +2664,7 @@ function parseAgentResponse(
 
   // Text-based context-injection agents. Sanitize before injection so
   // leaked tracker/roleplay content can't reach the main prompt.
-  return { type: resultType, data: { text: sanitizeTextAgentResponse(config.type, responseText) } };
+  return { type: resultType, data: { text: sanitizeTextAgentResponse(responseText) } };
 }
 
 /** Extract JSON from a response that may contain markdown fences. */

@@ -556,10 +556,6 @@ function normalizeOffset(value: unknown) {
   return Math.floor(parsed);
 }
 
-function makeEmptyValidation(): MariDbValidationResult {
-  return { status: "passed", errors: [], notices: [], infos: [] };
-}
-
 function validationFromIssues(issues: MariDbValidationIssue[]): MariDbValidationResult {
   const errors = issues.filter((issue) => issue.level === "error");
   const notices = issues.filter((issue) => issue.level === "notice");

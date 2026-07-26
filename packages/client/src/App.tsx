@@ -38,7 +38,6 @@ import {
 } from "./lib/css-colors";
 import { normalizeThemeCss } from "./lib/theme-css";
 import { useLegacyThemeMigration, useThemes } from "./hooks/use-themes";
-import { useLegacyExtensionMigration } from "./hooks/use-extensions";
 import { useSettingsSync } from "./hooks/use-settings-sync";
 import { installLongTaskWarner } from "./lib/perf-diagnostics";
 
@@ -471,7 +470,6 @@ export function App() {
     [activeCustomTheme?.css],
   );
   useLegacyThemeMigration();
-  useLegacyExtensionMigration();
   useSettingsSync();
   const showDownloadModal = useSidecarStore((s) => s.showDownloadModal);
   const setShowDownloadModal = useSidecarStore((s) => s.setShowDownloadModal);

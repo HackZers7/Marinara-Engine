@@ -3,6 +3,7 @@ import { createServer } from "node:http";
 import {
   findKnownModel,
   resolveProviderReasoningEffort,
+  shouldSuppressUnknownModelParameters,
 } from "../../packages/shared/src/constants/model-lists.js";
 import {
   applyGlmThinkingParameters,
@@ -41,6 +42,7 @@ import {
   runWithGenerationFallbackNotifier,
   type GenerationFallbackNotice,
 } from "../../packages/server/src/services/generation/fallback-notification.js";
+import { resolveStoredChatOptions } from "../../packages/server/src/services/generation/generation-parameters.js";
 
 class RegressionProvider extends BaseLLMProvider {
   calls = 0;
@@ -49,6 +51,7 @@ class RegressionProvider extends BaseLLMProvider {
   constructor(
     private readonly chunks: string[],
     private readonly failure?: Error,
+    private readonly usage?: LLMUsage,
   ) {
     super("", "");
   }
@@ -58,6 +61,7 @@ class RegressionProvider extends BaseLLMProvider {
     this.lastOptions = options;
     for (const chunk of this.chunks) yield chunk;
     if (this.failure) throw this.failure;
+    return this.usage;
   }
 }
 
@@ -116,6 +120,128 @@ try {
     gatewayServer.close((error) => (error ? reject(error) : resolve())),
   );
 }
+
+let customParametersRequestBody: Record<string, unknown> | null = null;
+const customParametersServer = createServer(async (request, response) => {
+  const chunks: Buffer[] = [];
+  for await (const chunk of request) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  customParametersRequestBody = JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown>;
+  response.writeHead(200, { "content-type": "application/json" });
+  response.end(JSON.stringify({ choices: [{ message: { content: "configured" }, finish_reason: "stop" }] }));
+});
+await new Promise<void>((resolve) => customParametersServer.listen(0, "127.0.0.1", resolve));
+try {
+  const address = customParametersServer.address();
+  assert.ok(address && typeof address === "object");
+  const provider = new OpenAIProvider(
+    `http://127.0.0.1:${address.port}/v1`,
+    "test",
+    undefined,
+    undefined,
+    undefined,
+    "custom",
+  );
+  await provider.chatComplete([{ role: "user", content: "test" }], {
+    model: "custom-model",
+    stream: false,
+    topK: 44,
+    minP: 0.12,
+    reasoningEffort: "high",
+    verbosity: "low",
+    enabledParameters: { topK: true, reasoningEffort: true, verbosity: true },
+  });
+  assert.ok(customParametersRequestBody);
+  assert.equal(customParametersRequestBody.top_k, 44);
+  assert.equal(customParametersRequestBody.min_p, 0.12);
+  assert.equal(customParametersRequestBody.reasoning_effort, "high");
+  assert.equal(customParametersRequestBody.verbosity, "low");
+
+  customParametersRequestBody = null;
+  await provider.chatComplete([{ role: "user", content: "test explicit custom samplers" }], {
+    model: "gpt-5.6-local",
+    stream: false,
+    minP: 0.25,
+    reasoningEffort: "high",
+    customParameters: {
+      min_p: 0.01,
+      top_k: 21,
+      frequency_penalty: 0.4,
+      presence_penalty: -0.2,
+      top_n_sigma: 1.5,
+      chat_template_kwargs: { enable_thinking: true },
+    },
+  });
+  assert.ok(customParametersRequestBody);
+  assert.equal(customParametersRequestBody.min_p, 0.01);
+  assert.equal(customParametersRequestBody.top_k, 21);
+  assert.equal(customParametersRequestBody.frequency_penalty, 0.4);
+  assert.equal(customParametersRequestBody.presence_penalty, -0.2);
+  assert.equal(customParametersRequestBody.top_n_sigma, 1.5);
+  assert.deepEqual(customParametersRequestBody.chat_template_kwargs, { enable_thinking: true });
+  assert.equal("temperature" in customParametersRequestBody, false);
+  assert.equal("top_p" in customParametersRequestBody, false);
+
+  customParametersRequestBody = null;
+  await provider.chatComplete([{ role: "user", content: "test inferred samplers" }], {
+    model: "gpt-5.6-local",
+    stream: false,
+    temperature: 0.7,
+    topP: 0.8,
+    topK: 44,
+    minP: 0.25,
+    frequencyPenalty: 0.5,
+    presencePenalty: 0.3,
+    reasoningEffort: "high",
+    enabledParameters: {
+      temperature: true,
+      topP: true,
+      topK: true,
+      frequencyPenalty: true,
+      presencePenalty: true,
+    },
+  });
+  assert.ok(customParametersRequestBody);
+  for (const key of ["temperature", "top_p", "top_k", "min_p", "frequency_penalty", "presence_penalty"]) {
+    assert.equal(key in customParametersRequestBody, false);
+  }
+} finally {
+  await new Promise<void>((resolve, reject) =>
+    customParametersServer.close((error) => (error ? reject(error) : resolve())),
+  );
+}
+
+assert.deepEqual(
+  resolveStoredChatOptions(
+    JSON.stringify({
+      temperature: 0.31,
+      topP: 0.82,
+      topK: 44,
+      minP: 0.12,
+      frequencyPenalty: 0.2,
+      presencePenalty: -0.1,
+      reasoningEffort: "maximum",
+      verbosity: "low",
+      stopSequences: ["END"],
+      enabledParameters: { topK: true, reasoningEffort: true, verbosity: true },
+    }),
+    "custom",
+    "custom-model",
+  ),
+  {
+    temperature: 0.31,
+    topP: 0.82,
+    topK: 44,
+    minP: 0.12,
+    frequencyPenalty: 0.2,
+    presencePenalty: -0.1,
+    reasoningEffort: "high",
+    verbosity: "low",
+    serviceTier: undefined,
+    stop: ["END"],
+    customParameters: undefined,
+    enabledParameters: { topK: true, reasoningEffort: true, verbosity: true },
+  },
+);
 
 let openRouterRequestBody: Record<string, unknown> | null = null;
 const openRouterServer = createServer(async (request, response) => {
@@ -208,6 +334,16 @@ assertStrictObjects(solProfileFormat.schema);
 const glm52 = findKnownModel("custom", "glm-5.2");
 assert.equal(glm52?.context, 1_000_000);
 assert.equal(glm52?.maxOutput, 128_000);
+assert.equal(
+  shouldSuppressUnknownModelParameters("custom", "user-defined-model"),
+  false,
+  "Custom OAI-compatible endpoints must honor the user's parameter switches for unlisted models",
+);
+assert.equal(
+  shouldSuppressUnknownModelParameters("openai", "user-defined-model"),
+  true,
+  "Provider catalogs should keep their existing unknown-model compatibility guard",
+);
 assert.equal(isNativeGlmEndpoint("https://api.z.ai/api/paas/v4/"), true);
 assert.equal(isNativeGlmEndpoint("https://example.com/v1"), false);
 
@@ -350,6 +486,41 @@ assert.deepEqual(fallbackNotice, {
   connectionName: "Fallback",
   model: "fallback-model",
 });
+
+const emptyStreamFallback = new RegressionProvider(["fallback after empty stream"]);
+assert.equal(
+  await collectProviderOutput(
+    new ConnectionFallbackProvider(new RegressionProvider(["  "]), emptyStreamFallback, fallbackConnection, "main"),
+    { model: "primary-model" },
+  ),
+  "  fallback after empty stream",
+);
+assert.equal(emptyStreamFallback.calls, 1, "an empty successful stream must activate the fallback");
+
+const emptyCompletionFallback = new RegressionProvider(["fallback after empty completion"]);
+const emptyCompletionResult = await new ConnectionFallbackProvider(
+  new RegressionProvider([]),
+  emptyCompletionFallback,
+  fallbackConnection,
+  "main",
+).chatComplete([{ role: "user", content: "test" }], { model: "primary-model", stream: false });
+assert.equal(emptyCompletionResult.content, "fallback after empty completion");
+assert.equal(emptyCompletionFallback.calls, 1, "an empty successful completion must activate the fallback");
+
+const whitespaceCompletionFallback = new RegressionProvider(["fallback after whitespace completion"]);
+const whitespaceCompletionResult = await new ConnectionFallbackProvider(
+  new RegressionProvider([" \n "], undefined, {
+    promptTokens: 1,
+    completionTokens: 1,
+    totalTokens: 2,
+    finishReason: "length",
+  }),
+  whitespaceCompletionFallback,
+  fallbackConnection,
+  "main",
+).chatComplete([{ role: "user", content: "test" }], { model: "primary-model", stream: false });
+assert.equal(whitespaceCompletionResult.content, "fallback after whitespace completion");
+assert.equal(whitespaceCompletionFallback.calls, 1, "a whitespace-only completion must activate the fallback");
 
 const partialPrimary = new RegressionProvider(["partial"], new Error("stream interrupted"));
 const unusedFallback = new RegressionProvider(["must not be appended"]);

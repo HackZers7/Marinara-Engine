@@ -6,7 +6,7 @@ import AdmZip from "adm-zip";
 import { execFile } from "child_process";
 import { existsSync, mkdirSync, createReadStream, readdirSync, unlinkSync, statSync, readFileSync } from "fs";
 import { randomUUID } from "crypto";
-import { writeFile, mkdir, readdir, unlink, copyFile, rm, readFile, mkdtemp } from "fs/promises";
+import { writeFile, mkdir, unlink, copyFile, rm, readFile, mkdtemp } from "fs/promises";
 import { tmpdir } from "os";
 import { delimiter, dirname, extname, isAbsolute, join, relative, resolve } from "path";
 import { fileURLToPath } from "url";
@@ -48,6 +48,7 @@ import { generateImage } from "../services/image/image-generation.js";
 import { resolveConnectionImageDefaults } from "../services/image/image-generation-defaults.js";
 import { loadImageGenerationUserSettings } from "../services/image/image-generation-settings.js";
 import { compileImagePrompt } from "../services/image/image-prompt-compiler.js";
+import { resolveImagePromptReviewSize } from "../services/image/image-prompt-review.js";
 import {
   resolveImageConnectionFallback,
   resolveVideoConnectionFallback,
@@ -160,6 +161,7 @@ type VideoGenerationConnection = {
   model?: string | null;
   videoGenerationSource?: string | null;
   videoService?: string | null;
+  comfyuiWorkflow?: string | null;
   defaultParameters?: string | null;
 };
 
@@ -347,6 +349,7 @@ function resolveVideoConnection(connection: VideoGenerationConnection) {
   const isGoogleVeoVideo = source === "google_veo" || serviceHint === "google_veo";
   const isOpenRouterVideo = source === "openrouter" || serviceHint === "openrouter";
   const isSeedanceVideo = source === "seedance" || serviceHint === "seedance";
+  const isComfyUiVideo = source === "comfyui" || serviceHint === "comfyui";
   return {
     source,
     serviceHint,
@@ -360,7 +363,9 @@ function resolveVideoConnection(connection: VideoGenerationConnection) {
             ? "https://openrouter.ai/api/v1"
             : isSeedanceVideo
               ? "https://api.seedance2.ai"
-              : "https://generativelanguage.googleapis.com/v1beta"),
+              : isComfyUiVideo
+                ? "http://127.0.0.1:8188"
+                : "https://generativelanguage.googleapis.com/v1beta"),
     model:
       connection.model ||
       (isXaiVideo
@@ -371,7 +376,9 @@ function resolveVideoConnection(connection: VideoGenerationConnection) {
             ? "google/veo-3.1"
             : isSeedanceVideo
               ? "seedance-2-0"
-              : "gemini-omni-flash-preview"),
+              : isComfyUiVideo
+                ? ""
+                : "gemini-omni-flash-preview"),
     resolution: isXaiVideo
       ? videoDefaults.xai.resolution
       : isGoogleVeoVideo
@@ -380,7 +387,10 @@ function resolveVideoConnection(connection: VideoGenerationConnection) {
           ? videoDefaults.openrouter.resolution
           : isSeedanceVideo
             ? videoDefaults.seedance.resolution
-            : undefined,
+            : isComfyUiVideo
+              ? videoDefaults.comfyui.resolution
+              : undefined,
+    comfyWorkflow: connection.comfyuiWorkflow || undefined,
     publicReferenceUpload: resolveVideoReferencePublicUploadOptions(isSeedanceVideo, videoDefaults.seedance),
   };
 }
@@ -1135,7 +1145,7 @@ export async function spritesRoutes(app: FastifyInstance) {
    * GET /api/sprites/:characterId
    * List all sprite expressions for a character.
    */
-  app.get<{ Params: { characterId: string } }>("/:characterId", async (req, reply) => {
+  app.get<{ Params: { characterId: string } }>("/:characterId", async (req) => {
     const { characterId } = req.params;
     return listSpriteInfos(characterId);
   });
@@ -1559,14 +1569,21 @@ export async function spritesRoutes(app: FastifyInstance) {
             compiledPrompt,
           );
           const finalPrompt = withSpriteBackgroundContract(reviewedPrompt.value, plan);
+          const previewSize = resolveImagePromptReviewSize({
+            connection: conn,
+            prompt: finalPrompt.prompt,
+            width: 1024,
+            height: 1024,
+            imageDefaults,
+          });
           return {
             id: spritePromptReviewId("expression", plan.spriteType, expression),
             kind: "sprite",
             title: `Expression: ${expression.replace(/_/g, " ")}`,
             prompt: finalPrompt.prompt,
             negativePrompt: finalPrompt.negativePrompt,
-            width: 1024,
-            height: 1024,
+            width: previewSize.width,
+            height: previewSize.height,
           };
         }),
       );
@@ -1590,6 +1607,13 @@ export async function spritesRoutes(app: FastifyInstance) {
       }),
       plan,
     );
+    const previewSize = resolveImagePromptReviewSize({
+      connection: conn,
+      prompt: finalPrompt.prompt,
+      width: plan.sheetWidth,
+      height: plan.sheetHeight,
+      imageDefaults,
+    });
     return {
       items: [
         {
@@ -1601,8 +1625,8 @@ export async function spritesRoutes(app: FastifyInstance) {
               : `Expression sprites: ${plan.cols}x${plan.rows}`,
           prompt: finalPrompt.prompt,
           negativePrompt: finalPrompt.negativePrompt,
-          width: plan.sheetWidth,
-          height: plan.sheetHeight,
+          width: previewSize.width,
+          height: previewSize.height,
         },
       ],
     };
@@ -1755,6 +1779,7 @@ export async function spritesRoutes(app: FastifyInstance) {
                   durationSeconds,
                   aspectRatio: ANIMATED_EXPRESSION_ASPECT_RATIO,
                   resolution: resolved.resolution,
+                  comfyWorkflow: resolved.comfyWorkflow,
                   referenceImage,
                   publicReferenceUpload: resolved.publicReferenceUpload,
                   fallback: videoFallback,

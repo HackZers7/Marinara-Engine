@@ -2,7 +2,7 @@
 // Routes: Backup
 // ──────────────────────────────────────────────
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
-import { dirname, join, relative } from "path";
+import { join, relative } from "path";
 import { createReadStream, createWriteStream, existsSync, readdirSync, statSync } from "fs";
 import type { WriteStream } from "fs";
 import { cp, mkdir, copyFile, readFile, readdir, writeFile, stat, mkdtemp, rm, open } from "fs/promises";
@@ -696,9 +696,7 @@ function validateProfileStorageTableInputs(snapshot: ProfileStorageSnapshot) {
       if (primaryKey) {
         const primaryValue = row[primaryKey.key];
         if (primaryValue === undefined || primaryValue === null || primaryValue === "") {
-          throw new ProfileImportRequestError(
-            `Profile table ${tableName} contains a row without ${primaryKey.key}.`,
-          );
+          throw new ProfileImportRequestError(`Profile table ${tableName} contains a row without ${primaryKey.key}.`);
         }
       }
     }
@@ -720,11 +718,7 @@ function buildProfileImportAssetInputs(
         path: safePath,
         expectedSize,
         read: () =>
-          typeof file.data === "string"
-            ? Buffer.from(file.data, "base64")
-            : readAsset
-              ? readAsset(safePath)
-              : null,
+          typeof file.data === "string" ? Buffer.from(file.data, "base64") : readAsset ? readAsset(safePath) : null,
       },
     ];
   });

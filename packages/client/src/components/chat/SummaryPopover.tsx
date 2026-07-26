@@ -64,6 +64,7 @@ import {
   type ChatSummaryPromptTemplate,
 } from "@marinara-engine/shared";
 import { showConfirmDialog } from "../../lib/app-dialogs";
+import { DraftNumberInput } from "../ui/DraftNumberInput";
 
 interface SummaryPopoverProps {
   chatId: string;
@@ -705,24 +706,23 @@ export function SummaryPopover({
     setDraftEntry(null);
   }, []);
 
-  const handleSaveEntry = useCallback(async () => {
-    if (!draftEntry) return;
-    const content = draftEntry.content.trim();
-    const title = draftEntry.title.trim() || "Manual summary";
+  const handleSaveEntry = useCallback(async (entry: ChatSummaryEntry) => {
+    const content = entry.content.trim();
+    const title = entry.title.trim() || "Manual summary";
     if (!content) {
       toast.error("Summary content is required.");
       return;
     }
-    const existingEntry = displayEntries.find((entry) => entry.id === draftEntry.id);
+    const existingEntry = displayEntries.find((candidate) => candidate.id === entry.id);
     const entryPayload = existingEntry
       ? {
-          id: draftEntry.id,
+          id: entry.id,
           title,
           content,
           tokenEstimate: estimateChatSummaryTokens(content),
         }
       : {
-          ...draftEntry,
+          ...entry,
           title,
           content,
           tokenEstimate: estimateChatSummaryTokens(content),
@@ -737,7 +737,7 @@ export function SummaryPopover({
     } catch {
       toast.error("Could not save summary entry.");
     }
-  }, [chatId, displayEntries, draftEntry, updateSummaryEntry]);
+  }, [chatId, displayEntries, updateSummaryEntry]);
 
   const handleToggleEntry = useCallback(
     async (entry: ChatSummaryEntry, enabled: boolean) => {
@@ -1018,25 +1018,23 @@ export function SummaryPopover({
                   <div className="space-y-1 px-1 pb-0.5">
                     <label className="flex items-center justify-between gap-2 text-[0.6875rem] font-medium text-[var(--popover-foreground)]">
                       <span>Recent message tail</span>
-                      <input
-                        type="number"
+                      <DraftNumberInput
+                        ariaLabel="Recent message tail"
                         min={SUMMARY_TAIL_MESSAGES.MIN}
-                        max={SUMMARY_TAIL_MESSAGES.MAX}
-                        step={1}
                         value={summaryTailMessages ?? SUMMARY_TAIL_MESSAGES.DEFAULT}
-                        onChange={(event) => {
-                          const raw = Number(event.target.value);
-                          const clamped = Number.isFinite(raw)
-                            ? Math.max(SUMMARY_TAIL_MESSAGES.MIN, Math.min(SUMMARY_TAIL_MESSAGES.MAX, Math.floor(raw)))
-                            : SUMMARY_TAIL_MESSAGES.DEFAULT;
-                          updateMeta.mutate({ id: chatId, summaryTailMessages: clamped });
-                        }}
+                        onCommit={(value) =>
+                          updateMeta.mutate({
+                            id: chatId,
+                            summaryTailMessages: value,
+                          })
+                        }
                         className="w-16 rounded-md bg-[var(--secondary)] px-2 py-1 text-right text-xs outline-none ring-1 ring-transparent transition-shadow focus:ring-[var(--primary)]/40"
                       />
                     </label>
                     <p className="text-[0.625rem] text-[var(--muted-foreground)]">
                       Most recent messages kept word-for-word when auto-hiding summarised ones. Set to{" "}
-                      <span className="font-medium">0</span> to hide the whole batch.
+                      <span className="font-medium">0</span> to hide the whole batch. Higher values increase prompt size
+                      and model cost.
                     </p>
                   </div>
                 )}
@@ -1443,7 +1441,6 @@ export function SummaryPopover({
                     onToggleExpanded={() => handleToggleExpanded(entry.id)}
                     onToggleEnabled={(enabled) => handleToggleEntry(entry, enabled)}
                     onStartEdit={() => handleStartEditEntry(entry)}
-                    onDraftChange={setDraftEntry}
                     onCancelEdit={handleCancelEditEntry}
                     onSaveEdit={handleSaveEntry}
                     onDelete={() => void handleDeleteEntry(entry)}
@@ -1641,9 +1638,8 @@ interface SummaryEntryRowProps {
   onToggleExpanded: () => void;
   onToggleEnabled: (enabled: boolean) => void;
   onStartEdit: () => void;
-  onDraftChange: (entry: ChatSummaryEntry | null) => void;
   onCancelEdit: () => void;
-  onSaveEdit: () => void;
+  onSaveEdit: (entry: ChatSummaryEntry) => void;
   onDelete: () => void;
   dockedToFooter?: boolean;
 }
@@ -1658,7 +1654,6 @@ function SummaryEntryRow({
   onToggleExpanded,
   onToggleEnabled,
   onStartEdit,
-  onDraftChange,
   onCancelEdit,
   onSaveEdit,
   onDelete,
@@ -1752,7 +1747,6 @@ function SummaryEntryRow({
               entry={draftEntry}
               textareaRef={textareaRef}
               mutationPending={mutationPending}
-              onChange={onDraftChange}
               onCancel={onCancelEdit}
               onSave={onSaveEdit}
             />
@@ -1777,44 +1771,43 @@ interface SummaryEntryEditorProps {
   entry: ChatSummaryEntry;
   textareaRef: RefObject<HTMLTextAreaElement | null>;
   mutationPending: boolean;
-  onChange: (entry: ChatSummaryEntry) => void;
   onCancel: () => void;
-  onSave: () => void;
+  onSave: (entry: ChatSummaryEntry) => void;
 }
 
 function SummaryEntryEditor({
   entry,
   textareaRef,
   mutationPending,
-  onChange,
   onCancel,
   onSave,
 }: SummaryEntryEditorProps) {
-  const metaLine = getSummaryEntryMetaLine(entry);
+  const [draft, setDraft] = useState(() => ({ ...entry }));
+  const metaLine = getSummaryEntryMetaLine(draft);
   return (
     <div className="space-y-2">
       <div className="flex flex-wrap items-center justify-between gap-2 text-[0.625rem] text-[var(--muted-foreground)]">
         <span className="min-w-0 truncate">{metaLine || "Manual summary"}</span>
-        <span>{entry.enabled ? "Active" : "Inactive"}</span>
+        <span>{draft.enabled ? "Active" : "Inactive"}</span>
       </div>
       <input
-        value={entry.title}
-        onChange={(event) => onChange({ ...entry, title: event.target.value })}
+        value={draft.title}
+        onChange={(event) => setDraft((current) => ({ ...current, title: event.target.value }))}
         maxLength={120}
         placeholder="Summary title"
         className="w-full rounded-md bg-[var(--card)] px-2.5 py-1.5 text-xs font-semibold text-[var(--foreground)] ring-1 ring-[var(--border)] focus:outline-none focus:ring-2 focus:ring-[var(--ring)]"
       />
       <textarea
         ref={textareaRef}
-        value={entry.content}
-        onChange={(event) => onChange({ ...entry, content: event.target.value })}
+        value={draft.content}
+        onChange={(event) => setDraft((current) => ({ ...current, content: event.target.value }))}
         rows={7}
         placeholder="Write or paste a summary of this chat..."
         className="max-h-64 min-h-36 w-full resize-y rounded-md bg-[var(--card)] p-2.5 text-xs leading-relaxed text-[var(--foreground)] ring-1 ring-[var(--border)] focus:outline-none focus:ring-2 focus:ring-[var(--ring)]"
       />
       <div className="flex flex-wrap items-center justify-between gap-2">
         <span className="text-[0.625rem] text-[var(--muted-foreground)]">
-          ~{formatTokenCount(estimateChatSummaryTokens(entry.content))} tokens
+          ~{formatTokenCount(estimateChatSummaryTokens(draft.content))} tokens
         </span>
         <div className="flex justify-end gap-1.5">
           <button
@@ -1826,8 +1819,8 @@ function SummaryEntryEditor({
           </button>
           <button
             type="button"
-            onClick={onSave}
-            disabled={mutationPending || !entry.content.trim()}
+            onClick={() => onSave(draft)}
+            disabled={mutationPending || !draft.content.trim()}
             className="flex items-center gap-1 rounded-md bg-[var(--secondary)] px-2.5 py-1 text-[0.625rem] font-semibold text-[var(--foreground)] ring-1 ring-[var(--border)] transition-all hover:bg-[var(--accent)] active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50"
           >
             <Save size="0.625rem" />

@@ -11,6 +11,52 @@ interface TypewriterReplacement {
   pendingText: string;
 }
 
+interface TypewriterRevealRateInput {
+  selectedCharsPerSecond: number;
+  pendingCharacters: number;
+  observedArrivalCharsPerSecond: number | null;
+  streamComplete: boolean;
+}
+
+interface GenerationSendBlockInput {
+  streamActive: boolean;
+  agentsProcessing: boolean;
+  backgroundIllustration: boolean;
+}
+
+interface GenerationStartBlockInput {
+  setupLocked: boolean;
+  activeController: boolean;
+  backgroundIllustration: boolean;
+}
+
+/** Keep send actions guarded while leaving the draft field itself editable. */
+export function isGenerationSendBlocked(input: GenerationSendBlockInput): boolean {
+  return !input.backgroundIllustration && (input.streamActive || input.agentsProcessing);
+}
+
+/** An Illustrator-only SSE tail may coexist with the chat's next text generation. */
+export function isGenerationStartBlocked(input: GenerationStartBlockInput): boolean {
+  return input.setupLocked || (input.activeController && !input.backgroundIllustration);
+}
+
+/**
+ * Keep the reveal slightly behind an open transport so provider-sized bursts
+ * remain a continuous typewriter queue instead of draining into visible gaps.
+ * Once transport completes, return to the user's selected speed so completion
+ * is never artificially delayed.
+ */
+export function getTypewriterRevealCharsPerSecond(input: TypewriterRevealRateInput): number {
+  if (!Number.isFinite(input.selectedCharsPerSecond) || input.streamComplete) {
+    return input.selectedCharsPerSecond;
+  }
+
+  const arrivalRate = input.observedArrivalCharsPerSecond ?? input.pendingCharacters;
+  const initialRateFloor =
+    input.observedArrivalCharsPerSecond === null ? Math.min(12, input.selectedCharsPerSecond) : 1;
+  return Math.max(initialRateFloor, Math.min(input.selectedCharsPerSecond, arrivalRate * 0.95));
+}
+
 /**
  * Reconcile an authoritative replacement with text that the typewriter has
  * already painted. Server cleanup can trim a leading newline, speaker label,

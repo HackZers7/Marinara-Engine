@@ -38,6 +38,7 @@ import { useChatStore } from "../../stores/chat.store";
 import { useSidecarStore } from "../../stores/sidecar.store";
 import { api } from "../../lib/api-client";
 import { appendLocalSidecarConnectionOption } from "../../lib/connection-filters";
+import { resolveConversationSelfieSetup } from "../../lib/conversation-selfie-setup";
 import { getAgentRunIntervalMeta } from "../../lib/agent-cadence";
 import { characterMatchesSearch, getCharacterTitle, parseCharacterDisplayData } from "../../lib/character-display";
 import { addSilentGreetingSwipes } from "../../lib/message-swipes";
@@ -215,6 +216,7 @@ type ConnectionSetupOption = {
   name: string;
   provider?: string;
   defaultParameters?: unknown;
+  defaultForAgents?: boolean | string;
 };
 
 function parseCharacterFolderIds(value: unknown): string[] {
@@ -702,6 +704,10 @@ function ConversationQuickSetup({ chat, onFinish }: ChatSetupWizardProps) {
       return !agentId || installedAgentIds.has(agentId);
     });
   }, [installedAgentIds]);
+  const availableConversationCommandIds = useMemo(
+    () => new Set(availableConversationCommandOptions.map((command) => command.id)),
+    [availableConversationCommandOptions],
+  );
   const hasConversationCommands = availableConversationCommandOptions.length > 0;
   const hasInstalledAgents = installedAgentIds.size > 0;
   const openDownloadAgents = useCallback(() => {
@@ -1034,15 +1040,27 @@ function ConversationQuickSetup({ chat, onFinish }: ChatSetupWizardProps) {
       trimmedConversationSystemPrompt !== baseConversationPromptText
         ? trimmedConversationSystemPrompt
         : null;
+    const selfieCommandEnabled =
+      commandsEnabled &&
+      availableConversationCommandIds.has("selfie") &&
+      isConversationCommandToggleEnabled(conversationCommandToggles, "selfie");
+    const selfieSetup = resolveConversationSelfieSetup({
+      commandToggles: conversationCommandToggles,
+      selfieCommandAvailable: availableConversationCommandIds.has("selfie"),
+      currentConnectionId: metadata.imageGenConnectionId,
+      selfieCommandEnabled,
+      connections: connectionOptions,
+    });
     await updateMeta.mutateAsync({
       id: chat.id,
       autonomousMessages: autonomousEnabled,
       conversationSchedulesEnabled: autonomousEnabled && generateSchedule,
       characterCommands: hasConversationCommands && commandsEnabled,
-      conversationCommandToggles,
+      conversationCommandToggles: selfieSetup.conversationCommandToggles,
       conversationSetupComplete: true,
       chatParameters: customizeParameters ? generationParameters : null,
       customSystemPrompt,
+      ...(selfieSetup.imageGenConnectionId ? { imageGenConnectionId: selfieSetup.imageGenConnectionId } : {}),
     });
     if (autonomousEnabled && generateSchedule) {
       setScheduleState("generating");
@@ -1083,6 +1101,9 @@ function ConversationQuickSetup({ chat, onFinish }: ChatSetupWizardProps) {
     customConversationPromptEnabled,
     conversationSystemPromptDraft,
     baseConversationPrompt,
+    availableConversationCommandIds,
+    connectionOptions,
+    metadata.imageGenConnectionId,
   ]);
 
   const renderConnectionStep = () => (
@@ -2208,6 +2229,10 @@ function RoleplaySetupWizard({ chat, onFinish }: ChatSetupWizardProps) {
         ...buildAgentAddMetadataPatch(agent.id, setup, metadata, {
           allowSecretPlot: supportsNarrativeDirectorSecretPlot,
           defaultPromptTemplateId: resolveDefaultAgentPromptTemplateId(nextSettings),
+          illustratorDefaults: {
+            includeCharacterAppearance: nextSettings.includeCharacterAppearance === true,
+            useAvatarReferences: nextSettings.useAvatarReferences === true,
+          },
         }),
       });
       toast.success(`Added ${agent.name}! You can access its settings in Agents section in Chat Settings!`);

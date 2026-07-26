@@ -26,6 +26,7 @@ import { useChatStore } from "../../stores/chat.store";
 import { useUIStore } from "../../stores/ui.store";
 import { useGameStateStore } from "../../stores/game-state.store";
 import { useGalleryStore } from "../../stores/gallery.store";
+import { useAgentStore } from "../../stores/agent.store";
 import {
   useSyncGameState,
   useCreateGame,
@@ -74,6 +75,7 @@ import { spriteKeys, type SpriteInfo } from "../../hooks/use-characters";
 import { lorebookKeys } from "../../hooks/use-lorebooks";
 import { api, getJsonRepairRequest, type JsonRepairRequest } from "../../lib/api-client";
 import { useRenderTimer } from "../../lib/perf-diagnostics";
+import { isGenerationSendBlocked } from "../../lib/generation-stream-policy";
 import { showConfirmDialog } from "../../lib/app-dialogs";
 import { CHAT_FLOATING_UI_DISMISS_EVENT } from "../../lib/chat-floating-ui-events";
 import {
@@ -101,6 +103,7 @@ import { filterGameAssetMap, parseGameAssetExcludedFolders } from "../../lib/gam
 import { resolveCombatFullBodyPose, resolveDialogueFullBodyPose } from "../../lib/game-full-body-pose";
 import { characterNamesMatch, findNamedEntry } from "../../lib/game-character-name-match";
 import { normalizeGameSegmentEdit, serializeGameSegmentEdit, type GameSegmentEdit } from "../../lib/game-segment-edits";
+import { findReplayStoryboardKeyframe } from "../../lib/game-storyboard-keyframes";
 import { useSceneAnalysis } from "../../hooks/use-scene-analysis";
 import { useSidecarStore } from "../../stores/sidecar.store";
 import { parsePartyDialogue } from "../../lib/party-dialogue-parser";
@@ -141,6 +144,7 @@ import {
   GAME_STORYBOARD_KEYFRAME_COUNT_MAX,
   GAME_STORYBOARD_KEYFRAME_COUNT_MIN,
   PROFESSOR_MARI_ID,
+  SPOTIFY_RECENT_TRACK_HISTORY_LIMIT,
   formatTextQuotes,
   normalizeRpgStatPools,
   normalizeTextForMatch,
@@ -2149,7 +2153,6 @@ function getSceneBackgroundTags(assetKeys: string[]): string[] {
 }
 
 const RECENT_MUSIC_HISTORY_LIMIT = 8;
-const RECENT_SPOTIFY_TRACK_HISTORY_LIMIT = 12;
 const GAME_START_GENERATION_GUIDE =
   "Begin the game now with the first visible GM VN narration/dialogue segment. This is an invisible startup trigger, not a player action. Do not mention a start command.";
 const SYNTHETIC_GAME_START_MESSAGE_RE = /^\s*\[start(?:\s+the)?\s+game\]\s*$/i;
@@ -2167,13 +2170,13 @@ function normalizeRecentSpotifyTrackHistory(value: unknown): string[] {
   return Array.isArray(value)
     ? value
         .filter((uri): uri is string => typeof uri === "string" && uri.startsWith("spotify:track:"))
-        .slice(0, RECENT_SPOTIFY_TRACK_HISTORY_LIMIT)
+        .slice(0, SPOTIFY_RECENT_TRACK_HISTORY_LIMIT)
     : [];
 }
 
 function appendRecentSpotifyTrack(history: string[], uri: string | null | undefined): string[] {
-  if (!uri?.startsWith("spotify:track:")) return history.slice(0, RECENT_SPOTIFY_TRACK_HISTORY_LIMIT);
-  return [uri, ...history.filter((entry) => entry !== uri)].slice(0, RECENT_SPOTIFY_TRACK_HISTORY_LIMIT);
+  if (!uri?.startsWith("spotify:track:")) return history.slice(0, SPOTIFY_RECENT_TRACK_HISTORY_LIMIT);
+  return [uri, ...history.filter((entry) => entry !== uri)].slice(0, SPOTIFY_RECENT_TRACK_HISTORY_LIMIT);
 }
 
 function formatCombatLogContent(message: Message): string {
@@ -2230,35 +2233,6 @@ function buildStoryboardSectionsFromMessage(
       };
     })
     .filter((section): section is GameStoryboardSourceSection => Boolean(section));
-}
-
-function findStoryboardKeyframeForSegment(
-  frames: GameTurnStoryboardKeyframe[],
-  segmentIndex: number | null,
-): GameTurnStoryboardKeyframe | null {
-  if (frames.length === 0) return null;
-  const sorted = [...frames].sort((a, b) => a.index - b.index);
-  if (segmentIndex == null || !Number.isFinite(segmentIndex)) return sorted[0] ?? null;
-
-  const exact = sorted.find((frame) => {
-    const start = frame.sectionStartIndex ?? frame.sectionEndIndex;
-    const end = frame.sectionEndIndex ?? frame.sectionStartIndex;
-    if (start == null || end == null) return false;
-    return segmentIndex >= Math.min(start, end) && segmentIndex <= Math.max(start, end);
-  });
-  if (exact) return exact;
-
-  const anchored = sorted.filter((frame) => frame.sectionStartIndex != null || frame.sectionEndIndex != null);
-  if (anchored.length === 0) return sorted[0] ?? null;
-  return anchored.reduce((best, frame) => {
-    const bestStart = best.sectionStartIndex ?? best.sectionEndIndex ?? 0;
-    const bestEnd = best.sectionEndIndex ?? best.sectionStartIndex ?? bestStart;
-    const frameStart = frame.sectionStartIndex ?? frame.sectionEndIndex ?? 0;
-    const frameEnd = frame.sectionEndIndex ?? frame.sectionStartIndex ?? frameStart;
-    const bestCenter = (bestStart + bestEnd) / 2;
-    const frameCenter = (frameStart + frameEnd) / 2;
-    return Math.abs(frameCenter - segmentIndex) < Math.abs(bestCenter - segmentIndex) ? frame : best;
-  });
 }
 
 function formatStoryboardSectionLabel(frame: GameTurnStoryboardKeyframe): string {
@@ -2361,6 +2335,15 @@ function GameSurfaceComponent({
   isMessagesLoading,
 }: GameSurfaceProps) {
   useRenderTimer("game-surface"); // [#3104 diagnostic]
+  const backgroundIllustration = useChatStore((state) =>
+    state.backgroundIllustrationChatIds.has(activeChatId),
+  );
+  const agentsProcessing = useAgentStore((state) => state.processingChatIds.includes(activeChatId));
+  const gameInputGenerationBlocked = isGenerationSendBlocked({
+    streamActive: isStreaming,
+    agentsProcessing,
+    backgroundIllustration,
+  });
   // Sync game metadata → store
   useSyncGameState(activeChatId, chatMeta);
   const hierarchicalMapsActive =
@@ -3675,7 +3658,7 @@ function GameSurfaceComponent({
     [latestAssistantMsg, segmentDeletes, segmentEdits],
   );
   const activeStoryboardKeyframe = useMemo(
-    () => findStoryboardKeyframeForSegment(latestTurnStoryboard?.keyframes ?? [], activeStoryboardSegmentIndex),
+    () => findReplayStoryboardKeyframe(latestTurnStoryboard?.keyframes ?? [], activeStoryboardSegmentIndex),
     [activeStoryboardSegmentIndex, latestTurnStoryboard?.keyframes],
   );
   const gameStoryboardViewerDisplayMode: GameStoryboardViewerDisplayMode =
@@ -4804,6 +4787,7 @@ function GameSurfaceComponent({
     );
     const sceneContext = {
       currentState: sceneAnalysisState,
+      turnNumber: Math.max(1, assistantTurnCount),
       availableBackgrounds: bgTags,
       availableSfx: sfxTags,
       activeWidgets: hudWidgets,
@@ -6288,6 +6272,7 @@ function GameSurfaceComponent({
     const assetKeys = Object.keys(assets ?? {});
     const sceneContext = {
       currentState: sceneAnalysisState,
+      turnNumber: Math.max(1, assistantTurnCount),
       availableBackgrounds: sampleTags(getSceneBackgroundTags(assetKeys), 50),
       availableSfx: sampleTags(
         assetKeys.filter((key) => key.startsWith("sfx:")),
@@ -6361,6 +6346,7 @@ function GameSurfaceComponent({
     }
   }, [
     activeChatId,
+    assistantTurnCount,
     chatMeta.gameImagePromptInstructions,
     chatMeta.gameSceneConnectionId,
     chatMeta.gameSetupConfig,
@@ -9524,6 +9510,7 @@ function GameSurfaceComponent({
 
     const context = {
       currentState: gameState,
+      turnNumber: Math.max(1, assistantTurnCount),
       availableBackgrounds: bgTags,
       availableSfx: sfxTags,
       activeWidgets: hudWidgets,
@@ -9570,6 +9557,7 @@ function GameSurfaceComponent({
       );
     }
   }, [
+    assistantTurnCount,
     latestAssistantMsg,
     scopedAssetMap,
     gameState,
@@ -11618,8 +11606,9 @@ function GameSurfaceComponent({
                               hasPartyMembers={partyMembers.length > 0}
                               pendingMoveLabel={pendingMapMove?.label ?? null}
                               onClearPendingMove={() => setPendingMapMove(null)}
-                              disabled={isStreaming || !sessionInteractive}
-                              isStreaming={isStreaming}
+                              disabled={gameInputGenerationBlocked || !sessionInteractive}
+                              draftDisabled={!sessionInteractive}
+                              isStreaming={gameInputGenerationBlocked}
                               inline
                               draftKey={activeChatId}
                               focusToken={gameInputFocusToken}
@@ -11706,8 +11695,9 @@ function GameSurfaceComponent({
                           hasPartyMembers={partyMembers.length > 0}
                           pendingMoveLabel={pendingMapMove?.label ?? null}
                           onClearPendingMove={() => setPendingMapMove(null)}
-                          disabled={isStreaming || !sessionInteractive}
-                          isStreaming={isStreaming}
+                          disabled={gameInputGenerationBlocked || !sessionInteractive}
+                          draftDisabled={!sessionInteractive}
+                          isStreaming={gameInputGenerationBlocked}
                           inline
                           draftKey={activeChatId}
                           focusToken={gameInputFocusToken}

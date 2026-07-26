@@ -49,7 +49,3 @@ export function chatBackgroundUrlToMetadata(url: string | null): string | null {
 
   return url;
 }
-
-export function isManagedChatBackgroundUrl(url: string | null): boolean {
-  return !!url && (url.startsWith(USER_BACKGROUND_URL_PREFIX) || url.startsWith(GAME_ASSET_FILE_URL_PREFIX));
-}

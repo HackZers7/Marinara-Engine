@@ -89,7 +89,6 @@ class SidecarProcessService {
   private stopRequestId = 0;
   private unexpectedCrashCount = 0;
   private unexpectedCrashWindowStartedAt = 0;
-  private lastReadyAt = 0;
   private starting = false;
   private syncLock: Promise<void> = Promise.resolve();
   private childErrors = new WeakMap<ChildProcess, Error>();
@@ -754,7 +753,6 @@ class SidecarProcessService {
 
   private markReady(): void {
     this.ready = true;
-    this.lastReadyAt = Date.now();
     this.clearStartupFailure();
     sidecarModelService.setStatus("ready");
     sidecarModelService.clearLegacyRuntimeStamp();

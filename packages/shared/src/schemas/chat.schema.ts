@@ -43,6 +43,7 @@ export const generateRequestSchema = z.object({
   autonomous: z.boolean().optional().default(false),
   autonomousIntentKey: z.string().max(100).optional().default(""),
   userTimeZone: z.string().max(100).optional().default(""),
+  currentBackground: z.string().nullable().optional(),
   mentionedCharacterNames: z.array(z.string()).optional().default([]),
   forCharacterId: z.string().nullable().optional().default(null),
   skipPresenceDelay: z.boolean().optional().default(false),

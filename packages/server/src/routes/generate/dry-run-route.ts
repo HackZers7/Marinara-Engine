@@ -16,7 +16,6 @@ import { createChatsStorage } from "../../services/storage/chats.storage.js";
 import { createConnectionsStorage } from "../../services/storage/connections.storage.js";
 import { createPromptsStorage } from "../../services/storage/prompts.storage.js";
 import { createCharactersStorage } from "../../services/storage/characters.storage.js";
-import { createLorebooksStorage } from "../../services/storage/lorebooks.storage.js";
 import { createRegexScriptsStorage } from "../../services/storage/regex-scripts.storage.js";
 import {
   injectOwnerSpatialPrompt,
@@ -64,12 +63,14 @@ import {
   extractImageAttachmentDataUrls,
   findTrackerContextInsertIndex,
   formatConversationInstructionsForWrap,
+  getMessageHiddenFromAICharacterIds,
   isMessageHiddenFromAI,
   mergeCustomParameters,
   normalizePromptWrapFormat,
   parseExtra,
   parseStoredGenerationParameters,
   prefixGroupIndividualHistorySpeakers,
+  readPersonaSnapshotName,
   resolveActiveCharacterIds,
   resolveActivePersonaCandidate,
   resolvePromptCharacterIdsForTarget,
@@ -84,6 +85,7 @@ import {
   type PromptAttachment,
 } from "../generate/generate-route-utils.js";
 import { buildGenerationPromptPresetCandidates, type PromptPresetCandidateSource } from "./prompt-preset-selection.js";
+import { CONVERSATION_NO_REPEAT_INSTRUCTION } from "./conversation-prompt-formatting.js";
 import { createGameStateStorage, type GameStateVisibleAnchor } from "../../services/storage/game-state.storage.js";
 import { buildCommittedTrackerContextBlock } from "../../services/generation/committed-tracker-context.js";
 import { logger } from "../../lib/logger.js";
@@ -97,6 +99,7 @@ type DryRunPromptMessage = {
   files?: Array<{ type: string; data: string; filename?: string }>;
   contextKind?: "prompt" | "history" | "injection";
   characterId?: string | null;
+  personaSnapshotName?: string | null;
   providerMetadata?: Record<string, unknown>;
 };
 
@@ -184,17 +187,6 @@ function injectTrackerContext(
   dedupeLastMessageWrappers(finalMessages);
   finalMessages.splice(findTrackerContextInsertIndex(finalMessages), 0, trackerMessage);
   return finalMessages;
-}
-
-function wrapperMessages(
-  wrapFormat: WrapFormat,
-  key: string,
-): { start?: { role: "system"; content: string }; end?: { role: "system"; content: string } } {
-  if (wrapFormat === "none") return {};
-  if (wrapFormat === "xml")
-    return { start: { role: "system", content: `<${key}>` }, end: { role: "system", content: `</${key}>` } };
-  // markdown
-  return { start: { role: "system", content: `## ${key}` }, end: undefined };
 }
 
 function wrapConversationHistoryAndLastMessageInPlace(
@@ -421,7 +413,6 @@ export async function registerDryRunRoute(app: FastifyInstance) {
   const connections = createConnectionsStorage(app.db);
   const presets = createPromptsStorage(app.db);
   const chars = createCharactersStorage(app.db);
-  const lorebooksStore = createLorebooksStorage(app.db);
   const regexScriptsStore = createRegexScriptsStorage(app.db);
 
   // Track active dry-runs so extensions can abort in-flight requests.
@@ -671,9 +662,11 @@ export async function registerDryRunRoute(app: FastifyInstance) {
     const excludePastReasoning = chatMeta.excludePastReasoning !== false;
     let mappedMessages = chatMessages.map((m: any) => {
       const extra = parseExtra(m.extra);
+      const personaSnapshotName = m.role === "user" ? readPersonaSnapshotName(extra) : null;
       const attachments = extra.attachments as PromptAttachment[] | undefined;
       const images = extractImageAttachmentDataUrls(attachments);
       const files = extractFileAttachmentInputs(attachments);
+      const hiddenFromAICharacterIds = getMessageHiddenFromAICharacterIds(m);
       const geminiParts =
         !excludePastReasoning && isGoogleProvider && m.role === "assistant" && extra.geminiParts
           ? { providerMetadata: { geminiParts: extra.geminiParts } }
@@ -684,6 +677,8 @@ export async function registerDryRunRoute(app: FastifyInstance) {
         content: appendReadableAttachmentsToContent((m.content as string) ?? "", attachments),
         contextKind: "history" as const,
         characterId: typeof m.characterId === "string" && m.characterId ? m.characterId : null,
+        ...(personaSnapshotName ? { personaSnapshotName } : {}),
+        ...(hiddenFromAICharacterIds.length ? { hiddenFromAICharacterIds } : {}),
         ...(images?.length ? { images } : {}),
         ...(files.length ? { files } : {}),
         ...geminiParts,
@@ -721,6 +716,13 @@ export async function registerDryRunRoute(app: FastifyInstance) {
         ? body.forCharacterId
         : null;
     const promptCharacterIds = resolvePromptCharacterIdsForTarget(characterIds, promptTargetCharacterId);
+    const audienceCharacterIds = impersonate ? [] : promptTargetCharacterId ? [promptTargetCharacterId] : characterIds;
+    if (audienceCharacterIds.length > 0) {
+      const audience = new Set(audienceCharacterIds);
+      mappedMessages = mappedMessages.filter(
+        (message) => !message.hiddenFromAICharacterIds?.some((characterId) => audience.has(characterId)),
+      );
+    }
 
     // Persona resolution (same strategy as generation; read-only)
     let personaId: string | null = null;
@@ -801,6 +803,7 @@ export async function registerDryRunRoute(app: FastifyInstance) {
     const promptMacroContext = await buildPromptMacroContext({
       db: app.db,
       characterIds: promptCharacterIds,
+      groupCharacterIds: promptTargetCharacterId ? characterIds : undefined,
       personaName,
       personaDescription,
       personaFields,
@@ -949,14 +952,14 @@ export async function registerDryRunRoute(app: FastifyInstance) {
         personaLines.push(`Name: ${personaName}`);
         const resolvedPersonaDescription = resolvePromptMacros(personaDescription);
         const resolvedPersonaPersonality = resolvePromptMacros(personaFields.personality ?? "");
-        const resolvedPersonaScenario = resolvePromptMacros(personaFields.scenario ?? "");
         const resolvedPersonaBackstory = resolvePromptMacros(personaFields.backstory ?? "");
         const resolvedPersonaAppearance = resolvePromptMacros(personaFields.appearance ?? "");
+        const resolvedPersonaScenario = resolvePromptMacros(personaFields.scenario ?? "");
         if (resolvedPersonaDescription.trim()) personaLines.push(`Description: ${resolvedPersonaDescription.trim()}`);
         if (resolvedPersonaPersonality.trim()) personaLines.push(`Personality: ${resolvedPersonaPersonality.trim()}`);
-        if (resolvedPersonaScenario.trim()) personaLines.push(`Scenario: ${resolvedPersonaScenario.trim()}`);
         if (resolvedPersonaBackstory.trim()) personaLines.push(`Backstory: ${resolvedPersonaBackstory.trim()}`);
         if (resolvedPersonaAppearance.trim()) personaLines.push(`Appearance: ${resolvedPersonaAppearance.trim()}`);
+        if (resolvedPersonaScenario.trim()) personaLines.push(`Scenario: ${resolvedPersonaScenario.trim()}`);
         return wrapContent(personaLines.join("\n"), "Persona", wrapFormat).trim();
       })();
 
@@ -997,10 +1000,14 @@ export async function registerDryRunRoute(app: FastifyInstance) {
             const lines: string[] = [];
             const resolvedDesc = resolveCharacterMacros(desc);
             const resolvedPersonality = resolveCharacterMacros(personality);
+            const resolvedBackstory = resolveCharacterMacros(cardPromptText(extensions.backstory));
+            const resolvedAppearance = resolveCharacterMacros(cardPromptText(extensions.appearance));
             const resolvedScenario = resolveCharacterMacros(scenario);
             const resolvedMesExample = resolveCharacterMacros(mesExample);
             if (resolvedDesc.trim()) lines.push(resolvedDesc.trim());
             if (resolvedPersonality.trim()) lines.push(`Personality: ${resolvedPersonality.trim()}`);
+            if (resolvedBackstory.trim()) lines.push(`Backstory: ${resolvedBackstory.trim()}`);
+            if (resolvedAppearance.trim()) lines.push(`Appearance: ${resolvedAppearance.trim()}`);
             if (resolvedScenario.trim()) lines.push(`Scenario: ${resolvedScenario.trim()}`);
             if (resolvedMesExample.trim()) lines.push(`Example messages:\n${resolvedMesExample.trim()}`);
 
@@ -1217,6 +1224,7 @@ export async function registerDryRunRoute(app: FastifyInstance) {
         chatChoices,
         chatId,
         characterIds: promptCharacterIds,
+        groupCharacterIds: characterIds,
         personaId,
         personaName,
         personaDescription,
@@ -1336,7 +1344,13 @@ export async function registerDryRunRoute(app: FastifyInstance) {
         conversationPromptTemplate.replace(/\{\{charName\}\}/g, charNameList).replace(/\{\{userName\}\}/g, personaName),
       );
       finalMessages = [
-        { role: "system", content: formatConversationInstructionsForWrap(renderedConversationPrompt, wrapFormat) },
+        {
+          role: "system",
+          content: formatConversationInstructionsForWrap(
+            `${renderedConversationPrompt}\n${CONVERSATION_NO_REPEAT_INSTRUCTION}`,
+            wrapFormat,
+          ),
+        },
         ...finalMessages,
       ];
     }

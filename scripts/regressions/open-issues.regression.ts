@@ -2,7 +2,13 @@ import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import AdmZip from "adm-zip";
 import type { Chat, Message } from "../../packages/shared/src/types/chat.js";
+import playwrightConfig from "../../playwright.config.js";
+import { resolveDevSharedBuildScript } from "../dev-shared-build.mjs";
+
+const REPOSITORY_ROOT = fileURLToPath(new URL("../../", import.meta.url));
 import {
   parseGroupedSpeakerSegments,
   splitGroupedSegmentDisplayLines,
@@ -15,6 +21,7 @@ import {
   normalizeLorebookCategory,
   updateLorebookSchema,
 } from "../../packages/shared/src/schemas/lorebook.schema.js";
+import { characterDataSchema, updateCharacterSchema } from "../../packages/shared/src/schemas/character.schema.js";
 import { buildLorebookDuplicateInput } from "../../packages/client/src/lib/lorebook-duplicate.js";
 import { appendLorebookActivationKeys } from "../../packages/client/src/lib/lorebook-keys.js";
 import { arePresetChoiceSelectionsComplete } from "../../packages/client/src/lib/preset-choice-selection.js";
@@ -24,6 +31,20 @@ import {
   shouldExecuteQuickPostAsCommand,
 } from "../../packages/client/src/lib/slash-commands.js";
 import { getAvatarCropStyle } from "../../packages/client/src/lib/utils.js";
+import { filterCustomEmojisByName } from "../../packages/client/src/lib/custom-emoji.js";
+import {
+  trackChatMetadataSave,
+  waitForPendingChatMetadataSaves,
+} from "../../packages/client/src/lib/chat-metadata-save-barrier.js";
+import { resolveEchoChamberTopLayout } from "../../packages/client/src/lib/echo-chamber-layout.js";
+import {
+  resolveConversationSelfieConnectionId,
+  resolveConversationSelfieSetup,
+} from "../../packages/client/src/lib/conversation-selfie-setup.js";
+import {
+  resolveTrackerPanelContentScale,
+  resolveTrackerPanelDesktopWidth,
+} from "../../packages/client/src/lib/tracker-panel-layout.js";
 import { getApiErrorMessage } from "../../packages/client/src/lib/api-client.js";
 import { parseCustomParametersDraft } from "../../packages/client/src/lib/generation-custom-parameters.js";
 import { parseGenerationParameterDraft } from "../../packages/client/src/lib/generation-parameter-draft.js";
@@ -33,11 +54,9 @@ import {
   withFreshNpcAvatarRevision,
   withoutNpcAvatarRevision,
 } from "../../packages/client/src/lib/game-npc-avatar.js";
-import {
-  characterMatchesSearch,
-  parseCharacterDisplayData,
-} from "../../packages/client/src/lib/character-display.js";
+import { characterMatchesSearch, parseCharacterDisplayData } from "../../packages/client/src/lib/character-display.js";
 import { DEFAULT_GENERATION_PARAMS } from "../../packages/shared/src/constants/defaults.js";
+import { getChatModeCapabilities } from "../../packages/shared/src/constants/chat-mode-capabilities.js";
 import { mergeNoodleCustomEmojiMap } from "../../packages/client/src/hooks/use-noodle-custom-emojis.js";
 import {
   isBundledGameAssetFolderPath,
@@ -48,6 +67,8 @@ import { parseNoodleAvatarCrop } from "../../packages/server/src/services/storag
 import { sanitizeExampleDialoguePromptLeaf } from "../../packages/server/src/services/prompt/prompt-escaping.js";
 import { parseCharacterCommands } from "../../packages/server/src/services/conversation/character-commands.js";
 import {
+  collapseDuplicateConversationSpeakerPrefixes,
+  isRepeatedConversationResponse,
   stripConversationPromptTimestamps,
   stripConversationResponseEnvelope,
 } from "../../packages/server/src/services/conversation/transcript-sanitize.js";
@@ -72,32 +93,68 @@ import {
   resolveGameSetupImport,
   type GameSetupShareSource,
 } from "../../packages/client/src/lib/game-setup-share.js";
-import {
-  getTemperatureGaugeDisplay,
-  parsePureTemperatureValue,
-} from "../../packages/client/src/features/tracker-panel/lib/world-state-display.js";
+import { classifyWorldWeather, getTemperatureGaugeDisplay } from "../../packages/client/src/lib/world-state-helpers.js";
 import {
   resolveStandardEmojiShortcode,
   searchStandardEmojiShortcodes,
 } from "../../packages/client/src/lib/emoji-shortcodes.js";
 import { persistGeneratedImageToEntityGalleries } from "../../packages/server/src/services/image/generated-image-entity-gallery.js";
+import { resolveIllustratorImageSize } from "../../packages/server/src/services/image/image-generation-settings.js";
 import { fetchBotBrowserJson } from "../../packages/server/src/services/bot-browser/fetch-json.js";
-import { isAllowedResponseContentType } from "../../packages/server/src/utils/security.js";
+import { isAllowedResponseContentType, validateOutboundUrl } from "../../packages/server/src/utils/security.js";
+import { seedDefaultBackgrounds } from "../../packages/server/src/db/seed-backgrounds.js";
 import {
   DEFAULT_CHAT_GENERATION_TIMEOUT_MS,
   getChatGenerationTimeoutMs,
+  isCustomAgentRepositoriesEnabled,
 } from "../../packages/server/src/config/runtime-config.js";
+import {
+  buildRepositoryAgentInput,
+  normalizeCustomAgentRepositoryUrl,
+  parseCustomAgentRepositoryArchive,
+} from "../../packages/server/src/services/agents/custom-agent-repositories.service.js";
+import { shouldAutomaticallyRetryAgentResult } from "../../packages/server/src/routes/generate/agent-result-capabilities.js";
 import { runImageGenerationRequest } from "../../packages/server/src/services/image/image-generation-queue.js";
 import {
   detectNovelAiSubjectCount,
+  openRouterModalities,
+  resolveNovelAiDefaults,
+  resolveNovelAiRequestSize,
   resolveNovelAiSize,
 } from "../../packages/server/src/services/image/image-generation.js";
-import { DEFAULT_NOVELAI_DEFAULTS } from "../../packages/shared/src/constants/image-generation-defaults.js";
+import {
+  COMFYUI_PLACEHOLDER_REFERENCE_BASE64,
+  DEFAULT_NOVELAI_DEFAULTS,
+} from "../../packages/shared/src/constants/image-generation-defaults.js";
+import type { ImageGenerationDefaultsProfile } from "../../packages/shared/src/types/image-generation-defaults.js";
+import {
+  sceneAnalysisRequestSchema,
+  SIDECAR_SCENE_ANALYSIS_NARRATION_BUDGET_CHARS,
+} from "../../packages/shared/src/schemas/scene-analysis.schema.js";
+import {
+  buildSceneAnalyzerUserPrompt,
+  fitSceneAnalyzerNarrationBeats,
+} from "../../packages/server/src/services/sidecar/scene-analyzer.js";
+import { createAgentsStorage } from "../../packages/server/src/services/storage/agents.storage.js";
+import { createCustomToolsStorage } from "../../packages/server/src/services/storage/custom-tools.storage.js";
+import { createCharactersStorage } from "../../packages/server/src/services/storage/characters.storage.js";
+import { resolveRunPodComfyUiTimeoutSeconds } from "../../packages/server/src/services/image/runpod-comfyui.service.js";
+import {
+  findMissingComfyReferenceSlots,
+  numberedComfyReferencePlaceholder,
+} from "../../packages/server/src/services/image/comfyui-reference-placeholders.js";
+import {
+  buildAgentAddMetadataPatch,
+  buildInitialAgentAddSetupState,
+} from "../../packages/client/src/components/chat/AgentAddSetupFields.js";
 import {
   parseIllustratorPromptReviewOverride,
   resolveIllustratorPromptSubmission,
 } from "../../packages/server/src/services/image/illustrator-prompt-review.js";
-import { resolveReviewedImagePromptSubmission } from "../../packages/server/src/services/image/image-prompt-review.js";
+import {
+  resolveImagePromptReviewSize,
+  resolveReviewedImagePromptSubmission,
+} from "../../packages/server/src/services/image/image-prompt-review.js";
 import {
   cleanupStagedProfileAssets,
   promoteStagedProfileAssets,
@@ -120,6 +177,7 @@ import {
 import {
   checkAutonomousMessaging,
   clearChatActivity,
+  dailyCapForCharacter,
   initializeActivityFromMessages,
   isAutonomousDailyBudgetExhausted,
 } from "../../packages/server/src/services/conversation/autonomous.service.js";
@@ -133,7 +191,12 @@ import type {
   ChatMessage,
   ChatOptions,
 } from "../../packages/server/src/services/llm/base-provider.js";
-import { resolveGroupGenerationMode } from "../../packages/server/src/routes/generate/generate-route-utils.js";
+import {
+  resolveGroupGenerationMode,
+  shouldRestoreRegenerationCharacterTarget,
+} from "../../packages/server/src/routes/generate/generate-route-utils.js";
+import { normalizeChatForResponse } from "../../packages/server/src/routes/chats.routes.js";
+import { normalizeNativeCharacterData } from "../../packages/server/src/services/import/marinara.importer.js";
 import { parseDockerDefaultGatewayIp } from "../../packages/server/src/middleware/ip-allowlist.js";
 import {
   moveBackgroundAssignment,
@@ -160,6 +223,48 @@ const backgroundOrganization = normalizeBackgroundLibraryOrganization({
     "game:backgrounds:fantasy:castle": "missing-folder",
   },
 });
+
+const comfyReferenceWorkflow = JSON.stringify({
+  first: "%reference_image_01%",
+  second: "%reference_image_02%",
+  thirdName: "%reference_image_name_03%",
+  outsideSupportedRange: "%reference_image_05%",
+});
+assert.deepEqual(findMissingComfyReferenceSlots(comfyReferenceWorkflow, "reference_image", 1), [1]);
+assert.deepEqual(findMissingComfyReferenceSlots(comfyReferenceWorkflow, "reference_image_name", 1), [2]);
+assert.equal(numberedComfyReferencePlaceholder("reference_image_name", 2), "%reference_image_name_03%");
+
+const inheritedIllustratorSetup = buildInitialAgentAddSetupState({
+  agentId: "illustrator",
+  settings: { includeCharacterAppearance: true, useAvatarReferences: false },
+  metadata: {},
+  musicPlayerSource: "off",
+  roleplaySpriteScale: 1,
+});
+const inheritedIllustratorPatch = buildAgentAddMetadataPatch(
+  "illustrator",
+  inheritedIllustratorSetup,
+  {},
+  {
+    illustratorDefaults: { includeCharacterAppearance: true, useAvatarReferences: false },
+  },
+);
+assert.equal(Object.hasOwn(inheritedIllustratorPatch, "illustratorIncludeCharacterAppearance"), false);
+assert.equal(Object.hasOwn(inheritedIllustratorPatch, "illustratorUseAvatarReferences"), false);
+
+const staleIllustratorMetadata = {
+  illustratorIncludeCharacterAppearance: true,
+  illustratorUseAvatarReferences: false,
+};
+assert.deepEqual(
+  buildAgentAddMetadataPatch("illustrator", inheritedIllustratorSetup, staleIllustratorMetadata, {
+    illustratorDefaults: { includeCharacterAppearance: true, useAvatarReferences: false },
+  }),
+  {
+    illustratorIncludeCharacterAppearance: null,
+    illustratorUseAvatarReferences: null,
+  },
+);
 assert.equal(backgroundOrganization.folders.length, 1);
 assert.equal(backgroundOrganization.assignments["user:moonlit-garden.jpg"], "folder-night");
 assert.equal(backgroundOrganization.assignments["game:backgrounds:fantasy:castle"], undefined);
@@ -222,10 +327,33 @@ assert.strictEqual(
 );
 assert.strictEqual(parseDockerDefaultGatewayIp("Iface\tDestination\tGateway\tFlags\tMetric\n"), null);
 
-assert.equal(resolveGroupGenerationMode("conversation", "individual"), "merged");
+assert.equal(resolveGroupGenerationMode("conversation", "individual"), "individual");
 assert.equal(resolveGroupGenerationMode("conversation", "merged"), "merged");
+assert.equal(
+  resolveGroupGenerationMode("conversation", undefined),
+  "merged",
+  "pre-existing Conversation groups without mode metadata must retain Grouped behavior",
+);
+assert.equal(getChatModeCapabilities("conversation").supportsGroupChatControls, true);
+assert.equal(getChatModeCapabilities("conversation").modeSections.includes("group-chat"), true);
 assert.equal(resolveGroupGenerationMode("roleplay", "individual"), "individual");
 assert.equal(resolveGroupGenerationMode("roleplay", "merged"), "merged");
+assert.equal(shouldRestoreRegenerationCharacterTarget("roleplay", "merged", ["a", "b"]), false);
+assert.equal(shouldRestoreRegenerationCharacterTarget("visual_novel", undefined, ["a", "b"]), false);
+assert.equal(shouldRestoreRegenerationCharacterTarget("roleplay", "individual", ["a", "b"]), true);
+assert.equal(shouldRestoreRegenerationCharacterTarget("roleplay", "merged", ["a"]), true);
+assert.deepEqual(resolveIllustratorImageSize({ width: 960, height: 540 }, "landscape"), {
+  width: 960,
+  height: 540,
+});
+assert.deepEqual(resolveIllustratorImageSize({ width: 540, height: 960 }, "landscape"), {
+  width: 960,
+  height: 540,
+});
+assert.deepEqual(resolveIllustratorImageSize({ width: 960, height: 540 }, "portrait"), {
+  width: 540,
+  height: 960,
+});
 
 const minimalProfessorMariPersona = buildPersonaCreateRow(
   { name: "Minimal helper persona" },
@@ -268,6 +396,55 @@ assert.deepEqual(
   "Partial character updates must not synthesize undefined fields that deepMerge treats as deletions",
 );
 
+assert.deepEqual(
+  normalizeChatForResponse({
+    id: "fresh-chat",
+    characterIds: '["character-a","character-b"]',
+    metadata: '{"tags":["saved-tag"],"gameNpcs":[]}',
+  }),
+  {
+    id: "fresh-chat",
+    characterIds: ["character-a", "character-b"],
+    metadata: { tags: ["saved-tag"], gameNpcs: [] },
+  },
+  "Fresh chat responses must expose parsed tags and character IDs",
+);
+
+assert.deepEqual(
+  updateCharacterSchema.parse({
+    data: {
+      extensions: { fav: true, depth_prompt: { prompt: "Updated only" } },
+      character_book: { name: "Renamed" },
+    },
+  }).data,
+  {
+    extensions: { fav: true, depth_prompt: { prompt: "Updated only" } },
+    character_book: { name: "Renamed" },
+  },
+  "Character PATCH parsing must not materialize omitted nested defaults",
+);
+
+assert.equal(
+  normalizeNativeCharacterData({}),
+  null,
+  "A native character import without the required name must fail before persistence",
+);
+const normalizedNativeCharacter = normalizeNativeCharacterData({
+  name: "Legacy",
+  character_book: {
+    name: "Archive",
+    custom_top_level_property: "preserved",
+  },
+});
+assert.ok(normalizedNativeCharacter);
+assert.equal(normalizedNativeCharacter.description, "");
+assert.equal(normalizedNativeCharacter.character_book?.entries.length, 0);
+assert.equal(
+  (normalizedNativeCharacter.character_book as Record<string, unknown>).custom_top_level_property,
+  "preserved",
+  "Native import normalization must preserve unknown embedded-lorebook properties",
+);
+
 const characterUpdateStorageRoot = mkdtempSync(join(tmpdir(), "marinara-character-update-preservation-"));
 const previousFileStorageDir = process.env.FILE_STORAGE_DIR;
 process.env.FILE_STORAGE_DIR = characterUpdateStorageRoot;
@@ -275,7 +452,103 @@ let closeCharacterUpdateDb: (() => Promise<void>) | null = null;
 try {
   const { closeDB, getDB } = await import("../../packages/server/src/db/connection.js");
   closeCharacterUpdateDb = closeDB;
-  const mariDb = new MariDbService(await getDB());
+  const db = await getDB();
+  const characterStorage = createCharactersStorage(db);
+  const patchFixture = characterDataSchema.parse({
+    name: "Nested patch fixture",
+    extensions: {
+      fav: false,
+      depth_prompt: { prompt: "Original", depth: 7, role: "assistant" },
+      thirdParty: { retained: true },
+    },
+    character_book: {
+      name: "Original book",
+      description: "Keep this description",
+      entries: [{ id: 9, content: "Keep this entry" }],
+      custom_top_level_property: "preserved",
+    },
+  });
+  const createdPatchFixture = await characterStorage.create(patchFixture);
+  assert.ok(createdPatchFixture);
+  const nestedPatch = updateCharacterSchema.parse({
+    data: {
+      extensions: { fav: true, depth_prompt: { prompt: "Updated only" } },
+      character_book: { name: "Renamed" },
+    },
+  });
+  const patchedFixture = await characterStorage.update(createdPatchFixture.id, nestedPatch.data);
+  assert.ok(patchedFixture);
+  const patchedFixtureData = JSON.parse(patchedFixture.data) as {
+    extensions: Record<string, unknown> & {
+      fav: boolean;
+      depth_prompt: { prompt: string; depth: number; role: string };
+      thirdParty: { retained: boolean };
+    };
+    character_book: Record<string, unknown> & {
+      name: string;
+      description: string;
+      entries: Array<{ content: string }>;
+    };
+  };
+  assert.equal(patchedFixtureData.extensions.fav, true);
+  assert.deepEqual(patchedFixtureData.extensions.depth_prompt, {
+    prompt: "Updated only",
+    depth: 7,
+    role: "assistant",
+  });
+  assert.deepEqual(patchedFixtureData.extensions.thirdParty, { retained: true });
+  assert.equal(patchedFixtureData.character_book.name, "Renamed");
+  assert.equal(patchedFixtureData.character_book.description, "Keep this description");
+  assert.equal(patchedFixtureData.character_book.entries[0]!.content, "Keep this entry");
+  assert.equal(patchedFixtureData.character_book.custom_top_level_property, "preserved");
+
+  const emptyBookFixture = await characterStorage.create(characterDataSchema.parse({ name: "Empty book fixture" }));
+  assert.ok(emptyBookFixture);
+  const createdBookFixture = await characterStorage.update(
+    emptyBookFixture.id,
+    updateCharacterSchema.parse({ data: { character_book: { name: "New book" } } }).data,
+  );
+  assert.ok(createdBookFixture);
+  const createdBookData = JSON.parse(createdBookFixture.data) as { character_book: Record<string, unknown> };
+  assert.deepEqual(createdBookData.character_book, {
+    name: "New book",
+    description: "",
+    scan_depth: 2,
+    token_budget: 512,
+    recursive_scanning: false,
+    extensions: {},
+    entries: [],
+  });
+
+  const mariDb = new MariDbService(db);
+  const customToolsStore = createCustomToolsStorage(db);
+  const agentsStore = createAgentsStorage(db);
+  const customTool = await customToolsStore.create({
+    name: "phantom_tool",
+    description: "Custom tool deletion regression fixture.",
+    parametersSchema: {},
+    executionType: "static",
+    webhookUrl: null,
+    staticResult: "fixture",
+    scriptBody: null,
+    includeHiddenContext: false,
+    enabled: true,
+  });
+  assert.ok(customTool);
+  const toolAgent = await agentsStore.create({
+    type: "custom-tool-cleanup-regression",
+    name: "Custom Tool Cleanup Regression",
+    description: "",
+    phase: "parallel",
+    connectionId: null,
+    imagePath: null,
+    promptTemplate: "",
+    settings: { enabledTools: ["phantom_tool", "roll_dice"] },
+  });
+  assert.ok(toolAgent);
+  await customToolsStore.remove(customTool.id);
+  const cleanedToolAgent = await agentsStore.getById(toolAgent.id);
+  assert.deepEqual(JSON.parse(cleanedToolAgent?.settings ?? "{}").enabledTools, ["roll_dice"]);
   const characterId = "partial-update-preservation";
   const createResult = await mariDb.executeAction({
     action: "character.create",
@@ -565,6 +838,16 @@ const autonomousSchedule = (talkativeness: number, cap: number): WeekSchedule =>
   autonomousDailyCapOverride: cap,
   talkativeness,
 });
+assert.equal(
+  dailyCapForCharacter(undefined, { autonomousDailyCapOverride: 75 }),
+  75,
+  "chat-level autonomous ceilings should accept numeric overrides above the former limit",
+);
+assert.equal(
+  dailyCapForCharacter(autonomousSchedule(90, 8), { autonomousDailyCapOverride: 75 }),
+  8,
+  "per-character safety limits should still be able to lower a numeric chat ceiling",
+);
 const autonomousChatId = "regression-autonomous-candidates";
 initializeActivityFromMessages(autonomousChatId, [
   { role: "user", createdAt: new Date(Date.now() - 5 * 60_000).toISOString() },
@@ -591,6 +874,14 @@ assert.equal(
     autonomousDailyBudget: { date: dateKey, counts: { fallback: 1 } },
   }),
   false,
+);
+assert.equal(
+  isAutonomousDailyBudgetExhausted("third-character", autonomousSchedule(70, 2), {
+    groupChatMode: "individual",
+    autonomousDailyBudget: { date: dateKey, counts: { tartaglia: 1, dottore: 1 } },
+  }),
+  true,
+  "individual Conversation groups should share one daily check-in count across their characters",
 );
 clearChatActivity(autonomousChatId);
 assert.equal(
@@ -634,6 +925,239 @@ assert.doesNotMatch(termuxLauncher, /run_pnpm install --force/u);
 assert.match(termuxLauncher, /run_pnpm store prune/u);
 assert.match(termuxLauncher, /TERMUX_REBUILD_REQUIRED/u);
 
+const sharedPackageJson = JSON.parse(
+  readFileSync(new URL("../../packages/shared/package.json", import.meta.url), "utf8"),
+) as { scripts?: Record<string, string> };
+const preserveSharedBuild = sharedPackageJson.scripts?.["build:preserve"] ?? "";
+assert.match(preserveSharedBuild, /tsconfig\.tsbuildinfo/u);
+assert.doesNotMatch(preserveSharedBuild, /\bdist\b/u);
+const serverPackageJson = JSON.parse(
+  readFileSync(new URL("../../packages/server/package.json", import.meta.url), "utf8"),
+) as { scripts?: Record<string, string> };
+assert.match(serverPackageJson.scripts?.dev ?? "", /--ignore \.\.\/shared\/dist/u);
+assert.equal(resolveDevSharedBuildScript({ DEV_PRESERVE_SHARED_DIST: "true" }), "build:preserve");
+assert.equal(resolveDevSharedBuildScript({}), "build");
+const conversationImageConnections = [
+  { id: "text", provider: "openai", defaultForAgents: true },
+  { id: "image-secondary", provider: "image_generation", defaultForAgents: false },
+  { id: "image-default", provider: "image_generation", defaultForAgents: "true" },
+];
+assert.equal(
+  resolveConversationSelfieConnectionId({
+    currentConnectionId: null,
+    selfieCommandEnabled: true,
+    connections: conversationImageConnections,
+  }),
+  "image-default",
+);
+assert.equal(
+  resolveConversationSelfieConnectionId({
+    currentConnectionId: "image-explicit",
+    selfieCommandEnabled: true,
+    connections: conversationImageConnections,
+  }),
+  "image-explicit",
+);
+assert.equal(
+  resolveConversationSelfieConnectionId({
+    currentConnectionId: null,
+    selfieCommandEnabled: false,
+    connections: conversationImageConnections,
+  }),
+  null,
+);
+assert.deepEqual(
+  resolveConversationSelfieSetup({
+    commandToggles: {},
+    selfieCommandAvailable: true,
+    selfieCommandEnabled: true,
+    currentConnectionId: null,
+    connections: conversationImageConnections,
+  }),
+  {
+    conversationCommandToggles: { selfie: true },
+    imageGenConnectionId: "image-default",
+  },
+  "Conversation setup should persist both the enabled Selfie command and its default image connection",
+);
+const conversationGroupSettingsSource = readFileSync(
+  new URL("../../packages/client/src/components/chat/ChatSettingsDrawer.tsx", import.meta.url),
+  "utf8",
+);
+const conversationGenerationSource = readFileSync(
+  new URL("../../packages/server/src/routes/generate.routes.ts", import.meta.url),
+  "utf8",
+);
+const foregroundAutonomousSource = readFileSync(
+  new URL("../../packages/client/src/hooks/use-autonomous-messaging.ts", import.meta.url),
+  "utf8",
+);
+const backgroundAutonomousSource = readFileSync(
+  new URL("../../packages/client/src/hooks/use-background-autonomous.ts", import.meta.url),
+  "utf8",
+);
+const serverAutonomousSchedulerSource = readFileSync(
+  new URL("../../packages/server/src/services/conversation/server-autonomous-scheduler.service.ts", import.meta.url),
+  "utf8",
+);
+const clientGenerationSource = readFileSync(
+  new URL("../../packages/client/src/hooks/use-generate.ts", import.meta.url),
+  "utf8",
+);
+const conversationPresenceSource = readFileSync(
+  new URL("../../packages/server/src/routes/generate/conversation-presence-runtime.ts", import.meta.url),
+  "utf8",
+);
+const professorMariHomeSource = readFileSync(
+  new URL("../../packages/client/src/components/chat/HomeProfessorMariChat.tsx", import.meta.url),
+  "utf8",
+);
+const roleplaySurfaceSource = readFileSync(
+  new URL("../../packages/client/src/components/chat/ChatRoleplaySurface.tsx", import.meta.url),
+  "utf8",
+);
+const themesRouteSource = readFileSync(
+  new URL("../../packages/server/src/routes/themes.routes.ts", import.meta.url),
+  "utf8",
+);
+assert.doesNotMatch(conversationGroupSettingsSource, /Reply When Mentioned/u);
+assert.doesNotMatch(conversationGroupSettingsSource, /label="Cross-Chat Awareness"/u);
+assert.match(conversationGroupSettingsSource, /Individual replies can use many tokens/u);
+assert.match(
+  conversationGroupSettingsSource,
+  /chatCharIds\.length > 1 && modeCapabilities\.supportsGroupChatControls/u,
+  "pre-existing multi-character Conversation chats must show Group Chat settings without requiring mode metadata",
+);
+assert.match(
+  conversationGroupSettingsSource,
+  /if \(!\(await flushProseGuardianDrafts\(\)\)\) return;[\s\S]{0,250}onClose\(\)/u,
+  "Closing Chat Settings must persist changed Prose Guardian preferences before unmounting the drawer",
+);
+assert.match(
+  clientGenerationSource,
+  /await waitForPendingChatMetadataSaves\(params\.chatId\);[\s\S]{0,250}api\.streamEvents\(\s*"\/generate"/u,
+  "swipe generation must wait for Prose Guardian settings blurred from the open drawer",
+);
+
+const metadataSaveOrder: string[] = [];
+let releaseFirstMetadataSave!: () => void;
+const firstMetadataSaveBlocker = new Promise<void>((resolve) => {
+  releaseFirstMetadataSave = resolve;
+});
+const firstMetadataSave = trackChatMetadataSave("chat-prose-swipe", async () => {
+  await firstMetadataSaveBlocker;
+  metadataSaveOrder.push("first");
+});
+const secondMetadataSave = trackChatMetadataSave("chat-prose-swipe", async () => {
+  metadataSaveOrder.push("second");
+});
+let metadataWaitFinished = false;
+const pendingMetadataWait = waitForPendingChatMetadataSaves("chat-prose-swipe").then(() => {
+  metadataWaitFinished = true;
+});
+await Promise.resolve();
+assert.equal(metadataWaitFinished, false, "swipe generation should remain blocked while preferences are saving");
+releaseFirstMetadataSave();
+await Promise.all([firstMetadataSave, secondMetadataSave, pendingMetadataWait]);
+assert.deepEqual(metadataSaveOrder, ["first", "second"]);
+assert.match(
+  conversationGroupSettingsSource,
+  /\{!isConversation && \(\s*<button[\s\S]{0,1500}Name Prefix History/u,
+  "Conversation group settings should not show the roleplay-only Name Prefix History toggle",
+);
+assert.match(
+  conversationPresenceSource,
+  /respondingConvoCharInfo = respondingConvoCharInfo\.filter\(\s*\(character\) => effectiveStatus\(character\) !== "offline"/u,
+  "Conversation response selection should remove offline characters before Sequential or Smart ordering",
+);
+assert.match(
+  conversationGenerationSource,
+  /Choose one or more available characters[\s\S]{0,500}current schedule status[\s\S]{0,500}talkativeness/u,
+  "Conversation Smart ordering should use a schedule-aware selector prompt",
+);
+assert.match(
+  conversationGenerationSource,
+  /smartResponseQueue\?\.length\s*\? \[\.\.\.smartResponseQueue\]/u,
+  "Smart ordering should generate every character selected by the responder queue",
+);
+assert.match(
+  conversationGenerationSource,
+  /In a larger group, do not default to one responder merely because the group is large/u,
+  "Conversation Smart ordering should not bias larger groups toward one responder",
+);
+assert.match(
+  conversationGenerationSource,
+  /scanConversationLorebooks[\s\S]{0,1000}characterIds: targetCharacterIds/u,
+  "Individual Conversation lorebook scans should use only the current responder's character tags",
+);
+assert.match(
+  conversationGenerationSource,
+  /prepareConversationLorebookForResponder[\s\S]{0,1000}scanConversationLorebooks\(\[targetCharId\], \{ previewOnly: true \}\)/u,
+  "Individual Conversation lorebook scans should receive only the current responder ID",
+);
+assert.match(
+  conversationGenerationSource,
+  /let gameAwareMessagesForGen = await prepareConversationLorebookForResponder\(targetCharId, messagesForGen\)/u,
+  "Individual Conversation lorebook injection should happen separately for each provider generation",
+);
+assert.match(
+  conversationGenerationSource,
+  /chatMode === "conversation" && otherNames\.length > 0[\s\S]{0,500}fullResponse = fullResponse\.slice\(0, nextSpeakerMatch\.index\)/u,
+  "Individual Conversation generations should discard an extra character turn returned in the same completion",
+);
+for (const [source, lane] of [
+  [foregroundAutonomousSource, "foreground"],
+  [backgroundAutonomousSource, "background"],
+  [serverAutonomousSchedulerSource, "server scheduler"],
+] as const) {
+  assert.match(
+    source,
+    /forCharacterId: characterId/u,
+    `Conversation ${lane} autonomous generation must target one character`,
+  );
+}
+assert.match(
+  foregroundAutonomousSource,
+  /triggerAutonomousGeneration\(exchange\.characterIds\[0\]!\)/u,
+  "Character Exchanges should start a separate targeted Individual generation",
+);
+assert.match(
+  conversationGenerationSource,
+  /explicitlyMentionedConversationCharacterIds\.length > 0\s*\? explicitlyMentionedConversationCharacterIds/u,
+  "explicit Conversation mentions should select the mentioned responders before the stored response order",
+);
+assert.match(
+  conversationGenerationSource,
+  /resolveIllustratorImageSize\(\s*imageSettings\.illustration,\s*illData\.aspectRatio/u,
+  "automatic Illustrator generation should use the same orientation resolver as manual Gallery generation",
+);
+assert.match(professorMariHomeSource, /Math\.min\(textarea\.scrollHeight, 128\)/u);
+assert.equal(
+  themesRouteSource.match(/requirePrivilegedAccess\(req, reply, \{ feature: "Theme install\/update\/delete" \}\)/gu)
+    ?.length,
+  3,
+  "theme installation, editing, and deletion should remain privileged while activation works from mobile clients",
+);
+const activeThemeHandler = themesRouteSource.match(
+  /app\.put\("\/active", async \(req, reply\) => \{([\s\S]*?)\n  \}\);/u,
+)?.[1];
+assert.ok(activeThemeHandler, "the active theme handler should remain available");
+assert.match(activeThemeHandler, /const input = setActiveThemeSchema\.parse\(req\.body\);/u);
+assert.doesNotMatch(
+  activeThemeHandler,
+  /requirePrivilegedAccess/u,
+  "selecting an already-installed theme should not require privileged loopback access",
+);
+assert.equal(
+  roleplaySurfaceSource.match(/object-fill object-center max-md:object-cover/gu)?.length,
+  2,
+  "both crossfade slots should preserve mobile background proportions without changing desktop sizing",
+);
+const playwrightWebServer = Array.isArray(playwrightConfig.webServer)
+  ? playwrightConfig.webServer[0]
+  : playwrightConfig.webServer;
+assert.equal(playwrightWebServer?.env?.DEV_PRESERVE_SHARED_DIST, "true");
+
 const appSource = readFileSync(new URL("../../packages/client/src/App.tsx", import.meta.url), "utf8");
 const agentEditorSource = readFileSync(
   new URL("../../packages/client/src/components/agents/AgentEditor.tsx", import.meta.url),
@@ -641,6 +1165,22 @@ const agentEditorSource = readFileSync(
 );
 const characterEditorSource = readFileSync(
   new URL("../../packages/client/src/components/characters/CharacterEditor.tsx", import.meta.url),
+  "utf8",
+);
+const personaEditorSource = readFileSync(
+  new URL("../../packages/client/src/components/personas/PersonaEditor.tsx", import.meta.url),
+  "utf8",
+);
+const fileDownloadSource = readFileSync(
+  new URL("../../packages/client/src/lib/file-download.ts", import.meta.url),
+  "utf8",
+);
+const spriteDownloadSource = readFileSync(
+  new URL("../../packages/client/src/lib/sprite-download.ts", import.meta.url),
+  "utf8",
+);
+const androidMainActivitySource = readFileSync(
+  new URL("../../android/app/src/main/java/com/marinara/engine/MainActivity.java", import.meta.url),
   "utf8",
 );
 const gameJournalSource = readFileSync(
@@ -667,9 +1207,33 @@ const connectionsPanelSource = readFileSync(
   new URL("../../packages/client/src/components/panels/ConnectionsPanel.tsx", import.meta.url),
   "utf8",
 );
+const presetsPanelSource = readFileSync(
+  new URL("../../packages/client/src/components/panels/PresetsPanel.tsx", import.meta.url),
+  "utf8",
+);
+const transcriptWindowControlsSource = readFileSync(
+  new URL("../../packages/client/src/components/chat/TranscriptWindowControls.tsx", import.meta.url),
+  "utf8",
+);
+const localMusicPlayerSource = readFileSync(
+  new URL("../../packages/client/src/components/chat/LocalMusicPlayer.tsx", import.meta.url),
+  "utf8",
+);
+const localNotificationsSource = readFileSync(
+  new URL("../../packages/client/src/lib/local-notifications.ts", import.meta.url),
+  "utf8",
+);
+const notificationSettingsSource = readFileSync(
+  new URL("../../packages/client/src/components/panels/settings/SettingControls.tsx", import.meta.url),
+  "utf8",
+);
 const globalStyles = readFileSync(new URL("../../packages/client/src/styles/globals.css", import.meta.url), "utf8");
 const galleryRoutesSource = readFileSync(
   new URL("../../packages/server/src/routes/gallery.routes.ts", import.meta.url),
+  "utf8",
+);
+const gameAssetsRoutesSource = readFileSync(
+  new URL("../../packages/server/src/routes/game-assets.routes.ts", import.meta.url),
   "utf8",
 );
 const conversationSelfieRuntimeSource = readFileSync(
@@ -680,12 +1244,44 @@ assert.match(appSource, /--marinara-app-accent-static-gradient/u);
 assert.match(appSource, /swipeDirections=\{\["left", "right", "top"\]\}/u);
 assert.doesNotMatch(agentEditorSource, /fetch\(["']\/api\/game-assets\/pick-local-music-folder/u);
 assert.match(agentEditorSource, /api\.post<[^>]+>\(["']\/game-assets\/pick-local-music-folder["']\)/u);
+assert.match(localMusicPlayerSource, /api\.raw\(`\/game-assets\/local-music-file\?path=\$\{encodedPath\}`\)/u);
+assert.match(localMusicPlayerSource, /URL\.createObjectURL\(await response\.blob\(\)\)/u);
+assert.match(localMusicPlayerSource, /URL\.revokeObjectURL/u);
+assert.doesNotMatch(localMusicPlayerSource, /return `\/api\/game-assets\/local-music-file/u);
+assert.match(gameAssetsRoutesSource, /app\.get\("\/local-music-file"/u);
+assert.match(gameAssetsRoutesSource, /const \{ path: encoded \} = \(req\.query as \{ path\?: string \}\)/u);
+assert.doesNotMatch(gameAssetsRoutesSource, /app\.get\("\/local-music-file\/:encoded"/u);
 assert.match(characterEditorSource, /avatar preview/u);
 assert.match(characterEditorSource, /getAvatarCropStyle/u);
+assert.match(characterEditorSource, /downloadSpriteFile/u);
+assert.match(personaEditorSource, /downloadSpriteFile/u);
+assert.match(characterEditorSource, /if \(uploading \|\| !expression\) return;/u);
+assert.match(personaEditorSource, /if \(uploading \|\| !expression\) return;/u);
+assert.match(characterEditorSource, /className="flex flex-col gap-2 sm:flex-row"/u);
+assert.match(personaEditorSource, /className="flex flex-col gap-2 sm:flex-row"/u);
+assert.match(fileDownloadSource, /MarinaraAndroid/u);
+assert.match(spriteDownloadSource, /saveBlobToDevice/u);
+assert.match(androidMainActivitySource, /public void saveFile\(String base64Data, String mimeType, String filename\)/u);
+assert.match(androidMainActivitySource, /MediaStore\.Images\.Media\.getContentUri/u);
 assert.match(
   characterEditorSource,
   /"relative flex h-16 w-16 shrink-0 items-center justify-center overflow-hidden rounded-xl/u,
   "The Metadata avatar preview must contain absolutely positioned saved crops",
+);
+assert.match(
+  globalStyles,
+  /\.mari-editor-avatar-tile \{\s*position: relative;\s*cursor: pointer;/u,
+  "The shared editor avatar upload target must contain absolutely positioned crops",
+);
+assert.equal(
+  characterEditorSource.match(/className="pointer-events-none h-full w-full object-cover"/gu)?.length,
+  2,
+  "Character avatar images inside upload targets must not intercept page clicks",
+);
+assert.equal(
+  personaEditorSource.match(/className="pointer-events-none h-full w-full object-cover"/gu)?.length,
+  1,
+  "The Persona header avatar inside its upload target must not intercept page clicks",
 );
 assert.match(gameJournalSource, /data-game-journal-scroll/u);
 assert.match(gameSurfaceSource, /h-\[min\(42rem,calc\(100dvh-6rem\)\)\]/u);
@@ -695,6 +1291,24 @@ assert.doesNotMatch(gameAssetStoreSource, /api\.|fetchManifest|rescanAssets|\/ga
 assert.match(sidecarStoreSource, /consumeSidecarDownloadStream/u);
 assert.doesNotMatch(sidecarStoreSource, /readSseData|Best-effort delete|Best-effort unload/u);
 assert.match(connectionsPanelSource, /Failed to delete the Local Whisper model/u);
+assert.match(presetsPanelSource, /MARINARA_UNIVERSAL_PRESET_ARTWORK/u);
+assert.match(
+  presetsPanelSource,
+  /preset\.name === MARINARA_UNIVERSAL_PRESET_NAME && preset\.author === MARINARA_UNIVERSAL_PRESET_AUTHOR/u,
+);
+assert.equal(
+  existsSync(join(REPOSITORY_ROOT, "packages/client/public/illustrations/marinara-universal-preset.webp")),
+  true,
+);
+assert.match(
+  transcriptWindowControlsSource,
+  /const TRANSCRIPT_WINDOW_BUTTON_CLASS = "mari-chrome-control mari-chrome-control--small px-3 text-xs";/u,
+);
+assert.equal(
+  transcriptWindowControlsSource.match(/className=\{cn\(TRANSCRIPT_WINDOW_BUTTON_CLASS, buttonClassName\)\}/gu)?.length,
+  3,
+);
+assert.doesNotMatch(transcriptWindowControlsSource, /text-\[var\(--muted-foreground\)\]/u);
 assert.match(galleryRoutesSource, /resolveIllustratorPromptRuntime\(\{[\s\S]*chatMetadata: meta/u);
 assert.match(
   conversationSelfieRuntimeSource,
@@ -709,10 +1323,58 @@ assert.match(
   /\[data-marinara-accent-animation\] :where\(\.mari-editor-shell, select\) \{[\s\S]*--primary: var\(--marinara-app-accent-static\);[\s\S]*--marinara-chat-chrome-accent: var\(--marinara-app-accent-static\);[\s\S]*\}/u,
 );
 assert.match(globalStyles, /\[data-marinara-accent-animation\] select \{\s*transition: none;\s*\}/u);
+const markdownBlockquoteStyles =
+  globalStyles.match(/\.mari-message-content \.mari-md-blockquote \{[\s\S]*?\}/u)?.[0] ?? "";
+assert.match(markdownBlockquoteStyles, /color:\s*inherit;/u);
+assert.doesNotMatch(markdownBlockquoteStyles, /color:\s*var\(--muted-foreground\);/u);
+const markdownMessageStyles = globalStyles.match(/\.mari-message-content \{[\s\S]*?\}/u)?.[0] ?? "";
+const markdownMessageContainerStyles =
+  globalStyles.match(/\.mari-message-body,\s*\.mari-message-bubble \{[\s\S]*?\}/u)?.[0] ?? "";
+const markdownCodeBlockStyles =
+  globalStyles.match(/\.mari-message-content \.mari-md-codeblock \{[\s\S]*?\}/u)?.[0] ?? "";
+assert.match(markdownMessageStyles, /min-width:\s*0;/u);
+assert.match(markdownMessageStyles, /max-width:\s*100%;/u);
+assert.match(markdownMessageStyles, /overflow-wrap:\s*anywhere;/u);
+assert.match(markdownMessageContainerStyles, /min-width:\s*0;/u);
+assert.match(markdownMessageContainerStyles, /max-width:\s*100%;/u);
+assert.match(markdownCodeBlockStyles, /box-sizing:\s*border-box;/u);
+assert.match(markdownCodeBlockStyles, /width:\s*100%;/u);
+assert.match(markdownCodeBlockStyles, /max-width:\s*100%;/u);
+assert.match(markdownCodeBlockStyles, /overflow-x:\s*auto;/u);
+assert.match(
+  globalStyles,
+  /@media \(max-width: 767px\) \{[\s\S]*?\.mari-message-content \.mari-md-codeblock \{[\s\S]*?overflow-x:\s*hidden;[\s\S]*?white-space:\s*pre-wrap;/u,
+);
+assert.match(localNotificationsSource, /window\.isSecureContext === false/u);
+assert.match(localNotificationsSource, /NotificationPermission \| "insecure" \| "unsupported"/u);
+const browserNotificationHelpSource =
+  notificationSettingsSource.match(/const browserNotificationHelp =[\s\S]*?;\n/u)?.[0] ?? "";
+assert.match(browserNotificationHelpSource, /Browser notifications require HTTPS or localhost/u);
+assert.match(browserNotificationHelpSource, /Browser notifications are not available in this environment/u);
+assert.match(browserNotificationHelpSource, /Reset this site's notification permission/u);
 
 assert.equal(stripLeadingMessageTimestamps("[11.07 15:53] Character: Hello!"), "Character: Hello!");
 assert.equal(stripLeadingMessageTimestamps("[11.07.2026 15:53] Character: Hello!"), "Character: Hello!");
 assert.equal(stripConversationPromptTimestamps("[11.07 15:53] Character: Hello!"), "Character: Hello!");
+assert.equal(
+  isRepeatedConversationResponse(
+    [
+      {
+        role: "assistant",
+        characterId: "dottore",
+        content: "The experiment remains stable after every measured interval.",
+      },
+      {
+        role: "assistant",
+        characterId: "dottore",
+        content: "A different observation separates the two matching responses.",
+      },
+    ],
+    "dottore",
+    "The experiment remains stable after every measured interval.",
+  ),
+  true,
+);
 assert.equal(
   stripConversationResponseEnvelope("[11.07 15:53] Character: Hello!", { speakerName: "Character" }),
   "Hello!",
@@ -723,6 +1385,20 @@ assert.equal(
     preserveSpeakerPrefix: true,
   }),
   "Character: Hello!",
+);
+assert.equal(
+  collapseDuplicateConversationSpeakerPrefixes(
+    "Dottore: Dottore: The procedure is complete.\nPantalone: Pantalone: At what cost?",
+    ["Dottore", " Pantalone ", "Dottore"],
+  ),
+  "Dottore: The procedure is complete.\nPantalone: At what cost?",
+);
+assert.equal(
+  stripConversationResponseEnvelope("Dottore: Dottore: The procedure is complete.", {
+    speakerName: "Dottore",
+    speakerNames: ["Dottore", "Pantalone"],
+  }),
+  "The procedure is complete.",
 );
 assert.equal(
   stripLeadingMessageTimestamps("We meet at [11.07 15:53] by the station."),
@@ -750,7 +1426,10 @@ assert.deepEqual(splitGroupedSegmentDisplayLines(inheritedGroupConversationSegme
   "i was thinking about that",
 ]);
 assert.deepEqual(
-  splitGroupedSegmentDisplayLines({ ...inheritedGroupConversationSegments![0]!, lines: ["so anyway\r\nstill thinking"] }),
+  splitGroupedSegmentDisplayLines({
+    ...inheritedGroupConversationSegments![0]!,
+    lines: ["so anyway\r\nstill thinking"],
+  }),
   ["so anyway", "still thinking"],
 );
 const annotatedPartiallyPrefixedReply = annotateContentWithReactions(
@@ -779,13 +1458,19 @@ assert.equal(
 );
 assert.equal(bulkUpdateLorebookEntriesSchema.safeParse({ entryIds: ["entry-1"], changes: {} }).success, false);
 
-assert.equal(parsePureTemperatureValue("15°C"), 15);
-assert.equal(parsePureTemperatureValue("59 Fahrenheit"), 15);
-assert.equal(parsePureTemperatureValue("Around 15°C, windy skies ahead"), null);
+assert.equal(getTemperatureGaugeDisplay("15°C", "celsius").label, "15°C");
+assert.equal(getTemperatureGaugeDisplay("59 Fahrenheit", "celsius").label, "15°C");
+assert.equal(getTemperatureGaugeDisplay("15°C", "celsius").isPure, true);
+assert.equal(getTemperatureGaugeDisplay("Around 15°C, windy skies ahead", "celsius").isPure, false);
 assert.equal(
   getTemperatureGaugeDisplay("Around 15°C, windy skies ahead", "celsius").label,
   "Around 15°C, windy skies ahead",
 );
+assert.equal(classifyWorldWeather("snowstorm"), "snow");
+assert.equal(classifyWorldWeather("sandstorm"), "sand");
+assert.equal(classifyWorldWeather("firestorm"), "fire");
+assert.equal(classifyWorldWeather("windstorm"), "wind");
+assert.equal(classifyWorldWeather("storm"), "heavy-rain");
 
 const replayMessages = [
   { id: "start", chatId: "session-1", role: "user", content: "[start game]" },
@@ -838,9 +1523,28 @@ const replayStoryboardFrames = [
   { id: "frame-1", index: 0, sectionStartIndex: 0, sectionEndIndex: 1 },
   { id: "frame-3", index: 2, sectionStartIndex: 5, sectionEndIndex: 5 },
 ] as Parameters<typeof findReplayStoryboardKeyframe>[0];
+assert.equal(findReplayStoryboardKeyframe([], 0), null);
 assert.equal(findReplayStoryboardKeyframe(replayStoryboardFrames, null)?.id, "frame-1");
 assert.equal(findReplayStoryboardKeyframe(replayStoryboardFrames, 3)?.id, "frame-2");
 assert.equal(findReplayStoryboardKeyframe(replayStoryboardFrames, 4)?.id, "frame-3");
+
+const unanchoredReplayStoryboardFrames = [
+  { id: "unanchored-2", index: 2 },
+  { id: "unanchored-1", index: 1 },
+] as Parameters<typeof findReplayStoryboardKeyframe>[0];
+assert.equal(findReplayStoryboardKeyframe(unanchoredReplayStoryboardFrames, 4)?.id, "unanchored-1");
+
+const overlappingReplayStoryboardFrames = [
+  { id: "overlap-2", index: 2, sectionStartIndex: 1, sectionEndIndex: 5 },
+  { id: "overlap-1", index: 1, sectionStartIndex: 2, sectionEndIndex: 4 },
+] as Parameters<typeof findReplayStoryboardKeyframe>[0];
+assert.equal(findReplayStoryboardKeyframe(overlappingReplayStoryboardFrames, 3)?.id, "overlap-1");
+
+const tiedReplayStoryboardFrames = [
+  { id: "right", index: 2, sectionStartIndex: 6, sectionEndIndex: 6 },
+  { id: "left", index: 1, sectionStartIndex: 2, sectionEndIndex: 2 },
+] as Parameters<typeof findReplayStoryboardKeyframe>[0];
+assert.equal(findReplayStoryboardKeyframe(tiedReplayStoryboardFrames, 4)?.id, "left");
 
 const replaySessionChats = [
   {
@@ -961,6 +1665,44 @@ const retryAgentsPromptReviewSource = readFileSync(
   new URL("../../packages/server/src/routes/generate/retry-agents-route.ts", import.meta.url),
   "utf8",
 );
+const uiStoreSource = readFileSync(new URL("../../packages/client/src/stores/ui.store.ts", import.meta.url), "utf8");
+const syncedSettingsSource = uiStoreSource.slice(
+  uiStoreSource.indexOf("export function pickSyncedSettings"),
+  uiStoreSource.indexOf("export const useUIStore"),
+);
+assert.equal(
+  shouldAutomaticallyRetryAgentResult({ success: false, error: "The operation was aborted due to timeout" }),
+  false,
+  "timed-out agents should settle as failures instead of starting another full timeout window",
+);
+assert.equal(
+  shouldAutomaticallyRetryAgentResult({ success: false, error: "Agent returned invalid JSON" }),
+  true,
+  "ordinary agent failures should retain the existing one-time automatic retry",
+);
+assert.equal(
+  shouldAutomaticallyRetryAgentResult({ success: true, error: null }),
+  false,
+  "successful agents should never enter the automatic retry queue",
+);
+assert.deepEqual(openRouterModalities("krea/krea-2-large"), ["image"]);
+assert.deepEqual(openRouterModalities(" KREA/krea-2-medium-turbo "), ["image"]);
+assert.deepEqual(openRouterModalities("google/gemini-3.1-flash-image-preview"), ["image", "text"]);
+assert.deepEqual(
+  filterCustomEmojisByName(
+    [
+      { name: "MariWave", id: "wave" },
+      { name: "dottore_stare", id: "stare" },
+    ],
+    "mari",
+  ),
+  [{ name: "MariWave", id: "wave" }],
+);
+assert.match(
+  syncedSettingsSource,
+  /gameTextEffectsEnabled: state\.gameTextEffectsEnabled/,
+  "Game text effects must remain off after synced settings are restored",
+);
 assert.match(chatAreaPromptReviewSource, /MEDIA_PROMPT_PREVIEW_TIMEOUT_MS/);
 assert.match(chatAreaPromptReviewSource, /confirmRoleplayVideoPromptReview/);
 assert.match(chatAreaPromptReviewSource, /confirmConversationSelfiePromptReview/);
@@ -971,6 +1713,28 @@ assert.match(
   /item\.negativePrompt !== undefined \|\| negativePrompt \? \{ negativePrompt \} : \{\}/,
 );
 assert.match(retryAgentsPromptReviewSource, /\[debug\/retry-agents\/illustrator\] final prompt/);
+assert.match(
+  retryAgentsPromptReviewSource,
+  /const\s+retryAgentConnectionCache\s*=\s*new\s+Map<string,\s*RetryAgentConnectionResolution>\(\);/,
+  "retry agent resolution should reuse provider wrappers for the same stored connection",
+);
+assert.match(retryAgentsPromptReviewSource, /retryAgentConnectionCache\.get\(connectionId\)/);
+assert.match(retryAgentsPromptReviewSource, /retryAgentConnectionCache\.set\(connectionId, resolution\)/);
+assert.match(
+  chatAreaPromptReviewSource,
+  /agentPromptTemplateIds:\s*\{\s*illustrator:\s*"background"\s*\}/,
+  "the Gallery Background action should run Illustrator with its background prompt mode",
+);
+assert.doesNotMatch(
+  chatAreaPromptReviewSource,
+  /"\/backgrounds\/generate-scene"/,
+  "the Gallery Background action should not bypass Illustrator through direct scene generation",
+);
+assert.match(
+  retryAgentsPromptReviewSource,
+  /\.\.\.normalizeAgentPromptTemplateSelectionMap\(agentPromptTemplateIds\)/,
+  "manual retries should apply per-run prompt mode overrides",
+);
 
 const sharedGameSetupSource: GameSetupShareSource = {
   gameName: "Tower Run",
@@ -979,6 +1743,8 @@ const sharedGameSetupSource: GameSetupShareSource = {
     setting: "A city built around a shifting dungeon tower",
     tone: "Heroic, dark, comedic",
     difficulty: "normal",
+    combatStyle: "tactical",
+    spatialMapInstructions: "Build a shifting tower with a market ward and flooded catacombs.",
     rating: "nsfw",
     playerGoals: "Become an elite dungeon conqueror",
     gmMode: "standalone",
@@ -1038,6 +1804,8 @@ assert.match(sharedGameSetup, /Max Tokens: 16384/u);
 assert.match(sharedGameSetup, /gpt-5\.6-sol/iu);
 assert.match(sharedGameSetup, /Use clear progression and frequent loot rewards/u);
 assert.match(sharedGameSetup, /Dungeon Lore/u);
+assert.match(sharedGameSetup, /Combat style: Tactical/u);
+assert.match(sharedGameSetup, /Build a shifting tower with a market ward and flooded catacombs\./u);
 assert.match(sharedGameSetup, /"startingValue": 3/u);
 assert.doesNotMatch(
   sharedGameSetup,
@@ -1078,6 +1846,11 @@ assert.equal(exportedGameSetup.exportedAt, "2026-07-16T12:00:00.000Z");
 assert.equal(parsedGameSetup.setup.effectiveGenerationParameters?.temperature, 1.1);
 assert.equal(parsedGameSetup.setup.effectiveGenerationParameters?.maxContext, 128000);
 assert.deepEqual(parsedGameSetup.setup.effectiveGenerationParameters?.stopSequences, ["[END]"]);
+assert.equal(resolvedGameSetup.config.combatStyle, "tactical");
+assert.equal(
+  resolvedGameSetup.config.spatialMapInstructions,
+  "Build a shifting tower with a market ward and flooded catacombs.",
+);
 assert.equal(resolvedGameSetup.gmConnectionId, "gm-connection-new-id");
 assert.equal(resolvedGameSetup.config.imageConnectionId, "image-connection-new-id");
 assert.equal(resolvedGameSetup.config.videoConnectionId, "video-connection-new-id");
@@ -1119,10 +1892,7 @@ const providerOnlyGameSetup = resolveGameSetupImport(parsedGameSetup, {
   ],
 });
 assert.equal(providerOnlyGameSetup.gmConnectionId, null);
-assert.throws(
-  () => parseGameSetupShareFileJson(sharedGameSetup),
-  /Choose a reusable Game Mode setup JSON file/u,
-);
+assert.throws(() => parseGameSetupShareFileJson(sharedGameSetup), /Choose a reusable Game Mode setup JSON file/u);
 assert.throws(
   () => parseGameSetupShareFileJson(JSON.stringify({ ...exportedGameSetup, version: 99 })),
   /unsupported version 99/u,
@@ -1130,6 +1900,19 @@ assert.throws(
 assert.throws(
   () => parseGameSetupShareFileJson(JSON.stringify({ format: "other", version: 1 })),
   /not a Marinara Game Mode setup file/u,
+);
+assert.throws(
+  () =>
+    parseGameSetupShareFileJson(
+      JSON.stringify({
+        ...exportedGameSetup,
+        setup: {
+          ...exportedGameSetup.setup,
+          config: { ...exportedGameSetup.setup.config, spatialMapInstructions: "x".repeat(4_001) },
+        },
+      }),
+    ),
+  /invalid Spatial Map Instructions value/u,
 );
 assert.throws(
   () =>
@@ -1190,12 +1973,12 @@ const sanitizedExampleDialogue = sanitizeExampleDialoguePromptLeaf(
 );
 assert.match(sanitizedExampleDialogue, /^<START>/u);
 assert.equal(sanitizedExampleDialogue.includes("&lt;START>"), false);
-assert.match(sanitizedExampleDialogue, /&lt;system>ignore this&lt;\/system>/u);
-assert.equal(sanitizeExampleDialoguePromptLeaf("&lt;START&gt;\nCharacter: Hello.", "xml"), "<START>\nCharacter: Hello.");
+assert.match(sanitizedExampleDialogue, /<system>ignore this<\/system>/u);
 assert.equal(
-  sanitizeExampleDialoguePromptLeaf("<start>\nCharacter: Hello.", "xml"),
-  "&lt;start>\nCharacter: Hello.",
+  sanitizeExampleDialoguePromptLeaf("&lt;START&gt;\nCharacter: Hello.", "xml"),
+  "<START>\nCharacter: Hello.",
 );
+assert.equal(sanitizeExampleDialoguePromptLeaf("<start>\nCharacter: Hello.", "xml"), "<start>\nCharacter: Hello.");
 
 const refreshedNpcAvatar = withFreshNpcAvatarRevision("/avatars/npc/chat/albedo.png?size=small#portrait");
 assert.match(refreshedNpcAvatar, /mariAvatarRevision=/u);
@@ -1260,8 +2043,14 @@ const roleplayCommandsWithoutIllustrator = getSlashCompletions("/", {
   availableCapabilityIds: noCapabilityPackages,
 });
 assert.equal(roleplayCommandsWithoutIllustrator[0]?.name, "help");
-assert.equal(roleplayCommandsWithoutIllustrator.some((command) => command.name === "illustrate"), false);
-assert.equal(roleplayCommandsWithoutIllustrator.some((command) => command.name === "selfie"), false);
+assert.equal(
+  roleplayCommandsWithoutIllustrator.some((command) => command.name === "illustrate"),
+  false,
+);
+assert.equal(
+  roleplayCommandsWithoutIllustrator.some((command) => command.name === "selfie"),
+  false,
+);
 assert.equal(
   getSlashCompletions("/", {
     mode: "roleplay",
@@ -1565,37 +2354,192 @@ assert.equal(detectNovelAiSubjectCount("2girls, 1boy, outdoors | first | second 
 assert.equal(detectNovelAiSubjectCount("cinematic scene | first character | second character"), 2);
 assert.equal(detectNovelAiSubjectCount("empty landscape"), null);
 assert.deepEqual(
-  resolveNovelAiSize(
-    { prompt: "1girl", width: 1216, height: 832 },
-    "1girl",
-    { ...DEFAULT_NOVELAI_DEFAULTS, dynamicResolutionBySubjectCount: true },
-  ),
+  resolveNovelAiSize({ prompt: "1girl", width: 1216, height: 832 }, "1girl", {
+    ...DEFAULT_NOVELAI_DEFAULTS,
+    dynamicResolutionBySubjectCount: true,
+  }),
   { width: 832, height: 1216 },
 );
 assert.deepEqual(
-  resolveNovelAiSize(
-    { prompt: "2girls", width: 832, height: 1216 },
-    "2girls",
-    { ...DEFAULT_NOVELAI_DEFAULTS, dynamicResolutionBySubjectCount: true },
-  ),
+  resolveNovelAiSize({ prompt: "2girls", width: 832, height: 1216 }, "2girls", {
+    ...DEFAULT_NOVELAI_DEFAULTS,
+    dynamicResolutionBySubjectCount: true,
+  }),
   { width: 1024, height: 1024 },
 );
 assert.deepEqual(
-  resolveNovelAiSize(
-    { prompt: "1girl, 1boy, 1other", width: 832, height: 1216 },
-    "1girl, 1boy, 1other",
-    { ...DEFAULT_NOVELAI_DEFAULTS, dynamicResolutionBySubjectCount: true },
-  ),
+  resolveNovelAiSize({ prompt: "1girl, 1boy, 1other", width: 832, height: 1216 }, "1girl, 1boy, 1other", {
+    ...DEFAULT_NOVELAI_DEFAULTS,
+    dynamicResolutionBySubjectCount: true,
+  }),
   { width: 1216, height: 832 },
 );
 assert.deepEqual(
-  resolveNovelAiSize(
-    { prompt: "1girl", width: 1024, height: 1024 },
-    "1girl",
-    { ...DEFAULT_NOVELAI_DEFAULTS, dynamicResolutionBySubjectCount: false },
-  ),
+  resolveNovelAiSize({ prompt: "1girl", width: 1024, height: 1024 }, "1girl", {
+    ...DEFAULT_NOVELAI_DEFAULTS,
+    dynamicResolutionBySubjectCount: false,
+  }),
   { width: 1024, height: 1024 },
 );
+const legacyNovelAiProfile = {
+  version: 1,
+  service: "novelai",
+  seed: -1,
+  novelai: { promptPrefix: "2girls" },
+} as unknown as ImageGenerationDefaultsProfile;
+assert.deepEqual(resolveNovelAiDefaults({ prompt: "1boy", imageDefaults: legacyNovelAiProfile }), {
+  ...DEFAULT_NOVELAI_DEFAULTS,
+  promptPrefix: "2girls",
+});
+assert.deepEqual(
+  resolveNovelAiSize({ prompt: "1boy", width: 1216, height: 832, imageDefaults: legacyNovelAiProfile }),
+  { width: 832, height: 1216 },
+);
+const nativeNovelAiConnection = {
+  baseUrl: "https://image.novelai.net",
+  model: "nai-diffusion-4-5-full",
+  imageService: "novelai",
+};
+const prefixedNovelAiProfile = {
+  version: 1,
+  service: "novelai",
+  seed: -1,
+  novelai: { ...DEFAULT_NOVELAI_DEFAULTS, promptPrefix: "2girls" },
+} satisfies ImageGenerationDefaultsProfile;
+assert.deepEqual(
+  resolveNovelAiRequestSize({
+    prompt: "1boy",
+    width: 1216,
+    height: 832,
+    model: nativeNovelAiConnection.model,
+    imageDefaults: prefixedNovelAiProfile,
+  }),
+  { width: 832, height: 1216 },
+);
+assert.deepEqual(
+  resolveImagePromptReviewSize({
+    connection: nativeNovelAiConnection,
+    prompt: "1boy",
+    width: 1216,
+    height: 832,
+    imageDefaults: prefixedNovelAiProfile,
+  }),
+  { width: 832, height: 1216 },
+);
+assert.deepEqual(
+  resolveImagePromptReviewSize({
+    connection: nativeNovelAiConnection,
+    prompt: "1girl, 1boy, 1other",
+    width: 832,
+    height: 1216,
+    imageDefaults: prefixedNovelAiProfile,
+  }),
+  { width: 1216, height: 832 },
+);
+assert.deepEqual(
+  resolveImagePromptReviewSize({
+    connection: nativeNovelAiConnection,
+    prompt: "1boy",
+    width: 1216,
+    height: 832,
+    imageDefaults: {
+      ...prefixedNovelAiProfile,
+      novelai: { ...prefixedNovelAiProfile.novelai!, dynamicResolutionBySubjectCount: false },
+    },
+  }),
+  { width: 1216, height: 832 },
+);
+assert.deepEqual(
+  resolveImagePromptReviewSize({
+    connection: { ...nativeNovelAiConnection, baseUrl: "https://novelai-proxy.example.com" },
+    prompt: "1boy",
+    width: 1216,
+    height: 832,
+    imageDefaults: prefixedNovelAiProfile,
+  }),
+  { width: 1216, height: 832 },
+);
+assert.deepEqual(
+  resolveImagePromptReviewSize({
+    connection: { baseUrl: "https://api.openai.com", model: "gpt-image-1", imageService: "openai" },
+    prompt: "1boy",
+    width: 1024,
+    height: 1024,
+    imageDefaults: null,
+  }),
+  { width: 1024, height: 1024 },
+);
+
+const comfyPlaceholderPng = Buffer.from(COMFYUI_PLACEHOLDER_REFERENCE_BASE64, "base64");
+assert.equal(comfyPlaceholderPng.toString("ascii", 1, 4), "PNG");
+assert.equal(comfyPlaceholderPng.readUInt32BE(16), 16);
+assert.equal(comfyPlaceholderPng.readUInt32BE(20), 16);
+
+const chatRoutesSource = readFileSync(join(REPOSITORY_ROOT, "packages/server/src/routes/chats.routes.ts"), "utf8");
+assert.match(
+  chatRoutesSource,
+  /if \(existing\.mode === "conversation" && hasStartedChat\) \{/u,
+  "Only Conversation chats should create character membership timeline notices",
+);
+
+const windowsLauncherSource = readFileSync(join(REPOSITORY_ROOT, "start.bat"), "utf8");
+for (const workspace of ["shared", "server", "client"]) {
+  assert.match(windowsLauncherSource, new RegExp(`--filter @marinara-engine/${workspace} run clean`, "u"));
+}
+
+const longSceneNarration = Array.from(
+  { length: 100 },
+  (_, index) => `Narration: beat ${index} ${"context ".repeat(45)}`,
+).join("\n");
+const sceneAnalysisContext = {
+  currentState: "exploration" as const,
+  turnNumber: 2,
+  availableBackgrounds: [],
+  availableSfx: [],
+  activeWidgets: [],
+  trackedNpcs: [],
+  characterNames: [],
+  currentBackground: null,
+  currentMusic: null,
+  currentAmbient: null,
+  currentWeather: null,
+  currentTimeOfDay: null,
+};
+const parsedSceneAnalysisRequest = sceneAnalysisRequestSchema.parse({
+  narration: longSceneNarration,
+  context: sceneAnalysisContext,
+});
+assert.equal(
+  parsedSceneAnalysisRequest.narration,
+  longSceneNarration,
+  "The shared request contract must accept long narration before endpoint-specific budgeting",
+);
+assert.equal(parsedSceneAnalysisRequest.context.turnNumber, 2, "The shared schema must preserve turn-aware prompts");
+const fittedSceneNarration = fitSceneAnalyzerNarrationBeats(
+  longSceneNarration,
+  SIDECAR_SCENE_ANALYSIS_NARRATION_BUDGET_CHARS,
+);
+assert.equal(fittedSceneNarration.truncated, true);
+assert.equal(fittedSceneNarration.beats.at(-1)?.index, 99);
+assert.ok((fittedSceneNarration.beats[0]?.index ?? 0) > 0);
+assert.ok(
+  fittedSceneNarration.beats.reduce((total, beat) => total + beat.text.length + String(beat.index).length + 3, 0) <=
+    SIDECAR_SCENE_ANALYSIS_NARRATION_BUDGET_CHARS,
+);
+const fittedScenePrompt = buildSceneAnalyzerUserPrompt(
+  longSceneNarration,
+  undefined,
+  sceneAnalysisContext,
+  SIDECAR_SCENE_ANALYSIS_NARRATION_BUDGET_CHARS,
+);
+assert.match(fittedScenePrompt, /earlier narration beat\(s\) omitted to fit local context/u);
+assert.match(fittedScenePrompt, /\[99\] Narration: beat 99/u);
+assert.match(fittedScenePrompt, /CINEMATIC DIRECTIONS/u);
+
+assert.equal(resolveRunPodComfyUiTimeoutSeconds("120"), 120);
+for (const invalidTimeout of [undefined, "", "invalid", "0", "-1", "120.5", "Infinity", "9007199254740992"]) {
+  assert.equal(resolveRunPodComfyUiTimeoutSeconds(invalidTimeout), 2_400);
+}
 
 const originalChatGenerationTimeout = process.env.CHAT_GENERATION_TIMEOUT_MS;
 process.env.CHAT_GENERATION_TIMEOUT_MS = "600000";
@@ -1606,5 +2550,171 @@ process.env.CHAT_GENERATION_TIMEOUT_MS = "3600001";
 assert.equal(getChatGenerationTimeoutMs(), DEFAULT_CHAT_GENERATION_TIMEOUT_MS);
 if (originalChatGenerationTimeout === undefined) delete process.env.CHAT_GENERATION_TIMEOUT_MS;
 else process.env.CHAT_GENERATION_TIMEOUT_MS = originalChatGenerationTimeout;
+
+const customRepository = normalizeCustomAgentRepositoryUrl("https://github.com/Pasta-Devs/Example-Agents.git/");
+assert.equal(customRepository.url, "https://github.com/pasta-devs/example-agents");
+assert.throws(
+  () => normalizeCustomAgentRepositoryUrl("https://github.com/Pasta-Devs/Example-Agents/tree/staging"),
+  /repository root URL/u,
+);
+assert.throws(() => normalizeCustomAgentRepositoryUrl("https://example.com/agents"), /public GitHub repository/u);
+await assert.rejects(
+  validateOutboundUrl("https://example.com/archive.zip", {
+    allowedHostnames: ["github.com", "codeload.github.com"],
+  }),
+  /hostname 'example\.com' is not allowed/u,
+);
+const repositoryDefinition = {
+  id: "continuity-helper",
+  name: "Continuity Helper",
+  description: "Checks recent turns for contradictions.",
+  author: "Mari",
+  phase: "post_processing" as const,
+  enabledByDefault: false,
+  defaultInjectAsSection: true,
+  category: "writer" as const,
+  defaultTools: ["search_messages"],
+  defaultSettings: { maxTokens: 900 },
+  modeAllowlist: ["roleplay" as const],
+  defaultPromptTemplate: "Check {{messages}} for continuity errors.",
+};
+const repositoryArchive = new AdmZip();
+repositoryArchive.addFile("example-agents-main/agents.json", Buffer.from(JSON.stringify([repositoryDefinition])));
+assert.deepEqual(parseCustomAgentRepositoryArchive(repositoryArchive.toBuffer()), [repositoryDefinition]);
+const importedRepositoryAgent = buildRepositoryAgentInput(customRepository, repositoryDefinition);
+assert.equal(importedRepositoryAgent.type, `repo-${customRepository.id}-continuity-helper`);
+assert.deepEqual(importedRepositoryAgent.settings.enabledTools, ["search_messages"]);
+assert.deepEqual(importedRepositoryAgent.settings.customAgentRepositorySource, {
+  repositoryId: customRepository.id,
+  repositoryUrl: customRepository.url,
+  agentId: repositoryDefinition.id,
+});
+const duplicateRepositoryArchive = new AdmZip();
+duplicateRepositoryArchive.addFile(
+  "example-agents-main/agents.json",
+  Buffer.from(JSON.stringify([repositoryDefinition, repositoryDefinition])),
+);
+assert.throws(() => parseCustomAgentRepositoryArchive(duplicateRepositoryArchive.toBuffer()), /duplicate agent id/u);
+const featureRepositoryArchive = new AdmZip();
+featureRepositoryArchive.addFile(
+  "example-agents-main/agents.json",
+  Buffer.from(JSON.stringify([{ ...repositoryDefinition, execution: "feature" }])),
+);
+assert.throws(
+  () => parseCustomAgentRepositoryArchive(featureRepositoryArchive.toBuffer()),
+  /requires a package runtime/u,
+);
+const originalCustomRepositoryFlag = process.env.ENABLE_CUSTOM_AGENT_REPOS;
+try {
+  delete process.env.ENABLE_CUSTOM_AGENT_REPOS;
+  assert.equal(isCustomAgentRepositoriesEnabled(), false);
+  process.env.ENABLE_CUSTOM_AGENT_REPOS = "true";
+  assert.equal(isCustomAgentRepositoriesEnabled(), true);
+} finally {
+  if (originalCustomRepositoryFlag === undefined) delete process.env.ENABLE_CUSTOM_AGENT_REPOS;
+  else process.env.ENABLE_CUSTOM_AGENT_REPOS = originalCustomRepositoryFlag;
+}
+
+const unstackedEchoLayout = resolveEchoChamberTopLayout({
+  baseTop: 96,
+  containerTop: 40,
+  containerBottom: 840,
+  viewportBottom: 800,
+  bottomClearance: 88,
+});
+assert.deepEqual(unstackedEchoLayout, { top: 96, maxHeight: 576 });
+const stackedEchoLayout = resolveEchoChamberTopLayout({
+  baseTop: 96,
+  containerTop: 40,
+  containerBottom: 840,
+  viewportBottom: 800,
+  bottomClearance: 88,
+  trackerBottom: 420,
+  stackGap: 8,
+});
+assert.deepEqual(stackedEchoLayout, { top: 388, maxHeight: 284 });
+assert.equal(
+  40 + stackedEchoLayout.top + stackedEchoLayout.maxHeight + 88,
+  800,
+  "A stacked Echo Chamber must remain inside the visible roleplay area",
+);
+assert.equal(
+  resolveEchoChamberTopLayout({
+    baseTop: 96,
+    containerTop: 40,
+    containerBottom: 840,
+    viewportBottom: 800,
+    bottomClearance: 88,
+    trackerBottom: 760,
+    stackGap: 8,
+  }).maxHeight,
+  0,
+  "Echo Chamber height must not become negative when the Tracker consumes the available corner",
+);
+assert.equal(
+  resolveTrackerPanelDesktopWidth({
+    preferredWidth: 340,
+    mainLeft: 280,
+    mainRight: 1920,
+    chatColumnLeft: 636,
+    chatColumnRight: 1564,
+    side: "left",
+    gap: 8,
+  }),
+  340,
+  "The Tracker should retain its selected width when it fits beside the chat column",
+);
+assert.equal(
+  resolveTrackerPanelDesktopWidth({
+    preferredWidth: 420,
+    mainLeft: 280,
+    mainRight: 1480,
+    chatColumnLeft: 416,
+    chatColumnRight: 1344,
+    side: "left",
+    gap: 8,
+  }),
+  128,
+  "The Tracker should shrink to the narrower left chat gutter",
+);
+assert.equal(
+  resolveTrackerPanelDesktopWidth({
+    preferredWidth: 340,
+    mainLeft: 0,
+    mainRight: 1200,
+    chatColumnLeft: 136,
+    chatColumnRight: 1064,
+    side: "right",
+    gap: 8,
+  }),
+  128,
+  "The Tracker should use the matching right chat gutter",
+);
+assert.equal(resolveTrackerPanelContentScale(340, 340), 1);
+assert.equal(resolveTrackerPanelContentScale(340, 255), 0.75);
+assert.equal(
+  resolveTrackerPanelContentScale(420, 128),
+  0.65,
+  "Severely constrained Tracker contents should reflow before their text becomes unreadably small",
+);
+const backgroundSeedRoot = mkdtempSync(join(tmpdir(), "marinara-default-background-"));
+const backgroundSeedDir = join(backgroundSeedRoot, "backgrounds");
+try {
+  mkdirSync(backgroundSeedDir, { recursive: true });
+  const customBackgroundPath = join(backgroundSeedDir, "custom.jpg");
+  const customBackground = Buffer.from([0xff, 0xd8, 0xff, 0xd9]);
+  writeFileSync(customBackgroundPath, customBackground);
+  await seedDefaultBackgrounds(backgroundSeedDir);
+  assert.deepEqual(readFileSync(customBackgroundPath), customBackground);
+  assert.equal(existsSync(join(backgroundSeedDir, "Black.jpg")), true);
+  assert.ok(readFileSync(join(backgroundSeedDir, "Black.jpg")).length > 0);
+  const backgroundMeta = JSON.parse(readFileSync(join(backgroundSeedDir, "meta.json"), "utf8")) as Record<
+    string,
+    { tags?: unknown }
+  >;
+  assert.deepEqual(backgroundMeta["Black.jpg"]?.tags, ["black", "plain", "dark"]);
+} finally {
+  rmSync(backgroundSeedRoot, { recursive: true, force: true });
+}
 
 console.info("Open-issue regressions passed.");

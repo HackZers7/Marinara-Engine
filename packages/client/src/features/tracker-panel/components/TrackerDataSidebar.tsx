@@ -1,8 +1,8 @@
 import { Component, useCallback, useState, type CSSProperties, type ErrorInfo, type ReactNode } from "react";
+import type { PresentCharacter } from "@marinara-engine/shared";
 import {
   normalizeTrackerFieldLocksForState,
   normalizeTrackerHiddenFields,
-  toggleTrackerFieldHidden,
   toggleTrackerFieldLock,
   type TrackerHiddenFields,
 } from "@marinara-engine/shared";
@@ -73,9 +73,11 @@ export function TrackerDataSidebar({ fillHeight = false }: { fillHeight?: boolea
   const setTrackerPanelSide = useUIStore((s) => s.setTrackerPanelSide);
   const setTrackerPanelSizeProfile = useUIStore((s) => s.setTrackerPanelSizeProfile);
   const { currentGameState, gameStateRefreshing, isLoadingGameState } = useTrackerGameState(activeChatId);
+  const presentCharacters: PresentCharacter[] = Array.isArray(currentGameState?.presentCharacters)
+    ? currentGameState.presentCharacters
+    : [];
   const {
     activePersona,
-    autoGenerateCharacterAvatars,
     characterSpriteLookup,
     characterTrackerConfig,
     characterTrackerSettings,
@@ -87,6 +89,7 @@ export function TrackerDataSidebar({ fillHeight = false }: { fillHeight?: boolea
     spriteExpressions,
   } = useTrackerPanelModel({
     activeChatId,
+    presentCharacters,
     trackerPanelSectionOrder,
     trackerPanelUseExpressionSprites,
   });
@@ -114,12 +117,6 @@ export function TrackerDataSidebar({ fillHeight = false }: { fillHeight?: boolea
   const toggleFieldLock = useCallback((key: string) => {
     updateFieldLocks((locks) => toggleTrackerFieldLock(locks, key));
   }, [updateFieldLocks]);
-  const toggleFieldHidden = useCallback(
-    (key: string) => {
-      updateHiddenTrackerFields((hiddenFields) => toggleTrackerFieldHidden(hiddenFields, key));
-    },
-    [updateHiddenTrackerFields],
-  );
   const hasFixedTrackerPanel = orderedTrackerSections.length > 0;
   const showTrackerSections = !!activeChatId && !isLoadingGameState && !!currentGameState && hasFixedTrackerPanel;
   const trackerPanelHasCustomBackground =
@@ -158,14 +155,13 @@ export function TrackerDataSidebar({ fillHeight = false }: { fillHeight?: boolea
       )}
       style={trackerPanelSurfaceStyle}
     >
-      <div className="pointer-events-none absolute inset-0 z-0 opacity-[0.08] [background-image:linear-gradient(color-mix(in_srgb,var(--foreground)_12%,transparent)_1px,transparent_1px),linear-gradient(90deg,color-mix(in_srgb,var(--foreground)_9%,transparent)_1px,transparent_1px)] [background-size:8px_8px]" />
+      <div className="pointer-events-none absolute inset-0 z-0 opacity-[0.11] [background-image:linear-gradient(color-mix(in_srgb,var(--foreground)_12%,transparent)_1px,transparent_1px),linear-gradient(90deg,color-mix(in_srgb,var(--foreground)_9%,transparent)_1px,transparent_1px)] [background-size:8px_8px]" />
       <TrackerLockProvider
         fieldLocks={fieldLocks}
         hiddenTrackerFields={hiddenTrackerFields}
         lockMode={lockMode}
         hideMode={hideMode}
         onToggleFieldLock={toggleFieldLock}
-        onToggleFieldHidden={toggleFieldHidden}
         onUpdateFieldLocks={updateFieldLocks}
         onUpdateHiddenFields={updateHiddenTrackerFields}
       >
@@ -176,7 +172,7 @@ export function TrackerDataSidebar({ fillHeight = false }: { fillHeight?: boolea
           onSetEditMode={setActiveEditMode}
           onSetSide={setTrackerPanelSide}
           onSetSizeProfile={setTrackerPanelSizeProfile}
-          onClose={() => setTrackerPanelOpen(false)}
+          onClose={() => setTrackerPanelOpen(false, activeChatId)}
         />
 
         <div className={cn("relative z-10", fillHeight && "min-h-0 flex-1 overflow-y-auto")}>
@@ -185,7 +181,6 @@ export function TrackerDataSidebar({ fillHeight = false }: { fillHeight?: boolea
               <TrackerSectionList
                 activeChatId={activeChatId}
                 activePersona={activePersona}
-                autoGenerateCharacterAvatars={autoGenerateCharacterAvatars}
                 characterSpriteLookup={characterSpriteLookup}
                 characterTrackerConfig={characterTrackerConfig}
                 characterTrackerSettings={characterTrackerSettings}
@@ -209,7 +204,6 @@ export function TrackerDataSidebar({ fillHeight = false }: { fillHeight?: boolea
                 toggleTrackerPanelSectionCollapsed={toggleTrackerPanelSectionCollapsed}
                 deleteMode={deleteMode}
                 addMode={addMode}
-                hideMode={hideMode}
               />
             </TrackerPanelErrorBoundary>
           ) : null}

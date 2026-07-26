@@ -34,7 +34,10 @@ import { generateImage, saveImageToDisk } from "../services/image/image-generati
 import { resolveConnectionImageDefaults } from "../services/image/image-generation-defaults.js";
 import { loadImageGenerationUserSettings } from "../services/image/image-generation-settings.js";
 import { compileImagePrompt } from "../services/image/image-prompt-compiler.js";
-import { resolveReviewedImagePromptSubmission } from "../services/image/image-prompt-review.js";
+import {
+  resolveImagePromptReviewSize,
+  resolveReviewedImagePromptSubmission,
+} from "../services/image/image-prompt-review.js";
 import { runImageGenerationRequest } from "../services/image/image-generation-queue.js";
 import { persistGeneratedImageToEntityGalleries } from "../services/image/generated-image-entity-gallery.js";
 import {
@@ -43,12 +46,12 @@ import {
 } from "../services/generation/media-connection-fallback.js";
 import { resolveIllustratorPromptRuntime } from "../services/generation/illustrator-prompt-runtime.js";
 import { resolveConversationSelfieSystemPrompt } from "../services/conversation/selfie-prompt.js";
-import { isNovelAiImageConnection, resolveIllustratorCharacterReferences } from "./generate/illustrator-references.js";
+import { suppressesReferencePromptLine, resolveIllustratorCharacterReferences } from "./generate/illustrator-references.js";
 import { resolveBaseUrl } from "./generate/generate-route-utils.js";
 import {
   compactVideoPromptText,
   excerptIllustrationPromptForVideo,
-  summarizeVideoNarration,
+  resolveGalleryVideoNarrationSummary,
 } from "../services/video/prompt-context.js";
 import { resolveSceneVideoPrompt, SceneVideoPromptReviewError } from "../services/video/scene-video-prompt-review.js";
 import { isDebugAgentsEnabled } from "../config/runtime-config.js";
@@ -308,19 +311,6 @@ function readSceneVideoReferenceImage(path: string, url?: string | null): VideoR
   return { base64: readFileSync(path).toString("base64"), mimeType, url };
 }
 
-function latestNarrationSummary(
-  messages: Array<{ role?: string | null; content?: string | null }>,
-  maxLength: number,
-): string {
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const message = messages[index];
-    if (!message || message.role === "user") continue;
-    const summary = summarizeVideoNarration(message.content, maxLength);
-    if (summary) return summary;
-  }
-  return "Animate the latest illustrated roleplay scene with motion that fits the reference image.";
-}
-
 function buildRoleplayVideoSettingLine(chat: ChatRow, meta: Record<string, unknown>, maxPartLength: number): string {
   const parts = [
     readTrimmedString(meta.groupScenarioText),
@@ -533,6 +523,7 @@ export async function galleryRoutes(app: FastifyInstance) {
     );
     const aspectRatio = input.aspectRatio ?? videoRuntime.activeDefaults.aspectRatio;
     const messages = await chats.listMessages(input.chatId);
+    const swipes = await chats.listSwipesByMessageIds(messages.map((message) => message.id));
     const characterNames = await collectChatSceneCharacterNames(chat);
     const promptDraft = await loadGameVideoPrompt({
       promptOverridesStorage,
@@ -540,7 +531,12 @@ export async function galleryRoutes(app: FastifyInstance) {
       debugMode: input.debugMode,
       ctx: {
         sceneTitle: compactVideoPromptText(sceneTitleFromGalleryImage(galleryImage), videoRuntime.promptLimits.title),
-        narrationSummary: latestNarrationSummary(messages, videoRuntime.promptLimits.narrationSummary),
+        narrationSummary: resolveGalleryVideoNarrationSummary(
+          messages,
+          swipes,
+          galleryImage.id,
+          videoRuntime.promptLimits.narrationSummary,
+        ),
         illustrationPrompt:
           excerptIllustrationPromptForVideo(galleryImage.prompt, videoRuntime.promptLimits.illustrationPrompt) ||
           "Use the supplied first-frame gallery image as the visual source.",
@@ -740,8 +736,7 @@ export async function galleryRoutes(app: FastifyInstance) {
 
       return reply
         .header("Content-Type", "video/mp4")
-        .header("Cache-Control", "public, max-age=31536000, immutable")
-        .send(readFileSync(filePath));
+        .sendFile(filename, join(GAME_SCENE_VIDEOS_ROOT, chatId), { maxAge: "1y", immutable: true });
     },
   );
 
@@ -792,7 +787,8 @@ export async function galleryRoutes(app: FastifyInstance) {
     const sceneVideos = createGameSceneVideosStorage(app.db);
     const { videoConnectionId, galleryImage, videoRuntime, durationSeconds, aspectRatio, prompt, videoFallback } =
       prepared;
-    const { source, serviceHint, baseUrl, apiKey, model, resolution, publicReferenceUpload } = videoRuntime;
+    const { source, serviceHint, baseUrl, apiKey, model, resolution, publicReferenceUpload, comfyWorkflow } =
+      videoRuntime;
 
     const galleryImagePath = resolveGalleryImagePath(galleryImage);
     if (!galleryImagePath) {
@@ -830,6 +826,7 @@ export async function galleryRoutes(app: FastifyInstance) {
         durationSeconds,
         aspectRatio,
         resolution,
+        comfyWorkflow,
         referenceImage,
         publicReferenceUpload,
         queue: input.queueMediaGenerationRequests,
@@ -985,12 +982,16 @@ export async function galleryRoutes(app: FastifyInstance) {
       return reply.status(502).send({ error: "The conversation model returned an empty selfie prompt." });
     }
 
-    const suppressReferencePromptLine = isNovelAiImageConnection({
-      model: imageConn.model,
-      baseUrl: imageConn.baseUrl,
-      imageService: imageConn.imageService,
-      imageGenerationSource: imageConn.imageGenerationSource,
-    });
+    const imageFallback = await resolveImageConnectionFallback(connections, imageConn.id);
+    const suppressReferencePromptLine = suppressesReferencePromptLine(
+      {
+        model: imageConn.model,
+        baseUrl: imageConn.baseUrl,
+        imageService: imageConn.imageService,
+        imageGenerationSource: imageConn.imageGenerationSource,
+      },
+      imageFallback,
+    );
     let finalPrompt = selfiePositivePrompt ? `${imagePrompt}, ${selfiePositivePrompt}` : imagePrompt;
     let referenceImages: string[] | undefined;
     const selfieUseAvatarReferences = meta.selfieUseAvatarReferences === true;
@@ -1067,6 +1068,13 @@ export async function galleryRoutes(app: FastifyInstance) {
     const providerNegativePrompt = promptSubmission.negativePrompt;
 
     if (input.previewOnly) {
+      const previewSize = resolveImagePromptReviewSize({
+        connection: imageConn,
+        prompt: providerPrompt,
+        width,
+        height,
+        imageDefaults,
+      });
       return {
         items: [
           {
@@ -1075,8 +1083,8 @@ export async function galleryRoutes(app: FastifyInstance) {
             title: `${characterName} selfie`,
             prompt: providerPrompt,
             ...(providerNegativePrompt ? { negativePrompt: providerNegativePrompt } : {}),
-            width,
-            height,
+            width: previewSize.width,
+            height: previewSize.height,
           },
         ],
       };
@@ -1090,7 +1098,6 @@ export async function galleryRoutes(app: FastifyInstance) {
     }
 
     try {
-      const imageFallback = await resolveImageConnectionFallback(connections, imageConn.id);
       const imageConnectionQueueKey = imageConn.id?.trim() || `${imageServiceHint}:${imageBaseUrl}:${imageModel}`;
       const imageResult = await runImageGenerationRequest({
         connectionKey: imageConnectionQueueKey,

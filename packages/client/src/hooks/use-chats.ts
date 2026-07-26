@@ -591,26 +591,6 @@ export function useUpdateChat() {
   });
 }
 
-export function useTouchChat() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (id: string) => api.post<Chat>(`/chats/${id}/touch`, {}),
-    onMutate: async (id) => {
-      const updatedAt = new Date().toISOString();
-      qc.setQueryData<Chat[]>(chatKeys.list(), (existing) =>
-        existing
-          ?.map((chat) => (chat.id === id ? { ...chat, updatedAt } : chat))
-          .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()),
-      );
-      qc.setQueryData<Chat>(chatKeys.detail(id), (existing) => (existing ? { ...existing, updatedAt } : existing));
-    },
-    onSuccess: (chat, id) => {
-      if (chat) qc.setQueryData<Chat>(chatKeys.detail(id), chat);
-      qc.invalidateQueries({ queryKey: chatKeys.list() });
-    },
-  });
-}
-
 export function useUpdateChatMetadata() {
   const qc = useQueryClient();
   return useMutation({
@@ -673,20 +653,6 @@ export function useUpdateChatMetadata() {
       qc.invalidateQueries({ queryKey: chatKeys.list() });
       qc.invalidateQueries({ queryKey: [...chatKeys.all, "group"] });
       qc.invalidateQueries({ queryKey: lorebookKeys.active(vars.id) });
-    },
-  });
-}
-
-export function useMarkAutonomousUnread() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: ({ chatId, characterId, count }: { chatId: string; characterId?: string | null; count?: number }) =>
-      api.post<Chat>(`/chats/${chatId}/autonomous-unread`, { characterId: characterId ?? null, count }),
-    onSuccess: (data, vars) => {
-      if (data) {
-        qc.setQueryData(chatKeys.detail(vars.chatId), data);
-      }
-      qc.invalidateQueries({ queryKey: chatKeys.list() });
     },
   });
 }
@@ -1116,52 +1082,6 @@ export function useUpdateMessageExtra(chatId: string | null) {
   });
 }
 
-export function useBulkSetMessagesHiddenFromAI() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: ({ chatId, messageIds, hidden }: { chatId: string; messageIds: string[]; hidden: boolean }) =>
-      api.patch<{ updated: number }>(`/chats/${chatId}/messages/bulk-hidden`, { messageIds, hidden }),
-    onMutate: async ({ chatId, messageIds, hidden }) => {
-      await qc.cancelQueries({ queryKey: chatKeys.messages(chatId) });
-      const previous = qc.getQueryData<InfiniteData<Message[]>>(chatKeys.messages(chatId));
-      const idSet = new Set(messageIds);
-
-      qc.setQueryData<InfiniteData<Message[]>>(chatKeys.messages(chatId), (old) => {
-        if (!old?.pages) return old;
-        return {
-          ...old,
-          pages: old.pages.map((page) =>
-            page.map((msg) => {
-              if (!idSet.has(msg.id)) return msg;
-              let currentExtra: Record<string, unknown> = {};
-              try {
-                currentExtra =
-                  typeof msg.extra === "string"
-                    ? JSON.parse(msg.extra)
-                    : ((msg.extra ?? {}) as unknown as Record<string, unknown>);
-              } catch {
-                currentExtra = {};
-              }
-              return { ...msg, extra: { ...currentExtra, hiddenFromAI: hidden } as unknown as Message["extra"] };
-            }),
-          ),
-        };
-      });
-
-      return { previous };
-    },
-    onError: (_err, vars, context) => {
-      if (context?.previous) {
-        qc.setQueryData(chatKeys.messages(vars.chatId), context.previous);
-      }
-    },
-    onSettled: (_data, _err, vars) => {
-      qc.invalidateQueries({ queryKey: chatKeys.messages(vars.chatId) });
-      qc.invalidateQueries({ queryKey: lorebookKeys.active(vars.chatId) });
-    },
-  });
-}
-
 function replaceCachedMessage(
   old: InfiniteData<Message[]> | undefined,
   messageId: string,
@@ -1386,15 +1306,6 @@ export function useClearAllData() {
     onSuccess: async () => {
       await resetClientAfterExpunge(qc);
     },
-  });
-}
-
-/** Fetch swipes for a message */
-export function useSwipes(chatId: string | null, messageId: string | null) {
-  return useQuery({
-    queryKey: [...chatKeys.all, "swipes", messageId ?? ""],
-    queryFn: () => api.get<MessageSwipe[]>(`/chats/${chatId}/messages/${messageId}/swipes`),
-    enabled: !!chatId && !!messageId,
   });
 }
 

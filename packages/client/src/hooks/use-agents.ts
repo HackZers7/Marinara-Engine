@@ -60,15 +60,6 @@ export function useAgentConfigs(enabled = true) {
   });
 }
 
-export function useAgentConfig(id: string | null) {
-  return useQuery({
-    queryKey: agentKeys.detail(id ?? ""),
-    queryFn: () => api.get<AgentConfigRow>(`/agents/${id}`),
-    enabled: !!id,
-    staleTime: 5 * 60_000,
-  });
-}
-
 export function useCustomAgentRuns(chatId: string | null, enabled = true) {
   return useQuery({
     queryKey: agentKeys.customRuns(chatId ?? ""),
@@ -96,17 +87,6 @@ export function useUploadAgentImage() {
     onSuccess: (_data, variables) => {
       qc.invalidateQueries({ queryKey: agentKeys.all });
       qc.invalidateQueries({ queryKey: agentKeys.detail(variables.id) });
-    },
-  });
-}
-
-export function useUpdateAgentByType() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: ({ agentType, ...data }: { agentType: string } & Record<string, unknown>) =>
-      api.patch(`/agents/type/${agentType}`, data),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: agentKeys.all });
     },
   });
 }
@@ -154,19 +134,10 @@ export function useAgentMemory(agentType: string | null, chatId: string | null, 
 export function useUpdateAgentMemory() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({
-      agentType,
-      chatId,
-      patch,
-    }: {
-      agentType: string;
-      chatId: string;
-      patch: Record<string, unknown>;
-    }) =>
-      api.patch<AgentMemoryResponse>(
-        `/agents/memory/${encodeURIComponent(agentType)}/${encodeURIComponent(chatId)}`,
-        { patch },
-      ),
+    mutationFn: ({ agentType, chatId, patch }: { agentType: string; chatId: string; patch: Record<string, unknown> }) =>
+      api.patch<AgentMemoryResponse>(`/agents/memory/${encodeURIComponent(agentType)}/${encodeURIComponent(chatId)}`, {
+        patch,
+      }),
     onSuccess: (_data, variables) => {
       qc.invalidateQueries({ queryKey: agentKeys.memory(variables.agentType, variables.chatId) });
     },
@@ -186,16 +157,6 @@ export function useUpdateAgentRunData() {
       api.patch(`/agents/runs/${id}`, { resultData }),
     onSuccess: (_data, variables) => {
       qc.invalidateQueries({ queryKey: agentKeys.customRuns(variables.chatId) });
-    },
-  });
-}
-
-export function useToggleAgent() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (agentType: string) => api.put(`/agents/toggle/${agentType}`),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: agentKeys.all });
     },
   });
 }

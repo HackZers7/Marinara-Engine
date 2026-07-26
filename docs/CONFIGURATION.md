@@ -26,9 +26,33 @@ Package lifecycle and storage:
 - **Persistence:** Packages live under `DATA_DIR/capability-packages`. Docker volumes, custom data directories, backups, and normal upgrades preserve them.
 - **Offline resilience:** Existing packages continue working at their installed version when outbound GitHub HTTPS is unavailable or an update fails verification.
 
+### Custom agent repositories
+
+Custom repositories are disabled by default because their prompts and tool selections are unvetted third-party content. Set `ENABLE_CUSTOM_AGENT_REPOS=true`, then open **Agents → Download Agents → Custom Sources** to preview a public GitHub repository. Adding a source and applying any later content change both require explicit confirmation. Synchronization is manual; Marinara does not clone repositories or poll them in the background.
+
+The repository root must contain an `agents.json` array using the same agent-definition format as downloadable agent packages. A minimal file looks like this:
+
+```json
+[
+  {
+    "id": "continuity-helper",
+    "name": "Continuity Helper",
+    "description": "Checks recent turns for contradictions.",
+    "phase": "post_processing",
+    "enabledByDefault": false,
+    "category": "writer",
+    "defaultPromptTemplate": "Check {{messages}} for continuity errors."
+  }
+]
+```
+
+Marinara accepts GitHub repository-root URLs only and validates the bounded archive plus every agent definition before showing the preview. During synchronization, remote prompt, settings, and tool values replace the repository-managed values shown in that preview. Connection and artwork choices remain local. If an agent disappears upstream, Marinara keeps it as a normal local custom agent and removes only its repository link. Removing a source follows the same keep-local policy.
+
 ## Where the .env file is
 
 Configuration lives in a file named `.env`. This is a plain text file with one setting per line, in the form `KEY=value`. Lines that start with `#` are comments and the server ignores them.
+
+The `.env` file is data, not a shell script. Marinara does not execute `$`, command substitutions such as `$(...)`, or other shell syntax found in a value. The macOS/Linux and Termux launchers use the same non-evaluating rule for the small set of settings they need before server startup. A value already supplied in the launcher's environment takes precedence over the matching `.env` entry.
 
 Marinara creates an empty `.env` for you the first time it starts, so you do not have to make one by hand.
 
@@ -160,9 +184,9 @@ A timeout is the longest time the server waits for a slow job before giving up. 
 | `CHAT_GENERATION_TIMEOUT_MS` | `300000` (5 minutes) | Provider headers/time-to-first-token and inter-chunk timeout for ordinary Conversation, Roleplay, and Game generations. Valid range: `10000`-`3600000`. It does not change Agent, media, embedding, tool, or background-job timeouts. |
 | `EMBEDDING_TIMEOUT_MS` | `300000` (5 minutes) | Time allowed for one embedding request. Higher helps slow local embedding servers. |
 | `IMAGE_GEN_TIMEOUT_MS` | `1800000` (30 minutes) | Time allowed for one image generation request. |
-| `VIDEO_GEN_TIMEOUT_MS` | `1800000` (30 minutes) | Time allowed for one scene video generation request. |
+| `VIDEO_GEN_TIMEOUT_MS` | `1800000` (30 minutes) | Time allowed for one scene video generation request, including local ComfyUI video workflows. |
 | `VIDEO_GEN_MAX_RESPONSE_BYTES` | `167772160` (160 MiB) | Largest scene video download the server will accept. |
-| `COMFYUI_GEN_TIMEOUT` | `2400` (40 minutes, in seconds) | Time allowed for one ComfyUI workflow after it is queued. |
+| `COMFYUI_GEN_TIMEOUT` | `2400` (40 minutes, in seconds) | Time allowed for one ComfyUI image workflow after it is queued. |
 | `SPRITE_GENERATION_TIMEOUT_MS` | falls back to `IMAGE_GEN_TIMEOUT_MS` | Time allowed for one AI sprite generation job. |
 | `CUSTOM_TOOL_TIMEOUT_MS` | `60000` (1 minute) | Time allowed for one custom tool call. |
 | `MAX_TOOL_ROUNDS` | `100` | Most tool-call rounds before the model must give a final answer. |
@@ -171,7 +195,7 @@ The image, video, sprite, and ComfyUI timeouts are locked in at startup, so a ch
 
 ## Privileged APIs (ADMIN_SECRET)
 
-Some actions are destructive or high-risk, so they need an extra secret on top of the normal access checks. Examples are backups, clearing data, applying updates, and installing themes or extensions.
+Some actions are destructive or high-risk, so they need an extra secret on top of the normal access checks. Examples are backups, clearing data, applying updates, and installing themes.
 
 Set a long, random value for `ADMIN_SECRET` on the server:
 
@@ -191,6 +215,7 @@ Related privileged settings:
 | `UPDATES_ALLOW_REMOTE_APPLY` | `false` | Allows a remote device to apply updates, with a valid secret. |
 | `HAPTICS_ALLOW_REMOTE` | `false` | Allows haptic device actions from a remote device, with a valid secret. |
 | `CUSTOM_TOOL_SCRIPT_ENABLED` | `false` | Enables custom script tools. Keep off for untrusted or imported tools. |
+| `ENABLE_CUSTOM_AGENT_REPOS` | `false` | Enables manual GitHub agent-repository preview and sync in Agents Manager. Third-party agents are unvetted and require explicit confirmation before import or update. |
 | `IMPORT_ALLOWED_ROOTS` | empty | Filesystem folders that bulk import may read without a picker token. |
 | `PROFILE_EXPORT_JSON_LIMIT_BYTES` | `268435456` (256 MiB) | Largest single JSON profile export the server will build. |
 
@@ -223,7 +248,7 @@ This section lists the remaining settings, grouped by purpose. The tables above 
 | `PORT` | `7860` | The port the server listens on. Keep Android, Docker, and Termux on the same value. |
 | `HOST` | `127.0.0.1` (`0.0.0.0` in the shell launchers) | The network interface to bind. Use `0.0.0.0` for LAN access. |
 | `AUTO_OPEN_BROWSER` | `true` | Whether the shell launchers open the app URL for you. Set `false` to stop this. |
-| `AUTO_UPDATE_ENABLED` | `true` | Whether Git-based Windows, macOS/Linux, and Termux launchers fetch and apply Engine updates before startup. Set `false` for a persistent opt-out; this takes effect on the next launch and does not disable manual update checks, in-app apply, package updates, or model updates. |
+| `AUTO_UPDATE_ENABLED` | `true` | Whether Git-based Windows, macOS/Linux, and Termux launchers fetch and apply Engine updates before startup. Set `false` for a persistent opt-out; this takes effect on the next launch. The launcher still performs a read-only check for newer published releases and prints a download reminder when one is available, while manual checks, in-app apply, package updates, and model updates remain available. Use `--skip-update` to skip both launcher checks for one start. |
 | `MARINARA_ENV_FILE` | project-root `.env` | Optional path override for the `.env` file. Set it before startup. |
 | `TZ` | system default | Host fallback timezone for server-side jobs. Conversation schedules use the global timezone selected in their schedule controls when one has been saved. Leave `TZ` unset to inherit the host timezone; an empty `TZ=` is also treated as unset. |
 | `CORS_ORIGINS` | `http://localhost:5173,http://127.0.0.1:5173` | Browser origins allowed to make cross-origin requests. |

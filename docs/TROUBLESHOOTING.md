@@ -52,15 +52,13 @@ rm -rf node_modules .pnpm .pnpm-store
 
 Then start Marinara again with `./start.sh`. If you install by hand, run `pnpm install` after removing those folders.
 
-### ERR_PNPM_TRUST_DOWNGRADE or a missing chess.js during build
+### ERR_PNPM_TRUST_DOWNGRADE during install
 
 This is almost always a half-finished install. First rerun the launcher so it can repair the workspace. If you install by hand, run this single command from the Marinara folder:
 
 ```bash
 pnpm --config.trustPolicy=off --config.confirmModulesPurge=false install --frozen-lockfile
 ```
-
-The `Cannot find module 'chess.js'` build error is the same problem. The package did not get linked during the aborted install, and a clean reinstall fixes it.
 
 ## Blank, stale, or old-looking screen
 

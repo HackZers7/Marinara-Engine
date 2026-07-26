@@ -848,7 +848,7 @@ export async function lorebooksRoutes(app: FastifyInstance) {
 
   // ── Scan chat for activated entries ──
 
-  app.get<{ Params: { chatId: string } }>("/scan/:chatId", async (req, reply) => {
+  app.get<{ Params: { chatId: string } }>("/scan/:chatId", async (req) => {
     const { chatId } = req.params;
     const chatsStorage = createChatsStorage(app.db);
     const chatMessages = await chatsStorage.listMessages(chatId);

@@ -8,6 +8,7 @@ import fastifyStatic from "@fastify/static";
 import { getDB, closeDB, type DB } from "./db/connection.js";
 import { registerRoutes } from "./routes/index.js";
 import { errorHandler } from "./middleware/error-handler.js";
+import { logger } from "./lib/logger.js";
 import { ipAllowlistHook } from "./middleware/ip-allowlist.js";
 import { basicAuthHook } from "./middleware/basic-auth.js";
 import { csrfProtectionHook } from "./middleware/csrf-protection.js";
@@ -25,7 +26,7 @@ import { migrateCharacterExtendedDescriptionsToLorebooks } from "./services/lore
 import { migrateLegacyDefaultAgentPrompts } from "./services/agents/default-prompt-migration.js";
 import { APP_VERSION, resetTurnGameRegistry } from "@marinara-engine/shared";
 import { existsSync } from "fs";
-import { basename, join, resolve, dirname } from "path";
+import { join, resolve, dirname } from "path";
 import { fileURLToPath } from "url";
 import { getBuildCommit, getBuildLabel } from "./config/build-info.js";
 import {
@@ -39,17 +40,16 @@ import { corsDelegate } from "./config/cors-config.js";
 import { sidecarProcessService } from "./services/sidecar/sidecar-process.service.js";
 import { startServerAutonomousScheduler } from "./services/conversation/server-autonomous-scheduler.service.js";
 import { startNoodleRefreshScheduler } from "./services/noodle/noodle-refresh-scheduler.service.js";
-import { serverExtensionRuntime } from "./services/extensions/server-extension-runtime.js";
+import { purgeRetiredExtensionData } from "./services/setup/retired-extension-cleanup.js";
 import { runWithGenerationFallbackNotifier } from "./services/generation/fallback-notification.js";
 import { createReplyFallbackNotifier } from "./routes/generate/fallback-notification.js";
 import { initializeCapabilityAgentRegistry } from "./services/capability-packages/capability-agent-registry.service.js";
 import { capabilityPackageManager } from "./services/capability-packages/package-manager.service.js";
 import { capabilityModuleRuntime } from "./services/capability-packages/capability-module-runtime.service.js";
 import { migrateLegacyCapabilities } from "./services/capability-packages/legacy-capability-migration.js";
+import { createClientStaticOptions } from "./config/client-static-config.js";
 
 const isLite = process.env.MARINARA_LITE === "true" || process.env.MARINARA_LITE === "1";
-const REVALIDATE_FILES = new Set(["index.html"]);
-const NO_STORE_FILES = new Set(["manifest.json", "sw.js", "registerSW.js"]);
 const MAX_UPLOAD_BYTES = 256 * 1024 * 1024;
 
 export async function buildApp(https?: { cert: Buffer; key: Buffer }) {
@@ -86,7 +86,6 @@ export async function buildApp(https?: { cert: Buffer; key: Buffer }) {
     try {
       const stopResults = await Promise.allSettled([
         capabilityModuleRuntime.stop(),
-        serverExtensionRuntime.stop(),
         sidecarProcessService.stop(),
       ]);
       for (const result of stopResults) {
@@ -138,7 +137,7 @@ export async function buildApp(https?: { cert: Buffer; key: Buffer }) {
       }
     }
   }
-  resetTurnGameRegistry(false);
+  resetTurnGameRegistry();
 
   // ── Seed defaults ──
   await seedDefaultPreset(db);
@@ -198,6 +197,10 @@ export async function buildApp(https?: { cert: Buffer; key: Buffer }) {
   // ── Error Handler ──
   app.setErrorHandler(errorHandler);
 
+  // API file routes use reply.sendFile even when the client build is absent.
+  // Decorate once without exposing a static route; production assets register below.
+  await app.register(fastifyStatic, { serve: false });
+
   // ── Routes ──
   await registerRoutes(app);
 
@@ -208,8 +211,15 @@ export async function buildApp(https?: { cert: Buffer; key: Buffer }) {
   // as soon as their verified files are installed.
   await initializeCapabilityAgentRegistry();
 
-  // ── Server extensions ──
-  await serverExtensionRuntime.start(app, db);
+  // Permanently erase payload-bearing records left by the removed extension system.
+  const retiredExtensionCleanup = await purgeRetiredExtensionData(db);
+  if (retiredExtensionCleanup.extensionRecordsRemoved > 0 || retiredExtensionCleanup.extensionSettingsRemoved > 0) {
+    logger.info(
+      "Permanently removed %d retired extension record(s) and %d extension setting(s)",
+      retiredExtensionCleanup.extensionRecordsRemoved,
+      retiredExtensionCleanup.extensionSettingsRemoved,
+    );
+  }
 
   // ── Server-side autonomous conversation scheduler ──
   startServerAutonomousScheduler(app);
@@ -230,33 +240,7 @@ export async function buildApp(https?: { cert: Buffer; key: Buffer }) {
   const __dirname = dirname(fileURLToPath(import.meta.url));
   const clientDist = resolve(__dirname, "..", "..", "client", "dist");
   if (existsSync(clientDist)) {
-    await app.register(fastifyStatic, {
-      root: clientDist,
-      prefix: "/",
-      wildcard: false,
-      maxAge: 0,
-      setHeaders(res, filePath) {
-        const fileName = basename(filePath);
-
-        if (REVALIDATE_FILES.has(fileName)) {
-          res.setHeader("Cache-Control", "no-cache, must-revalidate");
-          res.setHeader("Pragma", "no-cache");
-          res.setHeader("Expires", "0");
-          return;
-        }
-
-        if (NO_STORE_FILES.has(fileName)) {
-          res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate");
-          res.setHeader("Pragma", "no-cache");
-          res.setHeader("Expires", "0");
-          return;
-        }
-
-        if (/\.[A-Za-z0-9_-]{8,}\.(css|js)$/.test(fileName)) {
-          res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
-        }
-      },
-    });
+    await app.register(fastifyStatic, createClientStaticOptions(clientDist));
 
     // SPA fallback — serve index.html for non-API routes
     app.setNotFoundHandler(async (req, reply) => {

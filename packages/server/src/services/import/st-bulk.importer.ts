@@ -14,7 +14,7 @@ import {
 import { importSTChat } from "./st-chat.importer.js";
 import { importSTPreset } from "./st-prompt.importer.js";
 import { importSTLorebook } from "./st-lorebook.importer.js";
-import { characters as charactersTable, personas as personasTable } from "../../db/schema/index.js";
+import { characters as charactersTable } from "../../db/schema/index.js";
 import { createCharactersStorage } from "../storage/characters.storage.js";
 import { DATA_DIR } from "../../utils/data-dir.js";
 import { getFileTimestampOverrides, parseTrustedTimestamp } from "./import-timestamps.js";

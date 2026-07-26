@@ -395,7 +395,15 @@ function CollapsibleBlock({
   );
 }
 
-function ChatHistorySection({ entries, rawContent }: { entries: ChatHistoryEntry[]; rawContent: string }) {
+function ChatHistorySection({
+  entries,
+  rawContent,
+  providerBlocks = false,
+}: {
+  entries: ChatHistoryEntry[];
+  rawContent: string;
+  providerBlocks?: boolean;
+}) {
   const [open, setOpen] = useState(false);
   const tokens = estimateTokens(rawContent);
 
@@ -424,7 +432,7 @@ function ChatHistorySection({ entries, rawContent }: { entries: ChatHistoryEntry
           Chat History
         </span>
         <span className="text-[0.625rem] text-[var(--muted-foreground)]">
-          {entries.length} message{entries.length !== 1 ? "s" : ""}
+          {`${entries.length} ${providerBlocks ? "provider block" : "message"}${entries.length !== 1 ? "s" : ""}`}
         </span>
         <span className="ml-auto text-[0.625rem] text-[var(--muted-foreground)]">
           ~{fmtTokens(tokens)} token{tokens !== 1 ? "s" : ""}
@@ -602,7 +610,7 @@ export function PeekPromptModal({ data, onClose }: PeekPromptModalProps) {
           )}
           {sections.map((s, i) =>
             s.kind === "chat-history" ? (
-              <ChatHistorySection key={i} entries={s.entries} rawContent={s.rawContent} />
+              <ChatHistorySection key={i} entries={s.entries} rawContent={s.rawContent} providerBlocks={data.exact} />
             ) : (
               <CollapsibleBlock
                 key={i}

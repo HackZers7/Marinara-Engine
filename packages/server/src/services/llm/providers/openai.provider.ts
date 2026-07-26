@@ -310,7 +310,7 @@ export class OpenAIProvider extends BaseLLMProvider {
   }
 
   private shouldSendTopK(): boolean {
-    return this.apiKey === "local-sidecar";
+    return this.apiKey === "local-sidecar" || this.isGenericCustomProvider();
   }
 
   /**
@@ -679,12 +679,18 @@ export class OpenAIProvider extends BaseLLMProvider {
 
   private stripUnsupportedSamplerParameters(body: Record<string, unknown>, options: ChatOptions): void {
     if (!this.isNoTemperatureModel(options.model, options.reasoningEffort)) return;
-    delete body.temperature;
-    delete body.top_p;
-    delete body.top_k;
-    delete body.min_p;
-    delete body.frequency_penalty;
-    delete body.presence_penalty;
+    const explicitCustomParameters = this.isGenericCustomProvider() ? options.customParameters : undefined;
+    const removeUnlessExplicit = (key: string) => {
+      if (!explicitCustomParameters || !Object.prototype.hasOwnProperty.call(explicitCustomParameters, key)) {
+        delete body[key];
+      }
+    };
+    removeUnlessExplicit("temperature");
+    removeUnlessExplicit("top_p");
+    removeUnlessExplicit("top_k");
+    removeUnlessExplicit("min_p");
+    removeUnlessExplicit("frequency_penalty");
+    removeUnlessExplicit("presence_penalty");
   }
 
   private hasActiveReasoningEffort(reasoningEffort?: string | null): boolean {
@@ -751,6 +757,13 @@ export class OpenAIProvider extends BaseLLMProvider {
       })
     )
       return;
+
+    if (this.isGenericCustomProvider()) {
+      if (this.hasActiveReasoningEffort(options.reasoningEffort)) {
+        body.reasoning_effort = options.reasoningEffort;
+      }
+      return;
+    }
 
     if (this.isOpenRouterEndpoint() && this.hasActiveReasoningEffort(options.reasoningEffort)) {
       const existingReasoning =
@@ -856,9 +869,7 @@ export class OpenAIProvider extends BaseLLMProvider {
 
   private supportsGpt5Verbosity(model: string): boolean {
     if (this.isOpenAIChatGPTProvider()) return false;
-    return (
-      (!this.isGenericCustomProvider() || this.isOpenAIGpt55Or56Model(model)) && model.toLowerCase().startsWith("gpt-5")
-    );
+    return this.isGenericCustomProvider() || model.toLowerCase().startsWith("gpt-5");
   }
 
   private applyResponsesTextOptions(body: Record<string, unknown>, options: ChatOptions): void {
