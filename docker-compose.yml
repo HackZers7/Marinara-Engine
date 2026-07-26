@@ -3,16 +3,13 @@
 # ──────────────────────────────────────────────
 services:
   marinara:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: marinara-engine:local
+    # Use the pre-built image from GHCR
+    image: ghcr.io/pasta-devs/marinara-engine:latest
     init: true
     ports:
-      - "${PORT:-7860}:7860"
+      - "127.0.0.1:${PORT:-7860}:7860"
     volumes:
-      - ./build/data:/app/data
-      - ./build/.env:/app/.env
+      - marinara-data:/app/data
     environment:
       - NODE_ENV=production
       - DATA_DIR=/app/data
@@ -24,3 +21,6 @@ services:
       # - ENCRYPTION_KEY=              # AES key for API key encryption (generate: openssl rand -hex 32)
       # - LOG_LEVEL=debug              # Set to "debug" to log full prompts & responses
     restart: unless-stopped
+
+volumes:
+  marinara-data:
