@@ -415,6 +415,7 @@ export function renderMarkdownBlocks(
   let inCodeBlock = false;
   let codeBuffer: string[] = [];
   let codeLang = "";
+  let codeFenceIndent = 0;
   let quoteBuffer: string[] = [];
   let listItems: ListItem[] = [];
   let listOrdered = false;
@@ -475,13 +476,20 @@ export function renderMarkdownBlocks(
 
     // ── Inside fenced code block ──
     if (inCodeBlock) {
-      if (CODE_FENCE_CLOSE_RE.test(line.trimEnd())) {
+      // The close fence may be indented like its opener (fence inside a list
+      // item), so trim both ends before matching.
+      if (CODE_FENCE_CLOSE_RE.test(line.trim())) {
         segments.push(renderCodeBlock(codeBuffer, codeLang, `${keyBase}cb${key++}`));
         codeBuffer = [];
         codeLang = "";
         inCodeBlock = false;
       } else {
-        codeBuffer.push(line);
+        // CommonMark: strip up to the opening fence's indent from each content
+        // line so list-nested code blocks don't render with phantom leading
+        // spaces (and the Copy button doesn't copy them).
+        let stripped = 0;
+        while (stripped < codeFenceIndent && line[stripped] === " ") stripped++;
+        codeBuffer.push(stripped > 0 ? line.slice(stripped) : line);
       }
       continue;
     }
@@ -492,6 +500,7 @@ export function renderMarkdownBlocks(
       flushAll();
       inCodeBlock = true;
       codeLang = codeFenceMatch[1]?.trim() ?? "";
+      codeFenceIndent = line.length - line.trimStart().length;
       continue;
     }
 

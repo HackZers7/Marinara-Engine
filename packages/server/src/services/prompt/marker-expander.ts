@@ -4,7 +4,12 @@
 // ──────────────────────────────────────────────
 import type { DB } from "../../db/connection.js";
 import { logger } from "../../lib/logger.js";
-import { formatRpgStatsForPrompt, resolveMacros, stripMacroComments } from "@marinara-engine/shared";
+import {
+  formatRpgStatsForPrompt,
+  isExternallyImportedAgent,
+  resolveMacros,
+  stripMacroComments,
+} from "@marinara-engine/shared";
 import type {
   CharacterMacroProfile,
   MarkerConfig,
@@ -18,6 +23,7 @@ import type {
 } from "@marinara-engine/shared";
 import { createCharactersStorage } from "../storage/characters.storage.js";
 import { createAgentsStorage } from "../storage/agents.storage.js";
+import { getCustomAgentImportPolicy } from "../agents/custom-agent-import-policy.service.js";
 import { processLorebooks, type LorebookFinalContentResolver, type LorebookScanResult } from "../lorebook/index.js";
 import { wrapContent } from "./format-engine.js";
 import { sanitizeExampleDialoguePromptLeaf, sanitizePromptLeaf } from "./prompt-escaping.js";
@@ -356,9 +362,11 @@ async function expandPersona(_config: MarkerConfig, ctx: MarkerContext): Promise
 
 // ── Lorebook / World Info ──────────────────────
 
-async function expandLorebook(config: MarkerConfig, ctx: MarkerContext): Promise<ExpandedMarker> {
-  if (ctx.disableLorebooks === true) return { content: "" };
-
+export async function ensureLorebookScan(ctx: MarkerContext): Promise<LorebookScanResult | null> {
+  if (ctx.disableLorebooks === true) {
+    ctx.macroCtx.outlets = {};
+    return null;
+  }
   const result =
     ctx.lorebookScanResult ??
     (ctx.lorebookScanResult = await processLorebooks(
@@ -385,6 +393,8 @@ async function expandLorebook(config: MarkerConfig, ctx: MarkerContext): Promise
       },
     ));
 
+  ctx.macroCtx.outlets = result.outlets;
+
   if (ctx.lorebookScanResultApplied !== true) {
     ctx.lorebookScanResultApplied = true;
 
@@ -410,6 +420,13 @@ async function expandLorebook(config: MarkerConfig, ctx: MarkerContext): Promise
       }
     }
   }
+
+  return result;
+}
+
+async function expandLorebook(config: MarkerConfig, ctx: MarkerContext): Promise<ExpandedMarker> {
+  const result = await ensureLorebookScan(ctx);
+  if (!result) return { content: "" };
 
   switch (config.type) {
     case "world_info_before":
@@ -543,6 +560,12 @@ async function expandAgentData(config: MarkerConfig, ctx: MarkerContext): Promis
   const agentsStorage = createAgentsStorage(ctx.db);
   const agentConfig = await agentsStorage.getByType(agentType);
   if (!agentConfig) return { content: "" };
+  if (
+    isExternallyImportedAgent(agentConfig.type, agentConfig.settings) &&
+    !(await getCustomAgentImportPolicy(ctx.db)).enabled
+  ) {
+    return { content: "" };
+  }
 
   const latestRuns = await ctx.db
     .select()

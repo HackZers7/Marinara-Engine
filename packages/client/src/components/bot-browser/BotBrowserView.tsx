@@ -34,8 +34,14 @@ import { parsePngCharacterCard } from "../../lib/png-parser";
 import { useUIStore } from "../../stores/ui.store";
 import { toast } from "sonner";
 import { cn } from "../../lib/utils";
-import { confirmEmbeddedLorebookImport, hasLorebookEntries, readEmbeddedLorebookFromCharacterPayload } from "../../lib/character-import";
+import {
+  confirmEmbeddedLorebookImport,
+  hasLorebookEntries,
+  readCharacterCardDetailFields,
+  readEmbeddedLorebookFromCharacterPayload,
+} from "../../lib/character-import";
 import { mergeChubDetailIntoCharacterJson } from "../../lib/chub-character-card";
+import { useTranslation as useUiTranslation } from "react-i18next";
 
 // ════════════════════════════════════════════════
 // Types
@@ -634,6 +640,21 @@ const jannyProvider: ProviderConfig = {
       .replace(/^-|-$/g, "");
     const pageUrl = `https://jannyai.com/characters/${charId}_character-${slug}`;
     const apiPageUrl = `https://api.jannyai.com/characters/${charId}_character-${slug}`;
+
+    // Prefer JannyAI's supported full-card download API. Search results contain
+    // only catalog metadata, while the original PNG preserves the full V2/V3
+    // definition used by imports and Start Chat.
+    try {
+      const cardRes = await fetch(`/api/bot-browser/janny/download/${encodeURIComponent(charId)}`);
+      if (cardRes.ok) {
+        const cardFile = new File([await cardRes.blob()], "character.png", { type: "image/png" });
+        const { json } = await parsePngCharacterCard(cardFile);
+        const cardDetail = readCharacterCardDetailFields(json);
+        if (cardDetail) return cardDetail;
+      }
+    } catch {
+      /* fall through to legacy page extraction */
+    }
 
     // Helper to decode Astro's [type, data] serialization
     function decodeAstro(value: unknown): unknown {
@@ -1326,6 +1347,7 @@ function getProvider(id: string): ProviderConfig {
 // ════════════════════════════════════════════════
 
 export function BotBrowserView() {
+  const { t: localizeUi } = useUiTranslation();
   const qc = useQueryClient();
   const botBrowserOpen = useUIStore((s) => s.botBrowserOpen);
   const closeBotBrowser = useUIStore((s) => s.closeBotBrowser);
@@ -1442,7 +1464,7 @@ export function BotBrowserView() {
       .then((d) => {
         if (!d?.active && pygLoggedIn) {
           setPygLoggedIn(false);
-          toast.info("Pygmalion session expired — please log in again.");
+          toast.info(localizeUi("ui.botBrowser.botbrowserview.pygmalionSessionExpiredPleaseLogInAgain"));
         } else if (d?.active) setPygLoggedIn(true);
       })
       .catch(() => {});
@@ -1451,12 +1473,12 @@ export function BotBrowserView() {
       .then((d) => {
         if (!d?.active && ctLoggedIn) {
           setCtLoggedIn(false);
-          toast.info("CharacterTavern session expired — please log in again.");
+          toast.info(localizeUi("ui.botBrowser.botbrowserview.charactertavernSessionExpiredPleaseLogInAgain"));
         } else if (d?.active) setCtLoggedIn(true);
       })
       .catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [localizeUi]);
 
   // ── Dynamically update nsfwAvailable based on auth ──
   const effectiveNsfwAvailable = useMemo(() => {
@@ -1621,7 +1643,7 @@ export function BotBrowserView() {
       const d = await provider.fetchDetail(card);
       setDetail(d);
     } catch {
-      toast.error("Failed to load character details");
+      toast.error(localizeUi("ui.botBrowser.botbrowserview.failedToLoadCharacterDetails"));
       restoreResultsScrollRef.current = true;
       setSelectedCard(null);
     } finally {
@@ -1635,10 +1657,17 @@ export function BotBrowserView() {
       let downloadUrl = "";
       if (sourceId === "chub") downloadUrl = `/api/bot-browser/chub/download/${card.id}`;
       else if (sourceId === "chartavern") downloadUrl = `/api/bot-browser/chartavern/download/${card.id}`;
+      else if (sourceId === "janny") downloadUrl = `/api/bot-browser/janny/download/${encodeURIComponent(card.id)}`;
 
       if (downloadUrl) {
         const res = await fetch(downloadUrl);
-        if (!res.ok) throw new Error("Failed to download character card");
+        if (!res.ok) {
+          throw new Error(
+            sourceId === "janny"
+              ? localizeUi("ui.botBrowser.botbrowserview.jannyCompleteCardUnavailable")
+              : localizeUi("ui.botBrowser.botbrowserview.importFailed"),
+          );
+        }
         const blob = await res.blob();
         const file = new File([blob], "character.png", { type: "image/png" });
         const { json, imageDataUrl } = await parsePngCharacterCard(file);
@@ -1672,7 +1701,7 @@ export function BotBrowserView() {
         });
         const data = await importRes.json();
         if (data.success) {
-          toast.success(`Imported "${data.name ?? "character"}" successfully!`);
+          toast.success(localizeUi("ui.botBrowser.botbrowserview.importedValue1Successfully", { value1: data.name ??localizeUi("ui.noodle.noodlehome.character") }));
           qc.invalidateQueries({ queryKey: characterKeys.list() });
           if (data.lorebook) qc.invalidateQueries({ queryKey: lorebookKeys.all });
         } else throw new Error(data.error ?? "Import failed");
@@ -1729,13 +1758,13 @@ export function BotBrowserView() {
         });
         const data = await importRes.json();
         if (data.success) {
-          toast.success(`Imported "${data.name ?? card.name}" successfully!`);
+          toast.success(localizeUi("ui.botBrowser.botbrowserview.importedValue1Successfully", { value1: data.name ?? card.name }));
           qc.invalidateQueries({ queryKey: characterKeys.list() });
           if (data.lorebook) qc.invalidateQueries({ queryKey: lorebookKeys.all });
         } else throw new Error(data.error ?? "Import failed");
       }
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Import failed");
+      toast.error(err instanceof Error ? err.message :localizeUi("ui.botBrowser.botbrowserview.importFailed"));
     } finally {
       setImporting(false);
     }
@@ -1808,7 +1837,7 @@ export function BotBrowserView() {
     if (effectiveNsfwAvailable) return; // Let the checkbox handle it
     e.preventDefault();
     if (sourceId === "wyvern") {
-      toast.info('Use the "🔞 Popular NSFW" sort option to browse NSFW content on Wyvern.');
+      toast.info(localizeUi("ui.botBrowser.botbrowserview.useThePopularNsfwSortOptionToBrowseNsfw"));
     } else if (provider.nsfwMode === "login") {
       setShowLoginModal(true);
     }
@@ -1835,9 +1864,9 @@ export function BotBrowserView() {
       setShowLoginModal(false);
       setNsfw(true);
       setPage(1);
-      toast.success("Logged in to Pygmalion! NSFW content enabled.");
+      toast.success(localizeUi("ui.botBrowser.botbrowserview.loggedInToPygmalionNsfwContentEnabled"));
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Token validation failed");
+      toast.error(err instanceof Error ? err.message :localizeUi("ui.botBrowser.botbrowserview.tokenValidationFailed"));
     } finally {
       setLoginLoading(false);
     }
@@ -1848,7 +1877,7 @@ export function BotBrowserView() {
     setPygLoggedIn(false);
     setNsfw(false);
     setPage(1);
-    toast.info("Logged out of Pygmalion.");
+    toast.info(localizeUi("ui.botBrowser.botbrowserview.loggedOutOfPygmalion"));
   };
 
   const handleCtSetCookie = async (cookie: string) => {
@@ -1871,11 +1900,10 @@ export function BotBrowserView() {
       setShowLoginModal(false);
       setNsfw(true);
       setPage(1);
-      toast.success(
-        `Logged in to CharacterTavern! ${valData.hasNsfw ? "NSFW content detected." : "NSFW content enabled."}`,
+      toast.success(localizeUi("ui.botBrowser.botbrowserview.loggedInToCharactertavernValue1", { value1: valData.hasNsfw ?localizeUi("ui.botBrowser.botbrowserview.nsfwContentDetected") :localizeUi("ui.botBrowser.botbrowserview.nsfwContentEnabled") }),
       );
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Cookie validation failed");
+      toast.error(err instanceof Error ? err.message :localizeUi("ui.botBrowser.botbrowserview.cookieValidationFailed"));
     } finally {
       setLoginLoading(false);
     }
@@ -1886,7 +1914,7 @@ export function BotBrowserView() {
     setCtLoggedIn(false);
     setNsfw(false);
     setPage(1);
-    toast.info("Logged out of CharacterTavern.");
+    toast.info(localizeUi("ui.botBrowser.botbrowserview.loggedOutOfCharactertavern"));
   };
 
   return (
@@ -1901,22 +1929,18 @@ export function BotBrowserView() {
             type="button"
             onClick={closeBotBrowser}
             className="mari-chrome-control h-9 w-9 shrink-0 rounded-2xl p-0 md:h-10 md:w-10"
-            title="Close library"
-            aria-label="Close library"
+            title={localizeUi("ui.characters.characterlibraryview.closeLibrary")}
+            aria-label={localizeUi("ui.characters.characterlibraryview.closeLibrary")}
           >
             <ArrowLeft size="0.95rem" />
           </button>
           <div className="min-w-0">
-            <p className="text-[0.625rem] font-semibold uppercase tracking-[0.28em] text-[var(--marinara-chat-chrome-panel-muted)]">
-              Cards Library
-            </p>
-            <h1 className="truncate text-base font-semibold text-[var(--marinara-chat-chrome-panel-title)] md:text-2xl">
-              Browse character cards online
-            </h1>
+            <p className="text-[0.625rem] font-semibold uppercase tracking-[0.28em] text-[var(--marinara-chat-chrome-panel-muted)]">{localizeUi("ui.botBrowser.botbrowserview.cardsLibrary")}</p>
+            <h1 className="truncate text-base font-semibold text-[var(--marinara-chat-chrome-panel-title)] md:text-2xl">{localizeUi("ui.botBrowser.botbrowserview.browseCharacterCardsOnline")}</h1>
             <p className="truncate text-xs text-[var(--marinara-chat-chrome-panel-muted)] md:text-sm">
               {totalCount > 0
-                ? `${totalCount.toLocaleString()} cards from ${provider.name}`
-                : `Browsing ${provider.name}`}
+                ?localizeUi("ui.botBrowser.botbrowserview.value1CardsFromValue2", { value1: totalCount.toLocaleString(), value2: provider.name })
+                :localizeUi("ui.botBrowser.botbrowserview.browsingValue1", { value1: provider.name })}
             </p>
           </div>
         </div>
@@ -1939,7 +1963,7 @@ export function BotBrowserView() {
               <>
                 <button
                   type="button"
-                  aria-label="Close provider menu"
+                  aria-label={localizeUi("ui.botBrowser.botbrowserview.closeProviderMenu")}
                   className="fixed inset-0 z-[9998] cursor-default"
                   onClick={() => setSourceOpen(false)}
                 />
@@ -1974,13 +1998,11 @@ export function BotBrowserView() {
           {/* Auth indicator for login providers */}
           {sourceId === "pygmalion" && pygLoggedIn && (
             <span className="flex items-center gap-1 text-[0.65rem] text-emerald-400">
-              <CheckCircle size="0.625rem" /> Logged in
-            </span>
+              <CheckCircle size="0.625rem" /> {localizeUi("ui.botBrowser.botbrowserview.loggedIn")}</span>
           )}
           {sourceId === "chartavern" && ctLoggedIn && (
             <span className="flex items-center gap-1 text-[0.65rem] text-emerald-400">
-              <CheckCircle size="0.625rem" /> Session active
-            </span>
+              <CheckCircle size="0.625rem" /> {localizeUi("ui.botBrowser.botbrowserview.sessionActive")}</span>
           )}
         </div>
       </header>
@@ -1991,16 +2013,13 @@ export function BotBrowserView() {
           <div className="flex w-[260px] flex-shrink-0 flex-col border-r border-[var(--marinara-chat-chrome-panel-divider)] bg-[var(--marinara-chat-chrome-panel-bg)]/80">
             <div className="flex items-center justify-between border-b border-[var(--marinara-chat-chrome-panel-divider)] px-3 py-2">
               <span className="mari-chrome-text-strong flex items-center gap-1.5 text-xs font-semibold">
-                <Tag size="0.75rem" /> Tags
-              </span>
+                <Tag size="0.75rem" /> {localizeUi("ui.characters.metadatatab.tags")}</span>
               <div className="flex items-center gap-1">
                 {(includeTags.length > 0 || excludeTags.length > 0) && (
                   <button
                     onClick={clearAllTags}
                     className="mari-chrome-control mari-chrome-control--danger min-h-0 px-1.5 py-0.5 text-[0.6rem]"
-                  >
-                    Clear
-                  </button>
+                  >{localizeUi("lorebook.editor.batch.clear")}</button>
                 )}
                 <button
                   onClick={() => setShowTagPanel(false)}
@@ -2021,7 +2040,7 @@ export function BotBrowserView() {
                     addCustomTag();
                   }
                 }}
-                placeholder="Search tags..."
+                placeholder={localizeUi("ui.botBrowser.botbrowserview.searchTags")}
                 className="mari-chrome-field mari-chrome-field--compact w-full px-2.5 py-1.5 text-xs"
               />
             </div>
@@ -2053,9 +2072,7 @@ export function BotBrowserView() {
                   <button
                     onClick={addCustomTag}
                     className="flex w-full items-center gap-1.5 rounded-md bg-emerald-500/10 px-2 py-1.5 text-xs font-medium text-emerald-400 transition-colors hover:bg-emerald-500/20"
-                  >
-                    + Add <strong>{tagSearch.trim().toLowerCase()}</strong> as filter
-                  </button>
+                  >{localizeUi("ui.characters.dialoguetab.add")} <strong>{tagSearch.trim().toLowerCase()}</strong> {localizeUi("ui.botBrowser.botbrowserview.asFilter")}</button>
                   <button
                     onClick={() => {
                       const custom = tagSearch.trim().toLowerCase();
@@ -2067,14 +2084,12 @@ export function BotBrowserView() {
                       }
                     }}
                     className="flex w-full items-center gap-1.5 rounded-md bg-red-500/10 px-2 py-1.5 text-xs font-medium text-red-400 transition-colors hover:bg-red-500/20"
-                  >
-                    − Block <strong>{tagSearch.trim().toLowerCase()}</strong> from results
-                  </button>
+                  >{localizeUi("ui.botBrowser.botbrowserview.block")} <strong>{tagSearch.trim().toLowerCase()}</strong> {localizeUi("ui.botBrowser.botbrowserview.fromResults")}</button>
                 </div>
               )}
               {filteredTags.length === 0 && !canAddCustomTag ? (
                 <div className="px-2 py-4 text-center text-[0.65rem] italic text-[var(--muted-foreground)]">
-                  {availableTags.length === 0 ? "Tags will appear after searching" : "No tags match filter"}
+                  {availableTags.length === 0 ?localizeUi("ui.botBrowser.botbrowserview.tagsWillAppearAfterSearching") :localizeUi("ui.botBrowser.botbrowserview.noTagsMatchFilter")}
                 </div>
               ) : (
                 filteredTags.map((tag) => {
@@ -2151,7 +2166,7 @@ export function BotBrowserView() {
                       setQuery(e.target.value);
                       setPage(1);
                     }}
-                    placeholder="Search characters..."
+                    placeholder={localizeUi("ui.botBrowser.botbrowserview.searchCharacters")}
                     className="mari-chrome-field h-10 w-full py-0 pl-9 pr-8 text-sm md:h-9"
                   />
                   {query && (
@@ -2200,8 +2215,7 @@ export function BotBrowserView() {
                       : "",
                   )}
                 >
-                  <Tag size="0.75rem" /> Tags
-                  {(includeTags.length > 0 || excludeTags.length > 0) && (
+                  <Tag size="0.75rem" /> {localizeUi("ui.characters.metadatatab.tags")}{(includeTags.length > 0 || excludeTags.length > 0) && (
                     <span className="rounded-md bg-[var(--marinara-chat-chrome-highlight-bg)] px-1.5 text-[0.6rem] font-semibold">
                       {includeTags.length + excludeTags.length}
                     </span>
@@ -2219,8 +2233,7 @@ export function BotBrowserView() {
                       (showFiltersPanel || hasActiveFeatures) && "mari-chrome-control--selected",
                     )}
                   >
-                    <SlidersHorizontal size="0.75rem" /> Filters
-                    {hasActiveFeatures && (
+                    <SlidersHorizontal size="0.75rem" /> {localizeUi("ui.botBrowser.botbrowserview.filters")}{hasActiveFeatures && (
                       <span className="rounded-md bg-[var(--marinara-chat-chrome-highlight-bg)] px-1.5 text-[0.6rem] font-semibold">
                         {activeFeatureCount}
                       </span>
@@ -2246,14 +2259,14 @@ export function BotBrowserView() {
                       )}
                       title={
                         nsfwGreyedOut
-                          ? "NSFW depends on your account settings"
+                          ?localizeUi("ui.botBrowser.botbrowserview.nsfwDependsOnYourAccountSettings")
                           : effectiveNsfwAvailable
-                            ? "Toggle NSFW content"
+                            ?localizeUi("ui.botBrowser.botbrowserview.toggleNsfwContent")
                             : sourceId === "wyvern"
-                              ? 'Use the "Popular NSFW" sort option'
+                              ?localizeUi("ui.botBrowser.botbrowserview.useThePopularNsfwSortOption")
                               : sourceId === "datacat"
-                                ? "DataCat is NSFW-only"
-                                : `Click to log in to ${provider.name} for NSFW content`
+                                ?localizeUi("ui.botBrowser.botbrowserview.datacatIsNsfwOnly_a49a06a")
+                                :localizeUi("ui.botBrowser.botbrowserview.clickToLogInToValue1ForNsfwContent", { value1: provider.name })
                       }
                       onClick={nsfwGreyedOut ? (e: React.MouseEvent) => e.preventDefault() : handleNsfwClick}
                     >
@@ -2268,10 +2281,8 @@ export function BotBrowserView() {
                           }
                         }}
                         className="accent-[var(--primary)]"
-                      />{" "}
-                      NSFW
-                      {nsfwGreyedOut && (
-                        <span className="ml-0.5 text-[0.55rem] text-[var(--muted-foreground)]">(account)</span>
+                      />{" "}{localizeUi("ui.botBrowser.botbrowserview.nsfw")}{nsfwGreyedOut && (
+                        <span className="ml-0.5 text-[0.55rem] text-[var(--muted-foreground)]">{localizeUi("ui.botBrowser.botbrowserview.account")}</span>
                       )}
                       {!nsfwGreyedOut && isLoginProvider && !effectiveNsfwAvailable && (
                         <LogIn size="0.625rem" className="ml-0.5 opacity-70" />
@@ -2285,37 +2296,32 @@ export function BotBrowserView() {
                   ((sourceId === "pygmalion" && pygLoggedIn) || (sourceId === "chartavern" && ctLoggedIn) ? (
                     <div className="flex items-center gap-1.5">
                       <span className="flex items-center gap-1.5 rounded-lg border border-emerald-500/20 bg-emerald-500/5 px-3 py-2 text-[0.65rem] text-emerald-400">
-                        <CheckCircle size="0.625rem" /> NSFW depends on your account settings
-                      </span>
+                        <CheckCircle size="0.625rem" /> {localizeUi("ui.botBrowser.botbrowserview.nsfwDependsOnYourAccountSettings")}</span>
                       <button
                         onClick={() => {
                           if (sourceId === "pygmalion") handlePygmalionLogout();
                           else if (sourceId === "chartavern") handleCtLogout();
                         }}
                         className="mari-chrome-control mari-chrome-control--small px-2.5 py-2 text-[0.65rem] hover:text-[var(--destructive)]"
-                        title="Log out"
+                        title={localizeUi("ui.botBrowser.botbrowserview.logOut")}
                       >
-                        <LogOut size="0.625rem" /> Logout
-                      </button>
+                        <LogOut size="0.625rem" /> {localizeUi("ui.botBrowser.botbrowserview.logout")}</button>
                     </div>
                   ) : (
                     <button
                       onClick={() => setShowLoginModal(true)}
                       className="mari-chrome-control h-10 px-3 py-0 text-xs md:h-9"
                     >
-                      <LogIn size="0.75rem" /> Log In
-                    </button>
+                      <LogIn size="0.75rem" /> {localizeUi("ui.botBrowser.botbrowserview.logIn")}</button>
                   ))}
                 {sourceId === "wyvern" && (
-                  <span className="flex items-center gap-1.5 rounded-lg border border-amber-500/20 bg-amber-500/5 px-3 py-2 text-[0.65rem] text-amber-400">
-                    Use "🔞 Popular NSFW" sort for NSFW content
-                  </span>
+                  <span className="flex items-center gap-1.5 rounded-lg border border-amber-500/20 bg-amber-500/5 px-3 py-2 text-[0.65rem] text-amber-400">{localizeUi("ui.botBrowser.botbrowserview.usePopularNsfwSortForNsfwContent")}</span>
                 )}
 
                 <button
                   onClick={doSearch}
                   className="mari-chrome-control h-10 w-10 p-0 text-xs md:h-9 md:w-9"
-                  title="Refresh"
+                  title={localizeUi("ui.noodle.noodlehome.refresh")}
                 >
                   <RefreshCw size="0.75rem" />
                 </button>
@@ -2326,9 +2332,7 @@ export function BotBrowserView() {
                 <div className="mari-chrome-selection-bar flex flex-wrap gap-6 px-4 py-3">
                   {(provider.features.length > 0 || provider.extraToggles.length > 0) && (
                     <div className="flex flex-col gap-2">
-                      <span className="mari-chrome-text-muted text-[0.65rem] font-semibold uppercase tracking-wider">
-                        Character Must Have
-                      </span>
+                      <span className="mari-chrome-text-muted text-[0.65rem] font-semibold uppercase tracking-wider">{localizeUi("ui.botBrowser.botbrowserview.characterMustHave")}</span>
                       {provider.features.map((f) => (
                         <label key={f.key} className="flex cursor-pointer items-center gap-2 text-xs">
                           <input
@@ -2359,12 +2363,10 @@ export function BotBrowserView() {
                   )}
                   {(provider.hasSortDirection || provider.hasTokenFilters) && (
                     <div className="flex flex-col gap-2">
-                      <span className="mari-chrome-text-muted text-[0.65rem] font-semibold uppercase tracking-wider">
-                        Advanced Options
-                      </span>
+                      <span className="mari-chrome-text-muted text-[0.65rem] font-semibold uppercase tracking-wider">{localizeUi("ui.agents.regexscripteditor.advancedOptions")}</span>
                       {provider.hasSortDirection && (
                         <div className="flex items-center gap-2">
-                          <label className="mari-chrome-text-muted w-24 text-xs">Sort Direction</label>
+                          <label className="mari-chrome-text-muted w-24 text-xs">{localizeUi("ui.botBrowser.botbrowserview.sortDirection")}</label>
                           <select
                             value={sortAsc ? "asc" : "desc"}
                             onChange={(e) => {
@@ -2373,15 +2375,15 @@ export function BotBrowserView() {
                             }}
                             className="mari-chrome-field mari-chrome-field--compact px-2 py-1 text-xs"
                           >
-                            <option value="desc">Descending</option>
-                            <option value="asc">Ascending</option>
+                            <option value="desc">{localizeUi("ui.botBrowser.botbrowserview.descending")}</option>
+                            <option value="asc">{localizeUi("ui.botBrowser.botbrowserview.ascending")}</option>
                           </select>
                         </div>
                       )}
                       {provider.hasTokenFilters && (
                         <>
                           <div className="flex items-center gap-2">
-                            <label className="mari-chrome-text-muted w-24 text-xs">Min Tokens</label>
+                            <label className="mari-chrome-text-muted w-24 text-xs">{localizeUi("ui.botBrowser.botbrowserview.minTokens")}</label>
                             <input
                               type="number"
                               value={minTokens}
@@ -2394,7 +2396,7 @@ export function BotBrowserView() {
                             />
                           </div>
                           <div className="flex items-center gap-2">
-                            <label className="mari-chrome-text-muted w-24 text-xs">Max Output Tokens</label>
+                            <label className="mari-chrome-text-muted w-24 text-xs">{localizeUi("ui.agents.agenteditor.maxOutputTokens")}</label>
                             <input
                               type="number"
                               value={maxTokens}
@@ -2425,13 +2427,10 @@ export function BotBrowserView() {
                     onClick={doSearch}
                     className="mari-chrome-control mari-chrome-control--selected px-4 py-2 text-xs"
                   >
-                    <RefreshCw size="0.75rem" /> Retry
-                  </button>
+                    <RefreshCw size="0.75rem" /> {localizeUi("ui.game.gamesurfacecomponent.retry")}</button>
                 </div>
               ) : results.length === 0 ? (
-                <div className="mari-chrome-text-muted flex flex-1 items-center justify-center py-12 text-sm">
-                  No characters found
-                </div>
+                <div className="mari-chrome-text-muted flex flex-1 items-center justify-center py-12 text-sm">{localizeUi("ui.botBrowser.botbrowserview.noCharactersFound")}</div>
               ) : (
                 <>
                   <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6">
@@ -2445,20 +2444,15 @@ export function BotBrowserView() {
                         disabled={page <= 1}
                         onClick={() => setPage((p) => Math.max(1, p - 1))}
                         className="mari-chrome-control mari-chrome-control--small px-3 py-1.5 text-xs"
-                      >
-                        Previous
-                      </button>
-                      <span className="text-xs text-[var(--muted-foreground)]">
-                        Page {page}
-                        {totalPages > 1 && totalPages < 9000 ? ` of ${totalPages}` : ""}
+                      >{localizeUi("ui.botBrowser.botbrowserview.previous")}</button>
+                      <span className="text-xs text-[var(--muted-foreground)]">{localizeUi("ui.botBrowser.botbrowserview.page")} {page}
+                        {totalPages > 1 && totalPages < 9000 ?localizeUi("ui.botBrowser.botbrowserview.ofValue1", { value1: totalPages }) : ""}
                       </span>
                       <button
                         disabled={page >= totalPages && totalPages > 1}
                         onClick={() => setPage((p) => p + 1)}
                         className="mari-chrome-control mari-chrome-control--small px-3 py-1.5 text-xs"
-                      >
-                        Next
-                      </button>
+                      >{localizeUi("onboarding.actions.next")}</button>
                     </div>
                   )}
                 </>
@@ -2499,8 +2493,7 @@ export function BotBrowserView() {
           >
             <div className="flex items-center justify-between border-b border-[var(--marinara-chat-chrome-panel-divider)] px-5 py-3">
               <h3 className="mari-chrome-text-strong flex items-center gap-2 text-sm font-bold">
-                <span className="text-amber-400">⚠️</span> DataCat is NSFW only
-              </h3>
+                <span className="text-amber-400">⚠️</span> {localizeUi("ui.botBrowser.botbrowserview.datacatIsNsfwOnly")}</h3>
               <button
                 onClick={() => setPendingDatacatSwitch(false)}
                 className="mari-chrome-control mari-chrome-control--small p-1"
@@ -2509,9 +2502,7 @@ export function BotBrowserView() {
               </button>
             </div>
             <div className="mari-chrome-text flex flex-col gap-3 p-5 text-sm">
-              <p>
-                Every character on DataCat is tagged NSFW upstream, so the NSFW filter is locked on for this provider.
-              </p>
+              <p>{localizeUi("ui.botBrowser.botbrowserview.everyCharacterOnDatacatIsTaggedNsfwUpstreamSo")}</p>
               <div className="mt-2 flex gap-2">
                 <button
                   onClick={() => {
@@ -2520,15 +2511,11 @@ export function BotBrowserView() {
                     performSwitch("datacat");
                   }}
                   className="mari-panel-gradient-button mari-panel-gradient--browser flex-1 px-4 py-2 text-xs"
-                >
-                  Continue to DataCat
-                </button>
+                >{localizeUi("ui.botBrowser.botbrowserview.continueToDatacat")}</button>
                 <button
                   onClick={() => setPendingDatacatSwitch(false)}
                   className="mari-chrome-control flex-1 px-4 py-2 text-xs"
-                >
-                  Don't continue to DataCat
-                </button>
+                >{localizeUi("ui.botBrowser.botbrowserview.donTContinueToDatacat")}</button>
               </div>
             </div>
           </div>
@@ -2565,6 +2552,7 @@ function LoginModal({
   onCtSetCookie: (c: string) => void;
   onCtLogout: () => void;
 }) {
+  const { t: localizeUi } = useUiTranslation();
   const [pygTokenInput, setPygTokenInput] = useState("");
   const [cookie, setCookie] = useState("");
   const [showHelp, setShowHelp] = useState(false);
@@ -2591,12 +2579,10 @@ function LoginModal({
           <h3 className="mari-chrome-text-strong flex items-center gap-2 text-sm font-bold">
             {isPyg ? (
               <>
-                <KeyRound size="1rem" className="text-amber-400" /> Pygmalion Authentication
-              </>
+                <KeyRound size="1rem" className="text-amber-400" /> {localizeUi("ui.botBrowser.loginmodal.pygmalionAuthentication")}</>
             ) : (
               <>
-                <Cookie size="1rem" className="text-amber-400" /> CharacterTavern Session
-              </>
+                <Cookie size="1rem" className="text-amber-400" /> {localizeUi("ui.botBrowser.loginmodal.charactertavernSession")}</>
             )}
           </h3>
           <button onClick={onClose} className="mari-chrome-control mari-chrome-control--small p-1">
@@ -2608,62 +2594,50 @@ function LoginModal({
           {/* Info boxes */}
           <div className="rounded-lg border border-emerald-500/20 bg-emerald-500/5 px-3 py-2 text-xs text-[var(--foreground)]">
             <span className="mr-1.5 text-emerald-400">✅</span>
-            <strong>Browsing and downloading public characters works without logging in!</strong>
+            <strong>{localizeUi("ui.botBrowser.loginmodal.browsingAndDownloadingPublicCharactersWorksWithoutLoggingIn")}</strong>
           </div>
           <div className="rounded-lg border border-amber-500/20 bg-amber-500/5 px-3 py-2 text-xs text-[var(--foreground)]">
             <span className="mr-1.5">🔑</span>
-            <strong>Optional:</strong>{" "}
+            <strong>{localizeUi("ui.botBrowser.loginmodal.optional")}</strong>{" "}
             {isPyg
-              ? "Paste your auth token to enable NSFW content and access authenticated character data."
-              : "Paste your session cookies to see NSFW-tagged content."}
+              ?localizeUi("ui.botBrowser.loginmodal.pasteYourAuthTokenToEnableNsfwContentAnd")
+              :localizeUi("ui.botBrowser.loginmodal.pasteYourSessionCookiesToSeeNsfwTaggedContent")}
           </div>
 
           {/* Login form */}
           {isPyg ? (
             <div className="flex flex-col gap-3">
               <div>
-                <label className="mb-1 block text-xs text-[var(--muted-foreground)]">Auth Token</label>
+                <label className="mb-1 block text-xs text-[var(--muted-foreground)]">{localizeUi("ui.botBrowser.loginmodal.authToken")}</label>
                 <textarea
                   value={pygTokenInput}
                   onChange={(e) => setPygTokenInput(e.target.value)}
                   disabled={isLoggedIn || loginLoading}
-                  placeholder="Paste your Pygmalion auth token here"
+                  placeholder={localizeUi("ui.botBrowser.loginmodal.pasteYourPygmalionAuthTokenHere")}
                   rows={3}
                   className="mari-chrome-field w-full resize-y px-3 py-2 font-mono text-xs disabled:opacity-50"
                 />
               </div>
               <details open={showPygHelp} onToggle={(e) => setShowPygHelp((e.target as HTMLDetailsElement).open)}>
-                <summary className="cursor-pointer text-xs font-medium text-blue-400 hover:underline">
-                  ▸ ❓ How to get your auth token
-                </summary>
+                <summary className="cursor-pointer text-xs font-medium text-blue-400 hover:underline">{localizeUi("ui.botBrowser.loginmodal.howToGetYourAuthToken")}</summary>
                 <div className="mt-2 flex flex-col gap-1.5 rounded-lg bg-[var(--secondary)] p-3 text-[0.7rem] leading-relaxed text-[var(--muted-foreground)]">
-                  <p>
-                    1. Go to{" "}
+                  <p>{localizeUi("ui.botBrowser.loginmodal.text1GoTo")}{" "}
                     <a
                       href="https://pygmalion.chat"
                       target="_blank"
                       rel="noopener noreferrer"
                       className="text-blue-400 underline"
-                    >
-                      pygmalion.chat
-                    </a>{" "}
-                    and log in
+                    >{localizeUi("ui.botBrowser.loginmodal.pygmalionChat")}</a>{" "}{localizeUi("ui.botBrowser.loginmodal.andLogIn")}</p>
+                  <p>{localizeUi("ui.botBrowser.loginmodal.text2OpenDevtoolsF12")} <strong>{localizeUi("ui.botBrowser.loginmodal.application")}</strong> {localizeUi("ui.botBrowser.loginmodal.tab")} <strong>{localizeUi("ui.botBrowser.loginmodal.localStorage")}</strong>
                   </p>
-                  <p>
-                    2. Open DevTools (F12) → <strong>Application</strong> tab → <strong>Local Storage</strong>
+                  <p>{localizeUi("ui.botBrowser.loginmodal.text3FindTheEntryNamed")} <code className="rounded bg-[var(--accent)] px-1">authn</code>
                   </p>
-                  <p>
-                    3. Find the entry named <code className="rounded bg-[var(--accent)] px-1">authn</code>
-                  </p>
-                  <p>
-                    4. Copy its <strong>Value</strong> (a long string, ~705 characters) and paste it above
-                  </p>
+                  <p>{localizeUi("ui.botBrowser.loginmodal.text4CopyIts")} <strong>{localizeUi("ui.botBrowser.loginmodal.value")}</strong> {localizeUi("ui.botBrowser.loginmodal.aLongString705CharactersAndPasteItAbove")}</p>
                 </div>
               </details>
               {isLoggedIn && (
                 <div className="flex items-center gap-1.5 text-xs text-emerald-400">
-                  <CheckCircle size="0.75rem" /> Token active — NSFW content enabled
-                </div>
+                  <CheckCircle size="0.75rem" /> {localizeUi("ui.botBrowser.loginmodal.tokenActiveNsfwContentEnabled")}</div>
               )}
               <div className="flex items-center gap-2">
                 {!isLoggedIn ? (
@@ -2672,13 +2646,10 @@ function LoginModal({
                     disabled={loginLoading || !pygTokenInput.trim()}
                     className="flex items-center gap-1.5 rounded-lg bg-emerald-600 px-4 py-2 text-xs font-medium text-white transition-colors hover:bg-emerald-500 disabled:opacity-50"
                   >
-                    {loginLoading ? <Loader2 size="0.75rem" className="animate-spin" /> : <KeyRound size="0.75rem" />}{" "}
-                    Save & Connect
-                  </button>
+                    {loginLoading ? <Loader2 size="0.75rem" className="animate-spin" /> : <KeyRound size="0.75rem" />}{" "}{localizeUi("ui.botBrowser.loginmodal.saveConnect")}</button>
                 ) : (
                   <button onClick={onPygLogout} className="mari-chrome-control px-4 py-2 text-xs">
-                    <LogOut size="0.75rem" /> Log Out
-                  </button>
+                    <LogOut size="0.75rem" /> {localizeUi("ui.botBrowser.loginmodal.logOut")}</button>
                 )}
                 <a
                   href="https://pygmalion.chat"
@@ -2686,53 +2657,40 @@ function LoginModal({
                   rel="noopener noreferrer"
                   className="mari-chrome-control px-4 py-2 text-xs"
                 >
-                  <ExternalLink size="0.75rem" /> Website
-                </a>
+                  <ExternalLink size="0.75rem" /> {localizeUi("ui.botBrowser.loginmodal.website")}</a>
               </div>
             </div>
           ) : isCt ? (
             <div className="flex flex-col gap-3">
               <div>
-                <label className="mb-1 block text-xs text-[var(--muted-foreground)]">Cookie String</label>
+                <label className="mb-1 block text-xs text-[var(--muted-foreground)]">{localizeUi("ui.botBrowser.loginmodal.cookieString")}</label>
                 <textarea
                   value={cookie}
                   onChange={(e) => setCookie(e.target.value)}
                   disabled={isLoggedIn || loginLoading}
-                  placeholder="Paste your session cookie value here"
+                  placeholder={localizeUi("ui.botBrowser.loginmodal.pasteYourSessionCookieValueHere")}
                   rows={3}
                   className="mari-chrome-field w-full resize-y px-3 py-2 text-sm disabled:opacity-50"
                 />
               </div>
               <details open={showHelp} onToggle={(e) => setShowHelp((e.target as HTMLDetailsElement).open)}>
-                <summary className="cursor-pointer text-xs font-medium text-blue-400 hover:underline">
-                  ▸ ❓ How to get your session cookie
-                </summary>
+                <summary className="cursor-pointer text-xs font-medium text-blue-400 hover:underline">{localizeUi("ui.botBrowser.loginmodal.howToGetYourSessionCookie")}</summary>
                 <div className="mt-2 flex flex-col gap-1.5 rounded-lg bg-[var(--secondary)] p-3 text-[0.7rem] leading-relaxed text-[var(--muted-foreground)]">
-                  <p>
-                    1. Go to{" "}
+                  <p>{localizeUi("ui.botBrowser.loginmodal.text1GoTo")}{" "}
                     <a
                       href="https://character-tavern.com"
                       target="_blank"
                       rel="noopener noreferrer"
                       className="text-blue-400 underline"
-                    >
-                      character-tavern.com
-                    </a>{" "}
-                    and log in
-                  </p>
-                  <p>2. Open DevTools (F12) → Application tab → Cookies</p>
-                  <p>
-                    3. Find the <code className="rounded bg-[var(--accent)] px-1">session</code> cookie
-                  </p>
-                  <p>
-                    4. Copy its <strong>Value</strong> and paste it above
-                  </p>
+                    >{localizeUi("ui.botBrowser.loginmodal.characterTavernCom")}</a>{" "}{localizeUi("ui.botBrowser.loginmodal.andLogIn")}</p>
+                  <p>{localizeUi("ui.botBrowser.loginmodal.text2OpenDevtoolsF12ApplicationTabCookies")}</p>
+                  <p>{localizeUi("ui.botBrowser.loginmodal.text3FindThe")} <code className="rounded bg-[var(--accent)] px-1">session</code> {localizeUi("ui.botBrowser.loginmodal.cookie")}</p>
+                  <p>{localizeUi("ui.botBrowser.loginmodal.text4CopyIts")} <strong>{localizeUi("ui.botBrowser.loginmodal.value")}</strong> {localizeUi("ui.agents.agenteditor.andPasteItAbove")}</p>
                 </div>
               </details>
               {isLoggedIn && (
                 <div className="flex items-center gap-1.5 text-xs text-emerald-400">
-                  <CheckCircle size="0.75rem" /> Session active — NSFW content enabled
-                </div>
+                  <CheckCircle size="0.75rem" /> {localizeUi("ui.botBrowser.loginmodal.sessionActiveNsfwContentEnabled")}</div>
               )}
               <div className="flex items-center gap-2">
                 {!isLoggedIn ? (
@@ -2741,13 +2699,10 @@ function LoginModal({
                     disabled={loginLoading || !cookie.trim()}
                     className="flex items-center gap-1.5 rounded-lg bg-indigo-600 px-4 py-2 text-xs font-medium text-white transition-colors hover:bg-indigo-500 disabled:opacity-50"
                   >
-                    {loginLoading ? <Loader2 size="0.75rem" className="animate-spin" /> : <Cookie size="0.75rem" />}{" "}
-                    Save & Connect
-                  </button>
+                    {loginLoading ? <Loader2 size="0.75rem" className="animate-spin" /> : <Cookie size="0.75rem" />}{" "}{localizeUi("ui.botBrowser.loginmodal.saveConnect")}</button>
                 ) : (
                   <button onClick={onCtLogout} className="mari-chrome-control px-4 py-2 text-xs">
-                    <LogOut size="0.75rem" /> Log Out
-                  </button>
+                    <LogOut size="0.75rem" /> {localizeUi("ui.botBrowser.loginmodal.logOut")}</button>
                 )}
                 <a
                   href="https://character-tavern.com"
@@ -2755,8 +2710,7 @@ function LoginModal({
                   rel="noopener noreferrer"
                   className="mari-chrome-control px-4 py-2 text-xs"
                 >
-                  <ExternalLink size="0.75rem" /> CharacterTavern
-                </a>
+                  <ExternalLink size="0.75rem" /> {localizeUi("ui.botBrowser.loginmodal.charactertavern")}</a>
               </div>
             </div>
           ) : null}
@@ -2771,6 +2725,7 @@ function LoginModal({
 // ════════════════════════════════════════════════
 
 function CardTile({ card, onClick }: { card: BrowseCard; onClick: () => void }) {
+  const { t: localizeUi } = useUiTranslation();
   const [imgError, setImgError] = useState(false);
   const Stat1Icon = STAT_ICONS[card.stat1Icon];
   const Stat2Icon = STAT_ICONS[card.stat2Icon];
@@ -2796,14 +2751,12 @@ function CardTile({ card, onClick }: { card: BrowseCard; onClick: () => void }) 
           />
         )}
         {card.nsfw && (
-          <span className="absolute left-1.5 top-1.5 rounded bg-red-500/80 px-1.5 py-0.5 text-[0.55rem] font-bold text-white">
-            NSFW
-          </span>
+          <span className="absolute left-1.5 top-1.5 rounded bg-red-500/80 px-1.5 py-0.5 text-[0.55rem] font-bold text-white">{localizeUi("ui.botBrowser.botbrowserview.nsfw")}</span>
         )}
       </div>
       <div className="flex flex-1 flex-col gap-1 p-2.5">
         <h3 className="truncate text-sm font-semibold text-[var(--foreground)]">{card.name}</h3>
-        {card.creator && <p className="truncate text-xs text-[var(--muted-foreground)]">by {card.creator}</p>}
+        {card.creator && <p className="truncate text-xs text-[var(--muted-foreground)]">{localizeUi("ui.panels.presetspanel.by")} {card.creator}</p>}
         {card.tagline && (
           <p className="line-clamp-2 text-xs text-[var(--muted-foreground)] opacity-70">{card.tagline}</p>
         )}
@@ -2856,6 +2809,7 @@ function DetailView({
   onTagImportModeChange: (mode: TagImportMode) => void;
   onDetailUpdate?: (detail: CardDetail) => void;
 }) {
+  const { t: localizeUi } = useUiTranslation();
   const [imgError, setImgError] = useState(false);
   const [downloading, setDownloading] = useState(false);
   const displayDetail = detail;
@@ -2900,9 +2854,9 @@ function DetailView({
       a.click();
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
-      toast.success(`Downloaded "${card.name}" as PNG character card!`);
+      toast.success(localizeUi("ui.botBrowser.detailview.downloadedValue1AsPngCharacterCard", { value1: card.name }));
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Download failed");
+      toast.error(err instanceof Error ? err.message :localizeUi("ui.botBrowser.detailview.downloadFailed"));
     } finally {
       setDownloading(false);
     }
@@ -2915,8 +2869,8 @@ function DetailView({
           type="button"
           onClick={onBack}
           className="mari-editor-action inline-flex shrink-0"
-          title="Back to results"
-          aria-label="Back to results"
+          title={localizeUi("ui.botBrowser.detailview.backToResults")}
+          aria-label={localizeUi("ui.botBrowser.detailview.backToResults")}
         >
           <ArrowLeft size="1.125rem" />
         </button>
@@ -2927,7 +2881,7 @@ function DetailView({
           rel="noopener noreferrer"
           className="mari-chrome-control mari-chrome-control--small px-2 py-1.5 text-xs"
         >
-          <ExternalLink size="0.75rem" /> View on {provider.siteName}
+          <ExternalLink size="0.75rem" /> {localizeUi("ui.botBrowser.detailview.viewOn")} {provider.siteName}
         </a>
       </div>
       {loading ? (
@@ -2953,7 +2907,7 @@ function DetailView({
             </div>
             <div className="flex flex-col gap-2 max-md:flex-1">
               <div className="rounded-lg border border-[var(--border)] bg-[var(--secondary)]/60 p-2.5">
-                <p className="mb-2 text-[0.6875rem] font-semibold text-[var(--foreground)]">Imported tags</p>
+                <p className="mb-2 text-[0.6875rem] font-semibold text-[var(--foreground)]">{localizeUi("ui.botBrowser.detailview.importedTags")}</p>
                 <div className="flex flex-col gap-1.5">
                   {TAG_IMPORT_OPTIONS.map((option) => (
                     <label
@@ -2986,7 +2940,7 @@ function DetailView({
                 className="mari-panel-gradient-button mari-panel-gradient--browser px-4 py-2.5 text-xs"
               >
                 {importing ? <Loader2 size="0.875rem" className="animate-spin" /> : <Download size="0.875rem" />}
-                {importing ? "Importing..." : "Import"}
+                {importing ?localizeUi("ui.botBrowser.detailview.importing") :localizeUi("ui.chat.chatbranchselector.import")}
               </button>
               <button
                 onClick={handleDownloadPng}
@@ -2994,7 +2948,7 @@ function DetailView({
                 className="mari-chrome-control px-4 py-2 text-xs"
               >
                 {downloading ? <Loader2 size="0.75rem" className="animate-spin" /> : <Download size="0.75rem" />}
-                {downloading ? "Building PNG..." : "Download as PNG"}
+                {downloading ?localizeUi("ui.botBrowser.detailview.buildingPng") :localizeUi("ui.botBrowser.detailview.downloadAsPng")}
               </button>
               <div className="mari-chrome-text-muted flex flex-col gap-1 rounded-lg bg-[var(--secondary)] p-2.5 text-xs">
                 {card.stat1 > 0 && card.stat1Label && (
@@ -3030,7 +2984,7 @@ function DetailView({
           <div className="flex min-w-0 flex-1 flex-col gap-3">
             <div>
               <h3 className="text-lg font-bold text-[var(--foreground)]">{card.name}</h3>
-              {card.creator && <p className="text-xs text-[var(--muted-foreground)]">by {card.creator}</p>}
+              {card.creator && <p className="text-xs text-[var(--muted-foreground)]">{localizeUi("ui.panels.presetspanel.by")} {card.creator}</p>}
             </div>
             {card.tagline && <p className="text-sm text-[var(--foreground)]/80">{card.tagline}</p>}
             {card.tags?.length > 0 && (
@@ -3049,20 +3003,19 @@ function DetailView({
             {displayDetail ? (
               <div className="flex flex-col gap-3">
                 {displayDetail.creatorNotes && (
-                  <DefSection title="Creator's Notes" content={displayDetail.creatorNotes} />
+                  <DefSection title={localizeUi("ui.botBrowser.detailview.creatorSNotes")} content={displayDetail.creatorNotes} />
                 )}
                 {displayDetail.description && (
-                  <DefSection title="Description / Personality" content={displayDetail.description} />
+                  <DefSection title={localizeUi("ui.botBrowser.detailview.descriptionPersonality")} content={displayDetail.description} />
                 )}
-                {displayDetail.personality && <DefSection title="Personality" content={displayDetail.personality} />}
-                {displayDetail.scenario && <DefSection title="Scenario" content={displayDetail.scenario} />}
+                {displayDetail.personality && <DefSection title={localizeUi("chat.settings.inlineEditor.fields.personality")} content={displayDetail.personality} />}
+                {displayDetail.scenario && <DefSection title={localizeUi("chat.settings.inlineEditor.fields.scenario")} content={displayDetail.scenario} />}
                 {displayDetail.firstMessage && (
-                  <DefSection title="First Message" content={displayDetail.firstMessage} />
+                  <DefSection title={localizeUi("ui.characters.dialoguetab.firstMessage")} content={displayDetail.firstMessage} />
                 )}
                 {displayDetail.alternateGreetings && displayDetail.alternateGreetings.length > 0 && (
                   <div>
-                    <h4 className="mb-1 text-xs font-semibold text-[var(--foreground)]">
-                      Alternate Greetings ({displayDetail.alternateGreetings.length})
+                    <h4 className="mb-1 text-xs font-semibold text-[var(--foreground)]">{localizeUi("ui.characters.dialoguetab.alternateGreetings")}{displayDetail.alternateGreetings.length})
                     </h4>
                     <div className="flex flex-col gap-1.5">
                       {displayDetail.alternateGreetings.map((g, i) => (
@@ -3077,12 +3030,11 @@ function DetailView({
                   </div>
                 )}
                 {displayDetail.exampleDialogs && (
-                  <DefSection title="Example Dialogues" content={displayDetail.exampleDialogs} />
+                  <DefSection title={localizeUi("ui.botBrowser.detailview.exampleDialogues")} content={displayDetail.exampleDialogs} />
                 )}
                 {displayDetail.hasLorebook && (
                   <div className="flex items-center gap-1.5 rounded-lg bg-amber-500/10 px-3 py-2 text-xs text-amber-400">
-                    <CheckCircle size="0.75rem" /> Has embedded lorebook
-                  </div>
+                    <CheckCircle size="0.75rem" /> {localizeUi("ui.botBrowser.detailview.hasEmbeddedLorebook")}</div>
                 )}
                 {displayDetail.extra?.map((section, i) => (
                   <DefSection key={i} title={section.title} content={section.content} />
@@ -3091,8 +3043,8 @@ function DetailView({
             ) : (
               <div className="py-4 text-xs italic text-[var(--muted-foreground)]">
                 {loading
-                  ? "Loading character details..."
-                  : "No detailed definition available. You can still import this character with basic info."}
+                  ?localizeUi("ui.botBrowser.detailview.loadingCharacterDetails")
+                  :localizeUi("ui.botBrowser.detailview.noDetailedDefinitionAvailableYouCanStillImportThis")}
               </div>
             )}
           </div>

@@ -17,6 +17,7 @@ import { useGameModeStore } from "../../stores/game-mode.store";
 import { useRenderTimer } from "../../lib/perf-diagnostics";
 import { Modal } from "../ui/Modal";
 import { PanelLockButton, useDraggablePanel } from "./DraggablePanel";
+import { useTranslation as useUiTranslation } from "react-i18next";
 
 // ── Public API ──
 
@@ -224,6 +225,7 @@ function buildUpdatedWidgetConfig(
 }
 
 function useWidgetEditor(widgets: HudWidget[], chatId: string) {
+  const { t: localizeUi } = useUiTranslation();
   const setHudWidgets = useGameModeStore((s) => s.setHudWidgets);
   const updateGameWidgets = useUpdateGameWidgets();
   const [editingWidgetId, setEditingWidgetId] = useState<string | null>(null);
@@ -261,14 +263,18 @@ function useWidgetEditor(widgets: HudWidget[], chatId: string) {
 
       try {
         await updateGameWidgets.mutateAsync({ chatId, widgets: nextWidgets });
-        toast.success(`${editingWidget.label} updated.`);
+        toast.success(
+          localizeUi("ui.game.widgetEditor.updated", {
+            label: editingWidget.label,
+          }),
+        );
         setEditingWidgetId(null);
       } catch {
         setHudWidgets(previousWidgets);
-        toast.error("Failed to save widget changes.");
+        toast.error(localizeUi("ui.game.widgetEditor.saveFailed"));
       }
     },
-    [chatId, editingWidget, setHudWidgets, updateGameWidgets, widgets],
+    [chatId, editingWidget, localizeUi, setHudWidgets, updateGameWidgets, widgets],
   );
 
   return {
@@ -314,6 +320,7 @@ export function GameWidgetPanel({ widgets, position, chatId, constraintsRef }: G
 
 /** Mobile: collapsed emoji pills that expand into full widget on tap. */
 export function MobileWidgetPanel({ widgets, position, chatId }: MobileWidgetPanelProps) {
+  const { t: localizeUi } = useUiTranslation();
   const filtered = getVisibleWidgets(widgets, position);
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const { editingWidget, openEditor, closeEditor, saveWidget, isSaving } = useWidgetEditor(widgets, chatId);
@@ -342,7 +349,7 @@ export function MobileWidgetPanel({ widgets, position, chatId }: MobileWidgetPan
                     type="button"
                     onClick={() => openEditor(w)}
                     className={GAME_WIDGET_ICON_BUTTON_CLASS}
-                    title={`Edit ${w.label}`}
+                    title={localizeUi("ui.game.mobilewidgetpanel.editValue1", { value1: w.label })}
                   >
                     <Pencil size={10} />
                   </button>
@@ -350,7 +357,7 @@ export function MobileWidgetPanel({ widgets, position, chatId }: MobileWidgetPan
                     type="button"
                     onClick={() => setExpandedId(null)}
                     className={cn(GAME_WIDGET_ICON_BUTTON_CLASS, "text-xs font-medium")}
-                    title="Collapse widget"
+                    title={localizeUi("ui.game.mobilewidgetpanel.collapseWidget")}
                   >
                     ×
                   </button>
@@ -398,6 +405,7 @@ function WidgetCard({
   constraintsRef?: RefObject<HTMLElement | null>;
   onEdit: (widget: HudWidget) => void;
 }) {
+  const { t: localizeUi } = useUiTranslation();
   const [collapsed, setCollapsed] = useState(false);
   const { locked, toggleLocked, resetPosition, x, y, handleDragEnd } = useDraggablePanel(chatId, `widget:${widget.id}`);
 
@@ -438,7 +446,7 @@ function WidgetCard({
             onEdit(widget);
           }}
           className={GAME_WIDGET_ICON_BUTTON_CLASS}
-          title={`Edit ${widget.label}`}
+          title={localizeUi("ui.game.mobilewidgetpanel.editValue1", { value1: widget.label })}
         >
           <Pencil size={10} />
         </button>
@@ -459,6 +467,7 @@ function WidgetCard({
 // ── Widget Body Router ──
 
 function WidgetBody({ widget }: { widget: HudWidget }) {
+  const { t: localizeUi } = useUiTranslation();
   switch (widget.type) {
     case "progress_bar":
       return <ProgressBarWidget widget={widget} />;
@@ -477,7 +486,7 @@ function WidgetBody({ widget }: { widget: HudWidget }) {
     case "timer":
       return <TimerWidget widget={widget} />;
     default:
-      return <p className={cn("text-[0.625rem]", GAME_WIDGET_MUTED_CLASS)}>Unknown widget type</p>;
+      return <p className={cn("text-[0.625rem]", GAME_WIDGET_MUTED_CLASS)}>{localizeUi("ui.game.widgetbody.unknownWidgetType")}</p>;
   }
 }
 
@@ -504,6 +513,7 @@ function WidgetEditorModal({
   syncStartingValue?: boolean;
   saveLabel?: string;
 }) {
+  const { t: localizeUi } = useUiTranslation();
   const [draft, setDraft] = useState<WidgetEditorDraft>(EMPTY_WIDGET_DRAFT);
 
   useEffect(() => {
@@ -522,7 +532,7 @@ function WidgetEditorModal({
   const hintEntries = Object.entries(widget.config.valueHints ?? {});
 
   return createPortal(
-    <Modal open={open} onClose={isSaving ? () => {} : onClose} title={`Edit ${widget.label}`} width="max-w-lg">
+    <Modal open={open} onClose={isSaving ? () => {} : onClose} title={localizeUi("ui.game.mobilewidgetpanel.editValue1", { value1: widget.label })} width="max-w-lg">
       <div className="space-y-4">
         <p className="text-sm text-[var(--muted-foreground)]">{description}</p>
 
@@ -538,7 +548,7 @@ function WidgetEditorModal({
               />
             </label>
             <label className="space-y-1.5">
-              <span className="text-xs font-medium text-[var(--muted-foreground)]">Maximum value</span>
+              <span className="text-xs font-medium text-[var(--muted-foreground)]">{localizeUi("ui.game.widgeteditormodal.maximumValue")}</span>
               <input
                 type="number"
                 min={1}
@@ -552,7 +562,7 @@ function WidgetEditorModal({
 
         {widget.type === "counter" && (
           <label className="space-y-1.5">
-            <span className="text-xs font-medium text-[var(--muted-foreground)]">Count</span>
+            <span className="text-xs font-medium text-[var(--muted-foreground)]">{localizeUi("ui.game.widgeteditormodal.count")}</span>
             <input
               type="number"
               value={draft.count}
@@ -567,8 +577,8 @@ function WidgetEditorModal({
             {draft.stats.length === 0 ? (
               <p className="text-sm text-[var(--muted-foreground)]">
                 {allowStructureEdit
-                  ? "This stat block has no fields yet. Add one below."
-                  : "This stat block has no editable values."}
+                  ?localizeUi("ui.game.widgeteditormodal.thisStatBlockHasNoFieldsYetAddOne")
+                  :localizeUi("ui.game.widgeteditormodal.thisStatBlockHasNoEditableValues")}
               </p>
             ) : (
               draft.stats.map((stat, index) => (
@@ -581,7 +591,7 @@ function WidgetEditorModal({
                 >
                   {allowStructureEdit ? (
                     <label className="space-y-1.5">
-                      <span className="text-xs font-medium text-[var(--muted-foreground)]">Stat</span>
+                      <span className="text-xs font-medium text-[var(--muted-foreground)]">{localizeUi("ui.game.widgeteditormodal.stat")}</span>
                       <input
                         type="text"
                         value={stat.name}
@@ -593,20 +603,20 @@ function WidgetEditorModal({
                             ),
                           }))
                         }
-                        placeholder="Name"
+                        placeholder={localizeUi("ui.characters.metadatatab.name")}
                         className="w-full rounded-lg border border-[var(--border)] bg-[var(--background)] px-3 py-2 text-sm text-[var(--foreground)] outline-none transition focus:border-[var(--primary)]"
                       />
                     </label>
                   ) : (
                     <div className="space-y-1.5">
-                      <span className="text-xs font-medium text-[var(--muted-foreground)]">Stat</span>
+                      <span className="text-xs font-medium text-[var(--muted-foreground)]">{localizeUi("ui.game.widgeteditormodal.stat")}</span>
                       <div className="rounded-lg border border-[var(--border)] bg-[var(--background)] px-3 py-2 text-sm text-[var(--foreground)]/75">
                         {stat.name}
                       </div>
                     </div>
                   )}
                   <label className="space-y-1.5">
-                    <span className="text-xs font-medium text-[var(--muted-foreground)]">Value</span>
+                    <span className="text-xs font-medium text-[var(--muted-foreground)]">{localizeUi("ui.game.widgeteditormodal.value")}</span>
                     <input
                       type="text"
                       value={stat.value}
@@ -650,7 +660,7 @@ function WidgetEditorModal({
                 className="inline-flex items-center gap-2 rounded-lg border border-[var(--border)] px-3 py-2 text-sm text-[var(--foreground)] transition-colors hover:bg-[var(--accent)]"
               >
                 <Plus size={14} />
-                <span>Add Stat</span>
+                <span>{localizeUi("ui.game.widgeteditormodal.addStat")}</span>
               </button>
             )}
           </div>
@@ -658,21 +668,21 @@ function WidgetEditorModal({
 
         {widget.type === "list" && (
           <label className="space-y-1.5">
-            <span className="text-xs font-medium text-[var(--muted-foreground)]">Items</span>
+            <span className="text-xs font-medium text-[var(--muted-foreground)]">{localizeUi("ui.game.widgeteditormodal.items")}</span>
             <textarea
               value={draft.items}
               onChange={(event) => setDraft((current) => ({ ...current, items: event.target.value }))}
               rows={6}
               className="w-full rounded-lg border border-[var(--border)] bg-[var(--background)] px-3 py-2 text-sm text-[var(--foreground)] outline-none transition focus:border-[var(--primary)]"
             />
-            <span className="block text-xs text-[var(--muted-foreground)]">Enter one item per line.</span>
+            <span className="block text-xs text-[var(--muted-foreground)]">{localizeUi("ui.game.widgeteditormodal.enterOneItemPerLine")}</span>
           </label>
         )}
 
         {widget.type === "timer" && (
           <div className="space-y-3">
             <label className="space-y-1.5">
-              <span className="text-xs font-medium text-[var(--muted-foreground)]">Seconds remaining</span>
+              <span className="text-xs font-medium text-[var(--muted-foreground)]">{localizeUi("ui.game.widgeteditormodal.secondsRemaining")}</span>
               <input
                 type="number"
                 min={0}
@@ -687,15 +697,13 @@ function WidgetEditorModal({
                 checked={draft.running}
                 onChange={(event) => setDraft((current) => ({ ...current, running: event.target.checked }))}
                 className="h-4 w-4 rounded border-[var(--border)] text-[var(--primary)] focus:ring-[var(--primary)]"
-              />
-              Timer is running
-            </label>
+              />{localizeUi("ui.game.widgeteditormodal.timerIsRunning")}</label>
           </div>
         )}
 
         {hintEntries.length > 0 && (
           <div className="rounded-xl border border-[var(--border)] bg-[var(--accent)]/40 px-3 py-2">
-            <p className="mb-1 text-xs font-medium text-[var(--foreground)]">Model value hints</p>
+            <p className="mb-1 text-xs font-medium text-[var(--foreground)]">{localizeUi("ui.game.widgeteditormodal.modelValueHints")}</p>
             <div className="space-y-1 text-xs text-[var(--muted-foreground)]">
               {hintEntries.map(([key, value]) => (
                 <p key={key}>
@@ -712,16 +720,14 @@ function WidgetEditorModal({
             onClick={onClose}
             disabled={isSaving}
             className="rounded-lg border border-[var(--border)] px-3 py-2 text-sm text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)] disabled:opacity-50"
-          >
-            Cancel
-          </button>
+          >{localizeUi("chat.delete.dialog.cancel")}</button>
           <button
             type="button"
             onClick={handleSave}
             disabled={isSaving}
             className="rounded-lg bg-[var(--primary)] px-3 py-2 text-sm font-medium text-[var(--primary-foreground)] transition-opacity hover:opacity-90 disabled:opacity-50"
           >
-            {isSaving ? "Saving..." : saveLabel}
+            {isSaving ?localizeUi("ui.noodle.stageprofileform.saving") : saveLabel}
           </button>
         </div>
       </div>
@@ -749,6 +755,7 @@ export function GameWidgetSessionPrepModal({
   onStartSession,
   isStartingSession,
 }: GameWidgetSessionPrepModalProps) {
+  const { t: localizeUi } = useUiTranslation();
   const updateGameWidgets = useUpdateGameWidgets();
   const [draftWidgets, setDraftWidgets] = useState<HudWidget[]>(widgets);
   const [editingWidgetId, setEditingWidgetId] = useState<string | null>(null);
@@ -885,7 +892,7 @@ export function GameWidgetSessionPrepModal({
                       className="inline-flex items-center gap-1.5 rounded-lg border border-[var(--border)] px-3 py-1.5 text-xs font-medium text-[var(--foreground)] transition-colors hover:bg-[var(--accent)] disabled:opacity-50"
                     >
                       <Pencil size={12} />
-                      <span>Edit</span>
+                      <span>{localizeUi("ui.noodle.noodlepostcard.edit")}</span>
                     </button>
                     <button
                       type="button"
@@ -894,7 +901,7 @@ export function GameWidgetSessionPrepModal({
                       className="inline-flex items-center gap-1.5 rounded-lg border border-[var(--destructive)]/25 px-3 py-1.5 text-xs font-medium text-[var(--destructive)] transition-colors hover:bg-[var(--destructive)]/10 disabled:opacity-50"
                     >
                       <Trash2 size={12} />
-                      <span>Remove</span>
+                      <span>{localizeUi("settings.notifications.customSound.actions.remove")}</span>
                     </button>
                   </div>
                 </div>
@@ -1087,13 +1094,14 @@ function StatBlockWidget({ widget }: { widget: HudWidget }) {
 }
 
 function ListWidget({ widget }: { widget: HudWidget }) {
+  const { t: localizeUi } = useUiTranslation();
   const rawItems = widget.config.items;
   const items = Array.isArray(rawItems) ? rawItems : [];
 
   return (
     <div className="space-y-0.5">
       {items.length === 0 ? (
-        <p className={cn("text-[0.5625rem] italic", GAME_WIDGET_MUTED_CLASS)}>Empty</p>
+        <p className={cn("text-[0.5625rem] italic", GAME_WIDGET_MUTED_CLASS)}>{localizeUi("ui.characters.characterversionhistorypanel.empty")}</p>
       ) : (
         items.slice(0, 8).map((item, i) => (
           <div key={i} className="flex items-center gap-1.5 text-[0.5625rem]">
@@ -1107,6 +1115,7 @@ function ListWidget({ widget }: { widget: HudWidget }) {
 }
 
 function InventoryGridWidget({ widget }: { widget: HudWidget }) {
+  const { t: localizeUi } = useUiTranslation();
   const { slots = 8 } = widget.config;
   const categories = Array.isArray(widget.config.categories) ? widget.config.categories : [];
   const contents = Array.isArray(widget.config.contents) ? widget.config.contents : [];
@@ -1128,9 +1137,7 @@ function InventoryGridWidget({ widget }: { widget: HudWidget }) {
                 ? "bg-[var(--marinara-chat-chrome-highlight-bg)] text-[var(--marinara-chat-chrome-highlight-text)]"
                 : "text-[var(--marinara-chat-chrome-panel-muted)] hover:bg-[var(--marinara-chat-chrome-highlight-bg-hover)] hover:text-[var(--marinara-chat-chrome-highlight-text)]",
             )}
-          >
-            All
-          </button>
+          >{localizeUi("ui.noodle.stageprofilesourcepicker.all")}</button>
           {categories.map((cat) => (
             <button
               key={cat}
@@ -1167,8 +1174,7 @@ function InventoryGridWidget({ widget }: { widget: HudWidget }) {
                     {item.name}
                   </span>
                   {item.quantity && item.quantity > 1 && (
-                    <span className="text-[0.4375rem]" style={{ color: accent }}>
-                      x{item.quantity}
+                    <span className="text-[0.4375rem]" style={{ color: accent }}>{localizeUi("ui.panels.imagedimensionrow.x")}{item.quantity}
                     </span>
                   )}
                 </div>

@@ -1,119 +1,76 @@
 import { create } from "zustand";
 
-// ── Translation channel config (chat messages vs user input) ──
-export interface TranslationChannelConfig {
+// ── Translation config (set from chat metadata) ──
+export interface TranslationConfig {
   provider: "ai" | "deeplx" | "deepl" | "google";
-  targetLanguage: string;
+  inputTargetLanguage: string;
+  outputTargetLanguage: string;
   connectionId?: string;
-  systemPrompt?: string;
-  maxTokens?: number;
+  inputSystemPrompt?: string;
+  outputSystemPrompt?: string;
+  inputMaxTokens?: number;
+  outputMaxTokens?: number;
   deeplApiKey?: string;
   deeplxUrl?: string;
 }
 
-/** Single source of truth for provider values + their human-readable labels.
- *  Used by the coerce whitelist and by the settings UI's <select>/fallback label. */
-export const TRANSLATION_PROVIDER_OPTIONS = [
-  { value: "google", label: "Google Translate" },
-  { value: "deepl", label: "DeepL API" },
-  { value: "deeplx", label: "DeepLX (self-hosted)" },
-  { value: "ai", label: "AI (via connection)" },
-] as const satisfies ReadonlyArray<{ value: TranslationChannelConfig["provider"]; label: string }>;
-
-/** Whitelist coerce — guards against arbitrary strings landing in metadata. */
-export function coerceTranslationProvider(value: unknown): TranslationChannelConfig["provider"] {
-  return typeof value === "string" && TRANSLATION_PROVIDER_OPTIONS.some((o) => o.value === value)
-    ? (value as TranslationChannelConfig["provider"])
-    : "google";
-}
-
-function toOptionalString(value: unknown): string | undefined {
-  return typeof value === "string" && value.length > 0 ? value : undefined;
-}
-
-function toOptionalNumber(value: unknown): number | undefined {
-  return typeof value === "number" && value > 0 ? value : undefined;
-}
-
-/** Convert raw chat metadata into the chat- and input-channel configs the store consumes. */
-export function buildTranslationConfigsFromMeta(meta: Record<string, unknown>): {
-  chat: TranslationChannelConfig;
-  input: TranslationChannelConfig | null;
-} {
-  const chat: TranslationChannelConfig = {
-    provider: coerceTranslationProvider(meta.translationProvider),
-    targetLanguage: toOptionalString(meta.translationTargetLang) ?? "en",
-    connectionId: toOptionalString(meta.translationConnectionId),
-    systemPrompt: toOptionalString(meta.translationPrompt),
-    maxTokens: toOptionalNumber(meta.translationMaxTokens),
-    deeplApiKey: toOptionalString(meta.translationDeeplApiKey),
-    deeplxUrl: toOptionalString(meta.translationDeeplxUrl),
-  };
-  const input: TranslationChannelConfig | null =
-    meta.translationInputConfigured === true
-      ? {
-          provider: coerceTranslationProvider(meta.translationInputProvider),
-          targetLanguage: toOptionalString(meta.translationInputTargetLang) ?? "en",
-          connectionId: toOptionalString(meta.translationInputConnectionId),
-          systemPrompt: toOptionalString(meta.translationInputPrompt),
-          maxTokens: toOptionalNumber(meta.translationInputMaxTokens),
-          deeplApiKey: toOptionalString(meta.translationInputDeeplApiKey),
-          deeplxUrl: toOptionalString(meta.translationInputDeeplxUrl),
-        }
-      : null;
-  return { chat, input };
-}
-
 // ── Zustand store for translation cache ──
 interface TranslationStore {
-  /** Config for chat-message translations (AI responses, manual translate on messages) */
-  config: TranslationChannelConfig;
-  setConfig: (config: TranslationChannelConfig) => void;
-  /** Config for user-input translations. null = inherit chat config. */
-  inputConfig: TranslationChannelConfig | null;
-  setInputConfig: (config: TranslationChannelConfig | null) => void;
-  /** messageId -> translated text. Keyed by messageId for chat-channel only;
-   *  if input translations ever get cached, the key must include the channel. */
+  /** Config for the currently active chat */
+  config: TranslationConfig;
+  setConfig: (config: TranslationConfig) => void;
+  /** messageId -> translated text */
   translations: Record<string, string>;
+  /** messageId -> the source text that was translated (used to detect stale swipe/edit content) */
+  translationSources: Record<string, string>;
   /** messageId -> hidden translation display state */
   hiddenTranslationIds: Record<string, boolean>;
   /** messageId -> currently translating */
   translating: Record<string, boolean>;
-  setTranslation: (id: string, text: string) => void;
+  setTranslation: (id: string, text: string, source?: string) => void;
   removeTranslation: (id: string) => void;
   setTranslating: (id: string, val: boolean) => void;
   /** Clear all translations (e.g. on chat switch) */
   clearAll: () => void;
   /** Seed translations from message extras (e.g. on chat load) */
-  seedFromMessages: (messages: Array<{ id: string; extra?: string | Record<string, unknown> | null }>) => void;
+  seedFromMessages: (
+    messages: Array<{ id: string; content?: string; extra?: string | Record<string, unknown> | null }>,
+  ) => void;
 }
 
 export const useTranslationStore = create<TranslationStore>((set) => ({
-  config: { provider: "google", targetLanguage: "en" },
+  config: { provider: "google", inputTargetLanguage: "en", outputTargetLanguage: "en" },
   setConfig: (config) => set({ config }),
-  inputConfig: null,
-  setInputConfig: (inputConfig) => set({ inputConfig }),
   translations: {},
+  translationSources: {},
   hiddenTranslationIds: {},
   translating: {},
-  setTranslation: (id, text) =>
+  setTranslation: (id, text, source) =>
     set((s) => {
       const { [id]: _, ...hiddenRest } = s.hiddenTranslationIds;
       return {
         translations: { ...s.translations, [id]: text },
+        translationSources:
+          source === undefined ? s.translationSources : { ...s.translationSources, [id]: source },
         hiddenTranslationIds: hiddenRest,
       };
     }),
   removeTranslation: (id) =>
     set((s) => {
       const { [id]: _, ...rest } = s.translations;
-      return { translations: rest, hiddenTranslationIds: { ...s.hiddenTranslationIds, [id]: true } };
+      const { [id]: __, ...sourceRest } = s.translationSources;
+      return {
+        translations: rest,
+        translationSources: sourceRest,
+        hiddenTranslationIds: { ...s.hiddenTranslationIds, [id]: true },
+      };
     }),
   setTranslating: (id, val) => set((s) => ({ translating: { ...s.translating, [id]: val } })),
-  clearAll: () => set({ translations: {}, translating: {}, hiddenTranslationIds: {} }),
+  clearAll: () => set({ translations: {}, translationSources: {}, translating: {}, hiddenTranslationIds: {} }),
   seedFromMessages: (messages) =>
     set((s) => {
       const seeded: Record<string, string> = {};
+      const seededSources: Record<string, string> = {};
       for (const msg of messages) {
         if (!msg.extra) continue;
         try {
@@ -125,12 +82,20 @@ export const useTranslationStore = create<TranslationStore>((set) => ({
             !s.hiddenTranslationIds[msg.id]
           ) {
             seeded[msg.id] = extra.translation;
+            if (typeof extra.translationSource === "string") {
+              seededSources[msg.id] = extra.translationSource;
+            } else if (typeof msg.content === "string") {
+              seededSources[msg.id] = msg.content;
+            }
           }
         } catch {
           // Skip messages with malformed extra JSON
         }
       }
       // Merge with existing (in-flight translations win over seeded)
-      return { translations: { ...seeded, ...s.translations } };
+      return {
+        translations: { ...seeded, ...s.translations },
+        translationSources: { ...seededSources, ...s.translationSources },
+      };
     }),
 }));

@@ -135,10 +135,13 @@ Every time you save a change to a persona's card fields, Marinara saves a snapsh
 For each saved version you can:
 
 1. Click its title to open a compare view against the current persona.
-2. Click **Restore this version** to overwrite the current persona with that saved version. A confirmation dialog asks you to confirm.
-3. Click **Delete this saved version** to remove that entry from history. This does not change the current persona.
+2. Click **Rename this saved version** (pencil icon) to correct its card-version label without restoring it.
+3. Click **Restore this version** to overwrite the current persona with that saved version. A confirmation dialog asks you to confirm.
+4. Click **Delete this saved version** to remove that entry from history. This does not change the current persona.
 
 Before your first edit, the panel says "Previous persona states will appear here after the next edit.".
+
+Use **Reset** in the panel header to delete every saved persona snapshot and set the current card version to `0.0`. Marinara asks for confirmation because the deleted history cannot be recovered.
 
 ## Duplicating a persona
 

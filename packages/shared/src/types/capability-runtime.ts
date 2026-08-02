@@ -16,8 +16,16 @@ export interface CapabilityChatRecord {
   name: string;
   mode: ChatMode;
   characterIds: string[];
+  groupId: string | null;
+  personaId: string | null;
   connectionId: string | null;
   metadata: unknown;
+  branch: {
+    title: string | null;
+    parentChatId: string | null;
+    parentMessageId: string | null;
+    childMessageId: string | null;
+  } | null;
   lastMessageAt: string | null;
   updatedAt: string;
 }
@@ -25,6 +33,18 @@ export interface CapabilityChatRecord {
 export interface CapabilityCharacterRecord {
   id: string;
   data: unknown;
+  comment: string;
+}
+
+export interface CapabilityPersonaRecord {
+  id: string;
+  data: unknown;
+}
+
+export interface CapabilityLorebookRecord {
+  id: string;
+  data: unknown;
+  entries: unknown[];
 }
 
 export interface CapabilityLorebookEntryRecord {
@@ -44,12 +64,14 @@ export interface CapabilityLorebookEntrySelection {
 }
 
 export interface CapabilityResourceHost {
-  listCharacters(characterIds: string[]): Promise<CapabilityCharacterRecord[]>;
+  listCharacters(characterIds?: string[]): Promise<CapabilityCharacterRecord[]>;
+  listPersonas(personaIds?: string[]): Promise<CapabilityPersonaRecord[]>;
+  listLorebooks(lorebookIds?: string[]): Promise<CapabilityLorebookRecord[]>;
   listEligibleLorebookEntries(selection: CapabilityLorebookEntrySelection): Promise<CapabilityLorebookEntryRecord[]>;
 }
 
 export interface CapabilityLanguageModelMessage {
-  role: "system" | "user" | "assistant";
+  role: "system" | "user" | "assistant" | "tool";
   content: string;
 }
 
@@ -57,24 +79,56 @@ export interface CapabilityLanguageModelCompletionOptions {
   temperature?: number;
   maxTokens?: number;
   debugMode?: boolean;
+  reasoningEffort?: "none" | "low" | "medium" | "high" | "xhigh" | "max";
+  verbosity?: "low" | "medium" | "high";
+  signal?: AbortSignal;
+  responseFormat?: Readonly<{ type: string; [key: string]: unknown }>;
 }
 
 export interface CapabilityLanguageModelCompletion {
   content: string | null;
   finishReason: string;
+  usage?: {
+    promptTokens?: number;
+    completionTokens?: number;
+    completionReasoningTokens?: number;
+    totalTokens?: number;
+  };
+}
+
+export interface CapabilityLanguageModelContextFit {
+  messages: CapabilityLanguageModelMessage[];
+  maxTokens?: number;
+  estimatedTokensBefore: number;
+  estimatedTokensAfter: number;
+  trimmed: boolean;
 }
 
 export interface CapabilityResolvedLanguageModel {
+  name: string;
   connectionId: string;
   model: string;
+  maxContext: number | null;
+  maxOutputTokens: number | null;
   chatComplete(
     messages: CapabilityLanguageModelMessage[],
     options?: CapabilityLanguageModelCompletionOptions,
   ): Promise<CapabilityLanguageModelCompletion>;
+  fitContext(
+    messages: CapabilityLanguageModelMessage[],
+    options?: Pick<CapabilityLanguageModelCompletionOptions, "maxTokens">,
+  ): CapabilityLanguageModelContextFit;
+}
+
+export interface CapabilityLanguageModelRequest {
+  connectionId?: string | null;
+  chatConnectionId?: string | null;
+  model?: string;
 }
 
 export interface CapabilityLanguageModelHost {
   resolve(connectionId?: string | null): Promise<CapabilityResolvedLanguageModel>;
+  resolveForRequest(request: CapabilityLanguageModelRequest): Promise<CapabilityResolvedLanguageModel>;
 }
 
 export interface CapabilityJsonHost {
@@ -122,6 +176,49 @@ export interface CapabilitySpatialSnapshotStore {
   replaceAtAnchor(input: CapabilitySpatialSnapshotWrite): Promise<SpatialContextSnapshot>;
 }
 
+/** Package-owned JSON document stored independently from chats. */
+export interface CapabilityDocumentRecord {
+  id: string;
+  packageId: string;
+  kind: string;
+  name: string;
+  description: string;
+  data: unknown;
+  revision: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CapabilityDocumentWrite {
+  id: string;
+  packageId: string;
+  kind: string;
+  name: string;
+  description: string;
+  data: unknown;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CapabilityDocumentUpdate {
+  id: string;
+  packageId: string;
+  expectedRevision: number;
+  name: string;
+  description: string;
+  data: unknown;
+  updatedAt: string;
+}
+
+/** Generic persistence for package-owned reusable records such as map templates. */
+export interface CapabilityDocumentStore {
+  list(packageId: string, kind: string): Promise<CapabilityDocumentRecord[]>;
+  getById(packageId: string, id: string): Promise<CapabilityDocumentRecord | null>;
+  create(input: CapabilityDocumentWrite): Promise<CapabilityDocumentRecord>;
+  update(input: CapabilityDocumentUpdate): Promise<CapabilityDocumentRecord | null>;
+  remove(packageId: string, id: string, expectedRevision: number): Promise<boolean>;
+}
+
 export interface CapabilityCreateMessageWithSwipeInput {
   id: string;
   swipeId: string;
@@ -148,12 +245,14 @@ export interface CapabilityChatMetadataUpdate {
 
 export interface CapabilityPersistenceSession {
   getChat(chatId: string): Promise<CapabilityChatRecord | null>;
+  listChats(): Promise<CapabilityChatRecord[]>;
   listMessages(chatId: string): Promise<CapabilityMessageRecord[]>;
   listExistingLorebookEntryIds(entryIds: string[]): Promise<string[]>;
   createMessageWithSwipe(input: CapabilityCreateMessageWithSwipeInput): Promise<CapabilityMessageRecord>;
   markGameStateSnapshotCommitted(chatId: string, snapshotId: string): Promise<void>;
   updateChatActivity(input: CapabilityChatActivityUpdate): Promise<void>;
   updateChatMetadata(input: CapabilityChatMetadataUpdate): Promise<void>;
+  documents: CapabilityDocumentStore;
   spatialSnapshots: CapabilitySpatialSnapshotStore;
 }
 
@@ -162,7 +261,15 @@ export interface CapabilityPersistenceHost extends CapabilityPersistenceSession 
   transaction<T>(operation: (session: CapabilityPersistenceSession) => Promise<T>): Promise<T>;
 }
 
+export interface CapabilityEmbeddingHost {
+  spaceId: string;
+  label: string;
+  embed(texts: string[], signal?: AbortSignal): Promise<number[][] | null>;
+}
+
 export interface CapabilityRuntimeHost {
+  embeddings: CapabilityEmbeddingHost;
+  getAgentConfig(): Promise<{ connectionId: string | null; settings: Record<string, unknown> } | null>;
   isDebugAgentsEnabled(): boolean;
   json: CapabilityJsonHost;
   languageModels: CapabilityLanguageModelHost;

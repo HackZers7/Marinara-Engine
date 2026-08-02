@@ -16,16 +16,17 @@ export interface ConversationSummaryMessage {
   createdAt?: string | null;
 }
 
-export function countUserMessagesAfterSummaryAnchor(
+export function countConversationMessagesAfterSummaryAnchor(
   messages: Array<{ id?: string | null; role: string }>,
   anchorMessageId: string | null | undefined,
 ): number {
-  const countAllUserMessages = () => messages.filter((message) => message.role === "user").length;
+  const isConversationMessage = (message: { role: string }) => message.role === "user" || message.role === "assistant";
+  const countAllConversationMessages = () => messages.filter(isConversationMessage).length;
   const anchor = typeof anchorMessageId === "string" && anchorMessageId.trim() ? anchorMessageId.trim() : null;
-  if (!anchor) return countAllUserMessages();
+  if (!anchor) return countAllConversationMessages();
   const anchorIndex = messages.findIndex((message) => message.id === anchor);
-  if (anchorIndex < 0) return countAllUserMessages();
-  return messages.slice(anchorIndex + 1).filter((message) => message.role === "user").length;
+  if (anchorIndex < 0) return countAllConversationMessages();
+  return messages.slice(anchorIndex + 1).filter(isConversationMessage).length;
 }
 
 export interface ConversationSummaryRunResult {

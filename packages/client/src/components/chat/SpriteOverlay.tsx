@@ -8,6 +8,11 @@ import { Check } from "lucide-react";
 import type { SpritePlacement, SpriteSide } from "@marinara-engine/shared";
 import { useCharacterSprites, type SpriteInfo } from "../../hooks/use-characters";
 import { normalizeSpriteExpressionKey, resolveSpriteExpression } from "../../lib/sprite-expression-match";
+import {
+  resolveSpriteTransition,
+  type SpriteRenderMode,
+  type SpriteTransition as Transition,
+} from "../../lib/sprite-transition";
 import { useAgentStore } from "../../stores/agent.store";
 import {
   SPRITE_DISPLAY_OPACITY_MAX,
@@ -19,6 +24,7 @@ import {
   type SpriteDisplayMode,
 } from "./sprite-display-modes";
 import { clampSpritePlacement, getDefaultSpritePlacement, type SpritePlacementMap } from "./sprite-placement";
+import { useTranslation as useUiTranslation } from "react-i18next";
 
 interface SpriteOverlayProps {
   /** IDs of characters with sprites enabled in this chat */
@@ -55,14 +61,10 @@ interface SpriteOverlayProps {
   fullBodySpriteOpacity?: number;
 }
 
-type Transition = "crossfade" | "bounce" | "shake" | "hop" | "none";
-
 interface CharacterExpressionState {
   expression: string;
   transition: Transition;
 }
-
-type SpriteRenderMode = "expressions" | "full-body";
 
 interface VisibleSpriteEntry {
   characterId: string;
@@ -141,6 +143,7 @@ export function SpriteOverlay({
   expressionSpriteOpacity,
   fullBodySpriteOpacity,
 }: SpriteOverlayProps) {
+  const { t: localizeUi } = useUiTranslation();
   const stageRef = useRef<HTMLDivElement>(null);
   const resolvedSpriteDisplayModes = useMemo(
     () => normalizeSpriteDisplayModes(spriteDisplayModes),
@@ -319,9 +322,7 @@ export function SpriteOverlay({
       ))}
 
       {editing && (
-        <div className="pointer-events-none absolute bottom-4 left-1/2 z-[30] -translate-x-1/2 rounded-full border border-white/10 bg-black/60 px-3 py-1 text-[0.625rem] font-medium text-white/80 shadow-lg backdrop-blur-md">
-          Drag sprites to reposition them. Use the check above a sprite to finish.
-        </div>
+        <div className="pointer-events-none absolute bottom-4 left-1/2 z-[30] -translate-x-1/2 rounded-full border border-white/10 bg-black/60 px-3 py-1 text-[0.625rem] font-medium text-white/80 shadow-lg backdrop-blur-md">{localizeUi("ui.chat.spriteoverlay.dragSpritesToRepositionThemUseTheCheckAbove")}</div>
       )}
     </div>
   );
@@ -410,6 +411,7 @@ function CharacterSprite({
   spriteScale?: number;
   spriteOpacity?: number;
 }) {
+  const { t: localizeUi } = useUiTranslation();
   const { data: sprites } = useCharacterSprites(characterId);
   const prevExpressionRef = useRef(expression);
   const dragRef = useRef<{
@@ -557,7 +559,8 @@ function CharacterSprite({
 
   if (!spriteUrl) return null;
 
-  const variant = TRANSITION_VARIANTS[activeTransition];
+  // Full-body stage changes should not blink when an agent explicitly returns `none`.
+  const variant = TRANSITION_VARIANTS[resolveSpriteTransition(renderMode, activeTransition)];
 
   return (
     <div
@@ -586,8 +589,8 @@ function CharacterSprite({
         <div className="absolute left-1/2 top-0 z-[2] flex -translate-x-1/2 -translate-y-[calc(100%+0.35rem)] items-center gap-1">
           <button
             type="button"
-            title="Finish placing sprite"
-            aria-label="Finish placing sprite"
+            title={localizeUi("ui.chat.charactersprite.finishPlacingSprite")}
+            aria-label={localizeUi("ui.chat.charactersprite.finishPlacingSprite")}
             onPointerDown={(event) => {
               event.stopPropagation();
             }}
@@ -602,7 +605,7 @@ function CharacterSprite({
             <Check size="0.75rem" strokeWidth={2.4} />
           </button>
           <div className="pointer-events-none rounded-full border border-white/10 bg-black/65 px-2 py-1 text-[0.5625rem] font-semibold uppercase tracking-wide text-white/75 shadow-md">
-            {isDragging ? "Release to Save" : "Drag to Move"}
+            {isDragging ?localizeUi("ui.chat.charactersprite.releaseToSave") :localizeUi("ui.chat.charactersprite.dragToMove")}
           </div>
         </div>
       )}
@@ -612,7 +615,7 @@ function CharacterSprite({
           <motion.img
             key={`${placementKey}-${expression}`}
             src={spriteUrl}
-            alt={`${renderMode === "full-body" ? "full-body" : "expression"} ${expression} sprite`}
+            alt={localizeUi("ui.chat.charactersprite.value1Value2Sprite", { value1: renderMode === "full-body" ?localizeUi("ui.chat.charactersprite.fullBody") :localizeUi("ui.chat.charactersprite.expression"), value2: expression })}
             className={`${sizeClass} w-auto object-contain drop-shadow-[0_0_20px_rgba(0,0,0,0.5)] ${editing ? "cursor-grab active:cursor-grabbing" : ""}`}
             style={spriteScaleStyle}
             draggable={false}

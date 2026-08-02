@@ -120,6 +120,20 @@ goto :eof
 :after_restore_helper
 set "INSTALL_REQUIRED=0"
 set "BUILD_REQUIRED=0"
+set "DATA_SNAPSHOT_READY=0"
+
+:: Drop untracked leftovers in the source trees (e.g. files a failed Windows
+:: checkout could not delete after a channel switch); they break tsc. This is
+:: working-tree repair, not an update, so it runs even when auto-update is
+:: disabled -- and before "stash push -u", which would otherwise capture the
+:: stale file and restore it again after every update.
+:: Not quiet: git prints "Removing <path>" only when it actually deletes
+:: something, so a stray file of your own does not vanish without a trace.
+set "CLEAN_FAILED=0"
+if exist ".git" (
+    git clean -fd -- packages/shared/src packages/server/src packages/client/src 2>nul
+    if errorlevel 1 set "CLEAN_FAILED=1"
+)
 
 :: Auto-update from Git
 if defined SKIP_UPDATE (
@@ -157,6 +171,12 @@ if /I "!OLD_HEAD!"=="!TARGET_HEAD!" (
     echo  [OK] Already up to date
     goto :skip_update
 )
+node scripts\protect-launcher-data.mjs snapshot
+if errorlevel 1 (
+    echo  [WARN] Could not create an update snapshot. Skipping auto-update to protect your data.
+    goto :skip_update
+)
+set "DATA_SNAPSHOT_READY=1"
 :: Drop known-safe untracked files that older installer versions placed in
 :: $INSTDIR but are now also tracked in the repo. Without this, git merge
 :: --ff-only refuses to overwrite them and the auto-update silently fails.
@@ -179,7 +199,13 @@ if errorlevel 1 set "DIRTY=1"
 set "UNTRACKED="
 for /f "tokens=*" %%i in ('git ls-files --others --exclude-standard 2^>nul') do if not defined UNTRACKED set "UNTRACKED=1"
 if defined UNTRACKED set "DIRTY=1"
-if "!DIRTY!"=="1" (
+:: A leftover we could not delete would be captured by "stash push -u" and
+:: restored afterwards, making the broken tree permanent -- so a failed cleanup
+:: blocks the stash and, with it, the update.
+if "!CLEAN_FAILED!"=="1" (
+    echo  [WARN] Could not clear stale files under packages\*\src.
+    set "STASH_FAILED=1"
+) else if "!DIRTY!"=="1" (
     git stash push -u -q -m "auto-stash before update" >nul 2>&1 && set "STASHED=1"
     if not "!STASHED!"=="1" set "STASH_FAILED=1"
     if "!STASHED!"=="1" for /f "tokens=*" %%i in ('git stash list -1 --format^=%%gd 2^>nul') do set "STASH_REF=%%i"
@@ -236,6 +262,15 @@ set "INSTALL_REQUIRED=1"
 set "BUILD_REQUIRED=1"
 
 :skip_update
+if "!DATA_SNAPSHOT_READY!"=="1" (
+    node scripts\protect-launcher-data.mjs restore-if-missing
+    if errorlevel 1 (
+        echo  [ERROR] User data verification failed after the update attempt.
+        echo          Startup stopped to avoid creating empty data.
+        pause
+        exit /b 1
+    )
+)
 echo  [OK] Node.js found:
 node -v
 echo  [OK] pnpm !CURRENT_PNPM_VERSION! ready
@@ -269,7 +304,7 @@ echo.
 echo  [..] Installing dependencies...
 echo      This may take a few minutes.
 echo.
-call :run_pnpm install --force
+call :run_pnpm install --frozen-lockfile --prefer-offline
 if errorlevel 1 echo  [ERROR] Failed to install dependencies. & pause & exit /b 1
 
 :skip_install

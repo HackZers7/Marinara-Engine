@@ -56,6 +56,11 @@ const ScenePromptPreferencesModal = lazy(() =>
     default: module.ScenePromptPreferencesModal,
   })),
 );
+const StartCharacterChatModal = lazy(() =>
+  import("../modals/StartCharacterChatModal").then((module) => ({
+    default: module.StartCharacterChatModal,
+  })),
+);
 
 export function ModalRenderer() {
   const modal = useUIStore((s) => s.modal);
@@ -154,6 +159,16 @@ export function ModalRenderer() {
           sourceLabel={(modal?.props?.sourceLabel as string | null) ?? null}
           onSubmit={modal?.props?.onSubmit as (preferences: ScenePromptPreferences) => void}
           onCancel={modal?.props?.onCancel as (() => void) | undefined}
+        />
+      );
+      break;
+    case "start-character-chat":
+      content = (
+        <StartCharacterChatModal
+          open
+          onClose={closeModal}
+          characterId={(modal?.props?.characterId as string) ?? ""}
+          characterName={(modal?.props?.characterName as string) ?? ""}
         />
       );
       break;

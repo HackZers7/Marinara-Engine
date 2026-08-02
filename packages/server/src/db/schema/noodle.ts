@@ -15,19 +15,30 @@ export const noodleAccounts = fileTable(
     avatarUrl: text("avatar_url"),
     invited: text("invited").notNull().default("false"),
     settings: text("settings").notNull().default("{}"),
+    platform: text("platform").notNull().default("noodle"),
+    noodleAccountId: text("noodle_account_id"),
+    // Rollback-only mirrors of platform/noodleAccountId. Nothing reads these; they exist so a
+    // build from before the rename can still tell a NoodleR profile from a Noodle account. Without
+    // them an older build falls back to the column default and puts NoodleR content on the public
+    // timeline. Safe to drop once no supported version reads `visibility`.
     visibility: text("visibility").notNull().default("public"),
     publicAccountId: text("public_account_id"),
     createdAt: text("created_at").notNull(),
     updatedAt: text("updated_at").notNull(),
   },
   {
-    uniqueBy: [{ keys: ["publicAccountId"], when: (row) => row.publicAccountId != null }],
+    uniqueBy: [
+      { keys: ["noodleAccountId"], when: (row) => row.noodleAccountId != null },
+      // Handles only need to be unique within Noodle; NoodleR profiles may reuse them.
+      { keys: ["handle"], when: (row) => row.platform !== "noodler" },
+    ],
   },
 );
 
 export const noodlePosts = fileTable("noodle_posts", {
   id: text("id").primaryKey(),
   authorAccountId: text("author_account_id").notNull(),
+  title: text("title"),
   content: text("content").notNull().default(""),
   imageUrl: text("image_url"),
   imagePrompt: text("image_prompt"),

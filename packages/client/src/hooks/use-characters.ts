@@ -26,6 +26,14 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
 }
 
+type TrackerCardPaintConfig = Omit<TrackerCardColorConfig, "statIcons">;
+
+function cleanTrackerCardPaintConfig(config: TrackerCardPaintConfig): TrackerCardPaintConfig {
+  const paint = cleanTrackerCardColorConfig(config);
+  delete paint.statIcons;
+  return paint;
+}
+
 export const characterKeys = {
   all: ["characters"] as const,
   list: () => [...characterKeys.all, "list"] as const,
@@ -196,11 +204,11 @@ export function useUpdateCharacter() {
       versionSource?: string;
       versionReason?: string;
       skipVersionSnapshot?: boolean;
-      trackerCardPaint?: TrackerCardColorConfig;
+      trackerCardPaint?: TrackerCardPaintConfig;
     }) =>
       trackerCardPaint !== undefined
         ? api.patch(`/characters/${id}/tracker-card-colors`, {
-            paint: cleanTrackerCardColorConfig(trackerCardPaint),
+            paint: cleanTrackerCardPaintConfig(trackerCardPaint),
           })
         : api.patch(`/characters/${id}`, data),
     onSuccess: (updatedCharacter, variables) => {
@@ -257,6 +265,29 @@ export function useDeleteCharacterVersion() {
       api.delete(`/characters/${id}/versions/${versionId}`),
     onSuccess: (_data, variables) => {
       qc.invalidateQueries({ queryKey: characterKeys.versions(variables.id) });
+    },
+  });
+}
+
+export function useRenameCharacterVersion() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, versionId, version }: { id: string; versionId: string; version: string }) =>
+      api.patch<CharacterCardVersion>(`/characters/${id}/versions/${versionId}`, { version }),
+    onSuccess: (_data, variables) => {
+      qc.invalidateQueries({ queryKey: characterKeys.versions(variables.id) });
+    },
+  });
+}
+
+export function useResetCharacterVersions() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => api.post(`/characters/${id}/versions/reset`, {}),
+    onSuccess: (_data, id) => {
+      qc.invalidateQueries({ queryKey: characterKeys.list() });
+      qc.invalidateQueries({ queryKey: characterKeys.detail(id) });
+      qc.invalidateQueries({ queryKey: characterKeys.versions(id) });
     },
   });
 }
@@ -712,6 +743,18 @@ export function useDeleteCharacterGalleryImage(characterId: string) {
   });
 }
 
+export function useSetCharacterGalleryImageAsAvatar(characterId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (imageId: string) => api.post(`/characters/${characterId}/gallery/${imageId}/avatar`),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: characterKeys.detail(characterId) });
+      qc.invalidateQueries({ queryKey: characterKeys.list() });
+      qc.invalidateQueries({ queryKey: characterKeys.listWithBuiltIns() });
+    },
+  });
+}
+
 export function useTagCharacterGalleryImage(characterId: string) {
   const qc = useQueryClient();
   return useMutation({
@@ -843,6 +886,18 @@ export function useDeletePersonaGalleryImage(personaId: string) {
     mutationFn: (imageId: string) => api.delete(`/characters/personas/${personaId}/gallery/${imageId}`),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: characterKeys.personaGallery(personaId) });
+    },
+  });
+}
+
+export function useSetPersonaGalleryImageAsAvatar(personaId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (imageId: string) => api.post(`/characters/personas/${personaId}/gallery/${imageId}/avatar`),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: characterKeys.personaDetail(personaId) });
+      qc.invalidateQueries({ queryKey: characterKeys.personas });
+      qc.invalidateQueries({ queryKey: characterKeys.personaActive() });
     },
   });
 }
@@ -1001,7 +1056,7 @@ export function useUpdatePersona() {
       aboutMe?: string;
       convoBehavior?: string;
       avatarCrop?: string;
-      trackerCardPaint?: TrackerCardColorConfig;
+      trackerCardPaint?: TrackerCardPaintConfig;
       trackerCardPortrait?: {
         portraitFocusX: number;
         portraitFocusY: number;
@@ -1012,7 +1067,7 @@ export function useUpdatePersona() {
         ? api.patch<Persona | null>(
             `/characters/personas/${id}/tracker-card-colors`,
             trackerCardPaint
-              ? { paint: cleanTrackerCardColorConfig(trackerCardPaint) }
+              ? { paint: cleanTrackerCardPaintConfig(trackerCardPaint) }
               : { portrait: trackerCardPortrait },
             keepalive ? { keepalive: true } : undefined,
           )
@@ -1075,6 +1130,30 @@ export function useDeletePersonaVersion() {
       api.delete(`/characters/personas/${id}/versions/${versionId}`),
     onSuccess: (_data, variables) => {
       qc.invalidateQueries({ queryKey: characterKeys.personaVersions(variables.id) });
+    },
+  });
+}
+
+export function useRenamePersonaVersion() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, versionId, version }: { id: string; versionId: string; version: string }) =>
+      api.patch<PersonaCardVersion>(`/characters/personas/${id}/versions/${versionId}`, { version }),
+    onSuccess: (_data, variables) => {
+      qc.invalidateQueries({ queryKey: characterKeys.personaVersions(variables.id) });
+    },
+  });
+}
+
+export function useResetPersonaVersions() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => api.post(`/characters/personas/${id}/versions/reset`, {}),
+    onSuccess: (_data, id) => {
+      qc.invalidateQueries({ queryKey: characterKeys.personas });
+      qc.invalidateQueries({ queryKey: characterKeys.personaActive() });
+      qc.invalidateQueries({ queryKey: characterKeys.personaDetail(id) });
+      qc.invalidateQueries({ queryKey: characterKeys.personaVersions(id) });
     },
   });
 }

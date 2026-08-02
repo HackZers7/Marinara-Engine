@@ -3,8 +3,8 @@ import { DEFAULT_TRANSLATION_SYSTEM_PROMPT } from "@marinara-engine/shared";
 import { HelpTooltip } from "../../../components/ui/HelpTooltip";
 import { SettingsSwitch } from "../../../components/panels/settings/SettingControls";
 import { ChatSettingsSection } from "../ChatSettingsSection";
-import { coerceTranslationProvider, TRANSLATION_PROVIDER_OPTIONS } from "../../../stores/translation.store";
 import type { ChatConnectionOption } from "./ConnectionSection";
+import { useTranslation as useUiTranslation } from "react-i18next";
 
 interface TranslationSectionProps {
   metadata: Record<string, unknown>;
@@ -12,353 +12,283 @@ interface TranslationSectionProps {
   onMetadataChange: (patch: Record<string, unknown>) => void;
 }
 
-type InputBehavior = "off" | "auto" | "draft";
-
-const INPUT_BEHAVIOR_OPTIONS: Array<{ value: InputBehavior; label: string; description: string }> = [
-  { value: "off", label: "Off", description: "Send messages as-is." },
-  { value: "auto", label: "Auto-translate", description: "Translate your messages before sending." },
-  { value: "draft", label: "Draft button", description: "Add a translate button beside Send so you can review the translation before sending." },
-];
-
-function readInputBehavior(value: unknown): InputBehavior {
-  return value === "auto" || value === "draft" ? value : "off";
-}
-
-function getProviderLabel(value: ReturnType<typeof coerceTranslationProvider>): string {
-  return TRANSLATION_PROVIDER_OPTIONS.find((o) => o.value === value)?.label ?? value;
-}
-
 export function TranslationSection({ metadata, textConnections, onMetadataChange }: TranslationSectionProps) {
-  const inputBehavior = readInputBehavior(metadata.translationInputBehavior);
-  const inputConfigured = metadata.translationInputConfigured === true;
-  const chatProvider = coerceTranslationProvider(metadata.translationProvider);
-  const chatTargetLang = (metadata.translationTargetLang as string | undefined) ?? "en";
+  const { t: localizeUi } = useUiTranslation();
+  const provider = (metadata.translationProvider as string | undefined) ?? "google";
+  const legacyTargetLanguage = (metadata.translationTargetLang as string | undefined) ?? "en";
+  const inputTargetLanguage = (metadata.translationInputTargetLang as string | undefined) ?? legacyTargetLanguage;
+  const outputTargetLanguage = (metadata.translationOutputTargetLang as string | undefined) ?? legacyTargetLanguage;
+  const legacyPrompt = typeof metadata.translationPrompt === "string" ? metadata.translationPrompt : "";
 
-  const setInputBehavior = (next: InputBehavior) => onMetadataChange({ translationInputBehavior: next });
+  const readDirectionalPrompt = (key: "translationInputPrompt" | "translationOutputPrompt") => {
+    const value = metadata[key];
+    if (value === null) return "";
+    const stored = typeof value === "string" ? value : legacyPrompt;
+    return stored.trim().length > 0 ? stored : "";
+  };
+  const inputPrompt = readDirectionalPrompt("translationInputPrompt");
+  const outputPrompt = readDirectionalPrompt("translationOutputPrompt");
 
-  // Toggling "Configure separately" off only flips the gate. We deliberately keep
-  // the translationInput* keys intact so re-enabling restores the previous values.
-  const setInputConfigured = (next: boolean) =>
-    onMetadataChange({ translationInputConfigured: next });
+  const updatePrompt = (key: "translationInputPrompt" | "translationOutputPrompt", value: string) => {
+    const nextPrompt = !value.trim() || value.trim() === DEFAULT_TRANSLATION_SYSTEM_PROMPT.trim() ? null : value;
+    onMetadataChange({ [key]: nextPrompt });
+  };
 
   return (
     <ChatSettingsSection
-      label="Translation"
+      id="translation"
+      label={localizeUi("ui.chatSettings.translationsection.translation")}
       icon={<Languages size="0.875rem" />}
-      help="Configure translation for AI responses and your messages — provider, target language, and how outgoing text is translated."
+      help={localizeUi("ui.chatSettings.translationsection.configureTranslationForThisChatHereIncludingProviderTarget")}
     >
-      <div className="space-y-4">
-        {/* ── Chat Language ── */}
+      <div className="space-y-3">
         <div>
-          <h4 className="mb-2 text-[0.6875rem] font-semibold uppercase tracking-wide text-[var(--muted-foreground)]">
-            Chat Language
-            <HelpTooltip
-              text="Language to translate AI responses into. Also used when you manually translate a message."
-              size="0.625rem"
-            />
-          </h4>
-          <TranslationChannelFields
-            prefix="translation"
-            provider={metadata.translationProvider as string | undefined}
-            targetLang={metadata.translationTargetLang as string | undefined}
-            connectionId={metadata.translationConnectionId as string | undefined}
-            systemPrompt={metadata.translationPrompt as string | undefined}
-            maxTokens={metadata.translationMaxTokens as number | undefined}
-            deeplApiKey={metadata.translationDeeplApiKey as string | undefined}
-            deeplxUrl={metadata.translationDeeplxUrl as string | undefined}
-            textConnections={textConnections}
-            onMetadataChange={onMetadataChange}
-          />
+          <label className="text-[0.6875rem] font-medium text-[var(--muted-foreground)]">{localizeUi("ui.connections.connectioneditor.provider")}</label>
+          <select
+            value={provider}
+            onChange={(e) => onMetadataChange({ translationProvider: e.target.value })}
+            className="mt-0.5 w-full rounded-lg bg-[var(--secondary)] px-3 py-2 text-xs outline-none ring-1 ring-transparent transition-shadow focus:ring-[var(--primary)]/40"
+          >
+            <option value="google">{localizeUi("ui.chatSettings.translationsection.googleTranslate")}</option>
+            <option value="deepl">{localizeUi("ui.chatSettings.translationsection.deeplApi")}</option>
+            <option value="deeplx">{localizeUi("ui.chatSettings.translationsection.deeplxSelfHosted")}</option>
+            <option value="ai">{localizeUi("ui.chatSettings.translationsection.aiViaConnection")}</option>
+          </select>
         </div>
 
-        {/* ── Input Language ── */}
-        <div className="rounded-lg border border-[var(--border)]/40 bg-[var(--secondary)]/30 p-3">
-          <div className="mb-2 flex items-center justify-between gap-2">
-            <h4 className="text-[0.6875rem] font-semibold uppercase tracking-wide text-[var(--muted-foreground)]">
-              Input Language
-              <HelpTooltip
-                text="Language to translate your messages into before sending. By default inherits Chat Language settings."
+        <TranslationLanguageField
+          label={localizeUi("ui.chatSettings.translationsection.modelLanguage")}
+          description={localizeUi("ui.chatSettings.translationsection.yourOutgoingMessagesAreTranslatedIntoThisLanguage")}
+          provider={provider}
+          value={inputTargetLanguage}
+          onChange={(value) => onMetadataChange({ translationInputTargetLang: value })}
+        />
+
+        <TranslationLanguageField
+          label={localizeUi("ui.chatSettings.translationsection.myLanguage")}
+          description={localizeUi("ui.chatSettings.translationsection.incomingModelResponsesAreTranslatedIntoThisLanguage")}
+          provider={provider}
+          value={outputTargetLanguage}
+          onChange={(value) => onMetadataChange({ translationOutputTargetLang: value })}
+        />
+
+        {provider === "ai" && (
+          <>
+            <div>
+              <label className="text-[0.6875rem] font-medium text-[var(--muted-foreground)]">{localizeUi("ui.chatSettings.connectionsection.connection")}<HelpTooltip text={localizeUi("ui.chatSettings.translationsection.whichAiConnectionToUseForTranslation")} size="0.625rem" />
+              </label>
+              <select
+                value={(metadata.translationConnectionId as string | undefined) ?? ""}
+                onChange={(e) => onMetadataChange({ translationConnectionId: e.target.value })}
+                className="mt-0.5 w-full rounded-lg bg-[var(--secondary)] px-3 py-2 text-xs outline-none ring-1 ring-transparent transition-shadow focus:ring-[var(--primary)]/40"
+              >
+                <option value="">{localizeUi("ui.chatSettings.translationsection.selectConnection")}</option>
+                {textConnections.map((connection) => (
+                  <option key={connection.id} value={connection.id}>
+                    {connection.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <TranslationPromptField
+              label={localizeUi("ui.chatSettings.translationsection.outgoingMessagePrompt")}
+              customPrompt={inputPrompt}
+              onChange={(value) => updatePrompt("translationInputPrompt", value)}
+              onRestore={() => onMetadataChange({ translationInputPrompt: null })}
+            />
+            <TranslationPromptField
+              label={localizeUi("ui.chatSettings.translationsection.incomingResponsePrompt")}
+              customPrompt={outputPrompt}
+              onChange={(value) => updatePrompt("translationOutputPrompt", value)}
+              onRestore={() => onMetadataChange({ translationOutputPrompt: null })}
+            />
+            <TranslationMaxTokensField
+              label={`${localizeUi("ui.chatSettings.translationsection.outgoingMessagePrompt")} — Max Tokens`}
+              value={metadata.translationInputMaxTokens as number | undefined}
+              onChange={(value) => onMetadataChange({ translationInputMaxTokens: value })}
+            />
+            <TranslationMaxTokensField
+              label={`${localizeUi("ui.chatSettings.translationsection.incomingResponsePrompt")} — Max Tokens`}
+              value={metadata.translationOutputMaxTokens as number | undefined}
+              onChange={(value) => onMetadataChange({ translationOutputMaxTokens: value })}
+            />
+          </>
+        )}
+
+        {provider === "deepl" && (
+          <div>
+            <label className="text-[0.6875rem] font-medium text-[var(--muted-foreground)]">{localizeUi("ui.chatSettings.translationsection.deeplApiKey")}</label>
+            <input
+              type="password"
+              value={(metadata.translationDeeplApiKey as string | undefined) ?? ""}
+              onChange={(e) => onMetadataChange({ translationDeeplApiKey: e.target.value })}
+              placeholder={localizeUi("ui.chatSettings.translationsection.xxxxxxxxXxxxXxxxXxxxXxxxxxxxxxxxFx")}
+              className="mt-0.5 w-full rounded-lg bg-[var(--secondary)] px-3 py-2 text-xs outline-none ring-1 ring-transparent transition-shadow focus:ring-[var(--primary)]/40"
+            />
+          </div>
+        )}
+
+        {provider === "deeplx" && (
+          <div>
+            <label className="text-[0.6875rem] font-medium text-[var(--muted-foreground)]">{localizeUi("ui.chatSettings.translationsection.deeplxUrl")}<HelpTooltip
+                text={localizeUi("ui.chatSettings.translationsection.urlOfYourSelfHostedDeeplxInstanceEG")}
                 size="0.625rem"
               />
-            </h4>
-          </div>
-          <SettingsSwitch
-            label="Configure separately"
-            description="Use a different provider or target language for your outgoing messages."
-            checked={inputConfigured}
-            onChange={(next) => setInputConfigured(next)}
-            labelPosition="start"
-            className={[
-              "mb-2 justify-between rounded-lg px-3 py-2 text-left",
-              inputConfigured
-                ? "bg-[var(--primary)]/10 ring-1 ring-[var(--primary)]/30"
-                : "bg-[var(--secondary)] hover:bg-[var(--accent)]",
-            ].join(" ")}
-            labelClassName="text-[0.6875rem] font-medium"
-          />
-          {inputConfigured ? (
-            <TranslationChannelFields
-              prefix="translationInput"
-              provider={metadata.translationInputProvider as string | undefined}
-              targetLang={metadata.translationInputTargetLang as string | undefined}
-              connectionId={metadata.translationInputConnectionId as string | undefined}
-              systemPrompt={metadata.translationInputPrompt as string | undefined}
-              maxTokens={metadata.translationInputMaxTokens as number | undefined}
-              deeplApiKey={metadata.translationInputDeeplApiKey as string | undefined}
-              deeplxUrl={metadata.translationInputDeeplxUrl as string | undefined}
-              textConnections={textConnections}
-              onMetadataChange={onMetadataChange}
+            </label>
+            <input
+              type="text"
+              value={(metadata.translationDeeplxUrl as string | undefined) ?? ""}
+              onChange={(e) => onMetadataChange({ translationDeeplxUrl: e.target.value })}
+              placeholder={localizeUi("ui.chatSettings.translationsection.httpLocalhost1188")}
+              className="mt-0.5 w-full rounded-lg bg-[var(--secondary)] px-3 py-2 text-xs outline-none ring-1 ring-transparent transition-shadow focus:ring-[var(--primary)]/40"
             />
-          ) : (
-            <div className="rounded-lg border border-dashed border-[var(--border)]/60 bg-[var(--secondary)]/50 px-3 py-2 text-[0.6875rem] text-[var(--muted-foreground)]">
-              Using Chat Language settings — <span className="font-medium text-[var(--foreground)]">{getProviderLabel(chatProvider)}</span>
-              {" → "}
-              <span className="font-medium text-[var(--foreground)]">{chatTargetLang}</span>
-            </div>
-          )}
-        </div>
-
-        {/* ── Input behavior (radio) ── */}
-        <div>
-          <h4 className="mb-2 text-[0.6875rem] font-semibold uppercase tracking-wide text-[var(--muted-foreground)]">
-            Input Translation Mode
-            <HelpTooltip
-              text="How outgoing messages are translated: not at all, automatically before send, or only when you press a draft button."
-              size="0.625rem"
-            />
-          </h4>
-          <div className="grid gap-2 sm:grid-cols-3">
-            {INPUT_BEHAVIOR_OPTIONS.map((option) => (
-              <label
-                key={option.value}
-                className={`cursor-pointer rounded-lg border px-3 py-2 transition-colors ${
-                  inputBehavior === option.value
-                    ? "border-[var(--primary)] bg-[var(--primary)]/10"
-                    : "border-[var(--border)] bg-[var(--background)]/40 hover:border-[var(--muted-foreground)]"
-                }`}
-              >
-                <input
-                  type="radio"
-                  name="translationInputBehavior"
-                  value={option.value}
-                  checked={inputBehavior === option.value}
-                  onChange={() => setInputBehavior(option.value)}
-                  className="sr-only"
-                />
-                <span className="block text-[0.6875rem] font-medium text-[var(--foreground)]">{option.label}</span>
-                <span className="mt-1 block text-[0.625rem] leading-snug text-[var(--muted-foreground)]">
-                  {option.description}
-                </span>
-              </label>
-            ))}
           </div>
-        </div>
+        )}
 
-        {/* ── Auto-Translate Responses ── */}
-        <div className="pt-1">
-          <TranslationToggle
-            enabled={metadata.autoTranslate === true}
-            title="Auto-Translate Responses"
-            description="Automatically translate AI responses after generation."
-            onToggle={() => onMetadataChange({ autoTranslate: !metadata.autoTranslate })}
-          />
-        </div>
+        <TranslationToggle
+          enabled={metadata.autoTranslate === true}
+          title={localizeUi("ui.chatSettings.translationsection.autoTranslateResponses")}
+          description={localizeUi("ui.chatSettings.translationsection.automaticallyTranslateAiResponsesAfterGeneration")}
+          onToggle={() => onMetadataChange({ autoTranslate: !metadata.autoTranslate })}
+        />
+        <TranslationToggle
+          enabled={metadata.translateInput === true}
+          title={localizeUi("ui.chatSettings.translationsection.translateMyMessages")}
+          description={localizeUi("ui.chatSettings.translationsection.translateYourMessagesToTheTargetLanguageBeforeSending")}
+          onToggle={() => onMetadataChange({ translateInput: !metadata.translateInput })}
+        />
+        <TranslationToggle
+          enabled={metadata.showInputTranslateButton === true}
+          title={localizeUi("ui.chatSettings.translationsection.showDraftTranslateButton")}
+          description={localizeUi("ui.chatSettings.translationsection.addATranslateButtonBesideSendSoYouCan")}
+          onToggle={() => onMetadataChange({ showInputTranslateButton: !metadata.showInputTranslateButton })}
+        />
+        <TranslationToggle
+          enabled={metadata.translationDisplayOnly === true}
+          title={localizeUi("ui.chatSettings.translationsection.showOnlyTranslation")}
+          description={localizeUi("ui.chatSettings.translationsection.onceAMessageIsTranslatedShowJustTheTranslation")}
+          onToggle={() => onMetadataChange({ translationDisplayOnly: !metadata.translationDisplayOnly })}
+        />
       </div>
     </ChatSettingsSection>
   );
 }
 
-// ── Reusable fields for one translation channel ──
-interface TranslationChannelFieldsProps {
-  prefix: string;
-  provider: string | undefined;
-  targetLang: string | undefined;
-  connectionId: string | undefined;
-  systemPrompt: string | undefined;
-  maxTokens: number | undefined;
-  deeplApiKey: string | undefined;
-  deeplxUrl: string | undefined;
-  textConnections: ChatConnectionOption[];
-  onMetadataChange: (patch: Record<string, unknown>) => void;
-}
-
-function TranslationChannelFields({
-  prefix,
-  provider: providerRaw,
-  targetLang,
-  connectionId,
-  systemPrompt,
-  maxTokens: maxTokensRaw,
-  deeplApiKey,
-  deeplxUrl,
-  textConnections,
-  onMetadataChange,
-}: TranslationChannelFieldsProps) {
-  const provider = providerRaw ?? "google";
-  const storedPrompt = typeof systemPrompt === "string" ? systemPrompt : "";
-  const customPrompt = storedPrompt.trim().length > 0 ? storedPrompt : "";
-  const promptValue = customPrompt || DEFAULT_TRANSLATION_SYSTEM_PROMPT;
-  const hasCustomPrompt = customPrompt.length > 0;
-
+function TranslationLanguageField({
+  label,
+  description,
+  provider,
+  value,
+  onChange,
+}: {
+  label: string;
+  description: string;
+  provider: string;
+  value: string;
+  onChange: (value: string) => void;
+}) {
+  const { t: localizeUi } = useUiTranslation();
   return (
-    <div className="space-y-2">
-      {/* Provider */}
-      <div>
-        <label className="text-[0.6875rem] font-medium text-[var(--muted-foreground)]">Provider</label>
-        <select
-          value={provider}
-          onChange={(e) => onMetadataChange({ [`${prefix}Provider`]: e.target.value })}
-          className="mt-0.5 w-full rounded-lg bg-[var(--secondary)] px-3 py-2 text-xs outline-none ring-1 ring-transparent transition-shadow focus:ring-[var(--primary)]/40"
-        >
-          {TRANSLATION_PROVIDER_OPTIONS.map((opt) => (
-            <option key={opt.value} value={opt.value}>
-              {opt.label}
-            </option>
-          ))}
-        </select>
-      </div>
-
-      {/* Target Language */}
-      <div>
-        <label className="text-[0.6875rem] font-medium text-[var(--muted-foreground)]">
-          Language
-          <HelpTooltip
-            text={
-              provider === "ai"
-                ? "Language name (e.g. English, Japanese, Spanish)"
-                : "Language code (e.g. en, ja, es, de, fr, zh, ko)"
-            }
-            size="0.625rem"
-          />
-        </label>
-        <input
-          type="text"
-          value={targetLang ?? "en"}
-          onChange={(e) => onMetadataChange({ [`${prefix}TargetLang`]: e.target.value })}
-          placeholder={provider === "ai" ? "English" : "en"}
-          className="mt-0.5 w-full rounded-lg bg-[var(--secondary)] px-3 py-2 text-xs outline-none ring-1 ring-transparent transition-shadow focus:ring-[var(--primary)]/40"
+    <div>
+      <label className="text-[0.6875rem] font-medium text-[var(--muted-foreground)]">
+        {label}
+        <HelpTooltip
+          text={
+            provider === "ai"
+              ?localizeUi("ui.chatSettings.translationlanguagefield.value1UseALanguageNameSuchAsEnglishJapanese", { value1: description })
+              :localizeUi("ui.chatSettings.translationlanguagefield.value1UseALanguageCodeSuchAsEnJa", { value1: description })
+          }
+          size="0.625rem"
         />
-      </div>
-
-      {/* AI Connection & Prompt */}
-      {provider === "ai" && (
-        <>
-          <div>
-            <label className="text-[0.6875rem] font-medium text-[var(--muted-foreground)]">
-              Connection
-              <HelpTooltip text="Which AI connection to use for translation" size="0.625rem" />
-            </label>
-            <select
-              value={connectionId ?? ""}
-              onChange={(e) => onMetadataChange({ [`${prefix}ConnectionId`]: e.target.value })}
-              className="mt-0.5 w-full rounded-lg bg-[var(--secondary)] px-3 py-2 text-xs outline-none ring-1 ring-transparent transition-shadow focus:ring-[var(--primary)]/40"
-            >
-              <option value="">Select connection…</option>
-              {textConnections.map((conn) => (
-                <option key={conn.id} value={conn.id}>
-                  {conn.name}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          <div className="space-y-1">
-            <div className="flex items-center justify-between gap-2">
-              <label className="text-[0.6875rem] font-medium text-[var(--muted-foreground)]">
-                AI Prompt
-                <HelpTooltip
-                  text="System prompt used by AI translation. Restoring uses Marinara's built-in default."
-                  size="0.625rem"
-                />
-              </label>
-              {hasCustomPrompt && (
-                <button
-                  type="button"
-                  onClick={() => onMetadataChange({ [`${prefix}Prompt`]: null })}
-                  className="flex shrink-0 items-center gap-1 rounded-md bg-[var(--secondary)] px-2 py-0.5 text-[0.625rem] text-[var(--muted-foreground)] ring-1 ring-[var(--border)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)]"
-                  title="Restore default prompt"
-                >
-                  <RotateCcw size="0.625rem" />
-                  Restore
-                </button>
-              )}
-            </div>
-            <textarea
-              value={promptValue}
-              onChange={(e) => {
-                const nextPrompt =
-                  !e.target.value.trim() || e.target.value.trim() === DEFAULT_TRANSLATION_SYSTEM_PROMPT.trim()
-                    ? null
-                    : e.target.value;
-                onMetadataChange({ [`${prefix}Prompt`]: nextPrompt });
-              }}
-              rows={5}
-              className="min-h-28 w-full resize-y rounded-lg bg-[var(--secondary)] px-3 py-2 font-mono text-xs leading-relaxed outline-none ring-1 ring-transparent transition-shadow focus:ring-[var(--primary)]/40"
-            />
-          </div>
-
-          <div>
-            <label className="text-[0.6875rem] font-medium text-[var(--muted-foreground)]">
-              Max Tokens
-              <HelpTooltip
-                text="Maximum tokens for AI translation. Leave empty for default (4096). Set to 0 for provider's maximum."
-                size="0.625rem"
-              />
-            </label>
-            <input
-              type="number"
-              min={0}
-              step={1}
-              value={maxTokensRaw ?? ""}
-              onChange={(e) => {
-                const val = e.target.value;
-                onMetadataChange({ [`${prefix}MaxTokens`]: val === "" ? null : Number(val) });
-              }}
-              placeholder="4096"
-              className="mt-0.5 w-full rounded-lg bg-[var(--secondary)] px-3 py-2 text-xs outline-none ring-1 ring-transparent transition-shadow focus:ring-[var(--primary)]/40"
-            />
-          </div>
-        </>
-      )}
-
-      {/* DeepL API Key */}
-      {provider === "deepl" && (
-        <div>
-          <label className="text-[0.6875rem] font-medium text-[var(--muted-foreground)]">DeepL API Key</label>
-          <input
-            type="password"
-            value={deeplApiKey ?? ""}
-            onChange={(e) => onMetadataChange({ [`${prefix}DeeplApiKey`]: e.target.value })}
-            placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx:fx"
-            className="mt-0.5 w-full rounded-lg bg-[var(--secondary)] px-3 py-2 text-xs outline-none ring-1 ring-transparent transition-shadow focus:ring-[var(--primary)]/40"
-          />
-        </div>
-      )}
-
-      {/* DeepLX URL */}
-      {provider === "deeplx" && (
-        <div>
-          <label className="text-[0.6875rem] font-medium text-[var(--muted-foreground)]">
-            DeepLX URL
-            <HelpTooltip
-              text="URL of your self-hosted DeepLX instance (e.g. http://localhost:1188)"
-              size="0.625rem"
-            />
-          </label>
-          <input
-            type="text"
-            value={deeplxUrl ?? ""}
-            onChange={(e) => onMetadataChange({ [`${prefix}DeeplxUrl`]: e.target.value })}
-            placeholder="http://localhost:1188"
-            className="mt-0.5 w-full rounded-lg bg-[var(--secondary)] px-3 py-2 text-xs outline-none ring-1 ring-transparent transition-shadow focus:ring-[var(--primary)]/40"
-          />
-        </div>
-      )}
+      </label>
+      <input
+        type="text"
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        placeholder={provider === "ai" ?localizeUi("ui.chatSettings.translationlanguagefield.english") :localizeUi("ui.chatSettings.translationlanguagefield.en")}
+        className="mt-0.5 w-full rounded-lg bg-[var(--secondary)] px-3 py-2 text-xs outline-none ring-1 ring-transparent transition-shadow focus:ring-[var(--primary)]/40"
+      />
     </div>
   );
 }
 
-// ── Toggle switch for translation features ──
+function TranslationPromptField({
+  label,
+  customPrompt,
+  onChange,
+  onRestore,
+}: {
+  label: string;
+  customPrompt: string;
+  onChange: (value: string) => void;
+  onRestore: () => void;
+}) {
+  const { t: localizeUi } = useUiTranslation();
+  return (
+    <div className="space-y-1">
+      <div className="flex items-center justify-between gap-2">
+        <label className="text-[0.6875rem] font-medium text-[var(--muted-foreground)]">
+          {label}
+          <HelpTooltip
+            text={localizeUi("ui.chatSettings.translationpromptfield.systemPromptUsedByAiTranslationTargetlanguageResolvesTo")}
+            size="0.625rem"
+          />
+        </label>
+        {customPrompt && (
+          <button
+            type="button"
+            onClick={onRestore}
+            className="flex shrink-0 items-center gap-1 rounded-md bg-[var(--secondary)] px-2 py-0.5 text-[0.625rem] text-[var(--muted-foreground)] ring-1 ring-[var(--border)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)]"
+            title={localizeUi("ui.agents.agenteditor.restoreDefaultPrompt")}
+          >
+            <RotateCcw size="0.625rem" />{localizeUi("ui.chatSettings.translationpromptfield.restore")}</button>
+        )}
+      </div>
+      <textarea
+        value={customPrompt || DEFAULT_TRANSLATION_SYSTEM_PROMPT}
+        onChange={(event) => onChange(event.target.value)}
+        rows={5}
+        className="min-h-28 w-full resize-y rounded-lg bg-[var(--secondary)] px-3 py-2 font-mono text-xs leading-relaxed outline-none ring-1 ring-transparent transition-shadow focus:ring-[var(--primary)]/40"
+      />
+    </div>
+  );
+}
+
+function TranslationMaxTokensField({
+  label,
+  value,
+  onChange,
+}: {
+  label: string;
+  value: number | undefined;
+  onChange: (value: number | null) => void;
+}) {
+  return (
+    <div>
+      <label className="text-[0.6875rem] font-medium text-[var(--muted-foreground)]">
+        {label}
+        <HelpTooltip
+          text="Maximum tokens for AI translation. Leave empty for default (4096). Set to 0 for the provider's maximum."
+          size="0.625rem"
+        />
+      </label>
+      <input
+        type="number"
+        min={0}
+        step={1}
+        value={value ?? ""}
+        onChange={(event) => {
+          const raw = event.target.value;
+          onChange(raw === "" ? null : Number(raw));
+        }}
+        placeholder="4096"
+        className="mt-0.5 w-full rounded-lg bg-[var(--secondary)] px-3 py-2 text-xs outline-none ring-1 ring-transparent transition-shadow focus:ring-[var(--primary)]/40"
+      />
+    </div>
+  );
+}
+
 function TranslationToggle({
   enabled,
   title,

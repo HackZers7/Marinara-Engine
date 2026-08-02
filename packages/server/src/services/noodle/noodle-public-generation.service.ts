@@ -37,6 +37,7 @@ import {
   characterNameFromRow,
   ensurePersonaAccounts,
   ensureProfessorMariAccount,
+  filterResolvableNoodleParticipants,
   getErrorMessage,
   parseRecord,
   resolvePersonaAccount,
@@ -196,7 +197,17 @@ export function createPublicNoodleGenerationService(db: DB) {
           settings.invitedCharacterGroupIds,
         );
         if (settings.allowRandomUsers) await ensureRandomUserAccounts(noodle);
-        const participantAccounts = await noodle.listAccounts();
+        const { resolvable: participantAccounts, staleAccounts } = await filterResolvableNoodleParticipants(
+          await noodle.listAccounts(),
+          characters,
+        );
+        if (staleAccounts.length > 0) {
+          logger.warn(
+            "[noodle] Skipping %d Noodle account(s) whose character no longer exists: %s",
+            staleAccounts.length,
+            staleAccounts.map((account) => `@${account.handle} (${account.entityId})`).join(", "),
+          );
+        }
         const selectionCutoff = sinceHoursIso(48);
         const [recentCreatedSelectionPosts, recentPersonaSelectionReplies] = await Promise.all([
           noodle.listPosts({ since: selectionCutoff, limit: 200 }),
@@ -236,7 +247,10 @@ export function createPublicNoodleGenerationService(db: DB) {
         if (selectedParticipants.length === 0) {
           return {
             ok: false as const,
-            error: "Invite a character, select a character folder, or enable random users before refreshing.",
+            error:
+              staleAccounts.length > 0
+                ? "Every invited Noodle character points at a character card that no longer exists. Re-invite the characters you want on your timeline."
+                : "Invite a character, select a character folder, or enable random users before refreshing.",
           };
         }
 

@@ -10,6 +10,8 @@ export interface NoodleImagePostCtx extends Record<string, string | number | und
   draftPrompt: string;
   userInstructions: string;
   characterDescription: string;
+  characterImageInstructions: string;
+  characterPersonality: string;
 }
 
 export const NOODLE_IMAGE_POST: PromptOverrideKeyDef<NoodleImagePostCtx> = {
@@ -40,9 +42,27 @@ export const NOODLE_IMAGE_POST: PromptOverrideKeyDef<NoodleImagePostCtx> = {
       description: "Optional character appearance or description notes included by Noodle Settings.",
       example: "Character appearance notes:\nDottore's Appearance: tall, slim build, blue hair, red eyes, mask.",
     },
+    {
+      name: "characterPersonality",
+      description: "The current posting character's personality and traits.",
+      example: "precise, arrogant, intensely curious, impatient with staged sentimentality",
+    },
+    {
+      name: "characterImageInstructions",
+      description: "Opted-in image habits and preferences from the current posting character's card.",
+      example: "Shares stark lab photography with cold lighting and deliberately clinical framing.",
+    },
   ],
   defaultBuilder: (ctx) =>
-    [ctx.draftPrompt.trim() || `A social-media-ready image posted by ${ctx.authorName}.`, ctx.characterDescription, ctx.userInstructions]
+    [
+      ctx.draftPrompt.trim() || `A social-media-ready image posted by ${ctx.authorName}.`,
+      ctx.characterDescription,
+      ctx.characterPersonality
+        ? `Character personality and traits: ${ctx.characterPersonality}\nLet these traits naturally influence the subject, image quality, camera habits, mood, and composition.`
+        : "",
+      ctx.characterImageInstructions ? `Character-specific image instructions: ${ctx.characterImageInstructions}` : "",
+      ctx.userInstructions,
+    ]
       .map((part) => part.trim())
       .filter(Boolean)
       .join("\n\n"),
@@ -55,6 +75,8 @@ export const NOODLE_IMAGE_POST: PromptOverrideKeyDef<NoodleImagePostCtx> = {
       "Create either a social-media-ready character image or a meme. Mention build, clothing, appearance, pose, expression, setting, lighting, mood, composition, meme format, and short visible meme text when relevant.",
     characterDescription:
       "Character appearance notes:\nDottore's Appearance: tall, slim build, blue hair, red eyes, mask.",
+    characterPersonality: "precise, arrogant, intensely curious, impatient with staged sentimentality",
+    characterImageInstructions: "Shares stark lab photography with cold lighting and clinical framing.",
   },
 };
 

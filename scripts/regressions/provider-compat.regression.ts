@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import {
   findKnownModel,
+  isClaudeAdaptiveOnlyNoSamplingModel,
   resolveProviderReasoningEffort,
   shouldSuppressUnknownModelParameters,
 } from "../../packages/shared/src/constants/model-lists.js";
@@ -13,6 +14,15 @@ import {
   NOODLE_JSON_OUTPUT_HEADING,
   noodleResponseFormat,
 } from "../../packages/server/src/services/noodle/noodle-response-format.js";
+import {
+  AnthropicProvider,
+  supportsAnthropicThinkingDisable,
+} from "../../packages/server/src/services/llm/providers/anthropic.provider.js";
+import {
+  __setSdkForTesting,
+  ClaudeSubscriptionProvider,
+} from "../../packages/server/src/services/llm/providers/claude-subscription.provider.js";
+import { resolveGeminiThinkingConfig } from "../../packages/server/src/services/llm/providers/google.provider.js";
 import {
   normalizeOpenAIChatCompletionsResponseFormat,
   OpenAIProvider,
@@ -43,6 +53,7 @@ import {
   type GenerationFallbackNotice,
 } from "../../packages/server/src/services/generation/fallback-notification.js";
 import { resolveStoredChatOptions } from "../../packages/server/src/services/generation/generation-parameters.js";
+import { resolveMainGenerationToolChoice } from "../../packages/server/src/services/generation/tool-resolution-runtime.js";
 
 class RegressionProvider extends BaseLLMProvider {
   calls = 0;
@@ -100,7 +111,7 @@ try {
   const address = gatewayServer.address();
   assert.ok(address && typeof address === "object");
   const provider = new OpenAIProvider(
-    `http://127.0.0.1:${address.port}/v1`,
+    `http://localhost:${address.port}/v1`,
     "test",
     undefined,
     undefined,
@@ -122,6 +133,14 @@ try {
 }
 
 let customParametersRequestBody: Record<string, unknown> | null = null;
+const testToolDefinition = {
+  type: "function" as const,
+  function: {
+    name: "fresh_data",
+    description: "Fetch current data",
+    parameters: { type: "object", properties: {} },
+  },
+};
 const customParametersServer = createServer(async (request, response) => {
   const chunks: Buffer[] = [];
   for await (const chunk of request) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
@@ -153,8 +172,52 @@ try {
   assert.ok(customParametersRequestBody);
   assert.equal(customParametersRequestBody.top_k, 44);
   assert.equal(customParametersRequestBody.min_p, 0.12);
-  assert.equal(customParametersRequestBody.reasoning_effort, "high");
+  assert.equal(
+    "reasoning_effort" in customParametersRequestBody,
+    false,
+    "unknown custom models must not receive inherited reasoning effort",
+  );
   assert.equal(customParametersRequestBody.verbosity, "low");
+
+  customParametersRequestBody = null;
+  await provider.chatComplete([{ role: "user", content: "disable reasoning" }], {
+    model: "custom-model",
+    stream: false,
+    reasoningEffort: "none",
+    enabledParameters: { reasoningEffort: true },
+  });
+  assert.ok(customParametersRequestBody);
+  assert.equal(customParametersRequestBody.reasoning_effort, "none");
+
+  customParametersRequestBody = null;
+  await provider.chatComplete([{ role: "user", content: "provider default reasoning" }], {
+    model: "gpt-5.6-local",
+    stream: false,
+    reasoningEffort: "high",
+    enabledParameters: { reasoningEffort: false },
+  });
+  assert.ok(customParametersRequestBody);
+  assert.equal("reasoning_effort" in customParametersRequestBody, false);
+
+  customParametersRequestBody = null;
+  await provider.chatComplete([{ role: "user", content: "fetch current data" }], {
+    model: "custom-model",
+    stream: false,
+    tools: [testToolDefinition],
+    toolChoice: "required",
+  });
+  assert.ok(customParametersRequestBody);
+  assert.equal(customParametersRequestBody.tool_choice, "required");
+  assert.equal(typeof customParametersRequestBody.tool_choice, "string");
+
+  customParametersRequestBody = null;
+  await provider.chatComplete([{ role: "user", content: "tool choice default" }], {
+    model: "custom-model",
+    stream: false,
+    tools: [testToolDefinition],
+  });
+  assert.ok(customParametersRequestBody);
+  assert.equal(customParametersRequestBody.tool_choice, "auto");
 
   customParametersRequestBody = null;
   await provider.chatComplete([{ role: "user", content: "test explicit custom samplers" }], {
@@ -178,6 +241,7 @@ try {
   assert.equal(customParametersRequestBody.presence_penalty, -0.2);
   assert.equal(customParametersRequestBody.top_n_sigma, 1.5);
   assert.deepEqual(customParametersRequestBody.chat_template_kwargs, { enable_thinking: true });
+  assert.equal(customParametersRequestBody.reasoning_effort, "high");
   assert.equal("temperature" in customParametersRequestBody, false);
   assert.equal("top_p" in customParametersRequestBody, false);
 
@@ -242,6 +306,230 @@ assert.deepEqual(
     enabledParameters: { topK: true, reasoningEffort: true, verbosity: true },
   },
 );
+assert.equal(
+  resolveStoredChatOptions(
+    JSON.stringify({ reasoningEffort: null, enabledParameters: { reasoningEffort: true } }),
+    "openrouter",
+    "openai/gpt-5.1",
+  ).reasoningEffort,
+  "none",
+);
+assert.equal(
+  resolveStoredChatOptions(
+    JSON.stringify({ reasoningEffort: null, enabledParameters: { reasoningEffort: false } }),
+    "openrouter",
+    "openai/gpt-5.1",
+  ).reasoningEffort,
+  undefined,
+);
+assert.deepEqual(resolveGeminiThinkingConfig("gemini-2.5-flash", { reasoningEffort: "none" }, 4096), {
+  thinkingBudget: 0,
+  includeThoughts: false,
+});
+assert.equal(
+  resolveGeminiThinkingConfig("gemini-2.5-pro", { reasoningEffort: "none" }, 4096),
+  undefined,
+  "Gemini 2.5 Pro does not support disabling thinking",
+);
+assert.equal(
+  resolveGeminiThinkingConfig("gemini-3.5-flash", { reasoningEffort: "none" }, 4096),
+  undefined,
+  "reasoning-mandatory Gemini 3 models must not receive an unsupported off value",
+);
+assert.equal(supportsAnthropicThinkingDisable("claude-sonnet-5"), true);
+assert.equal(supportsAnthropicThinkingDisable("claude-opus-5"), true);
+assert.equal(supportsAnthropicThinkingDisable("claude-fable-5"), false);
+assert.equal(isClaudeAdaptiveOnlyNoSamplingModel("claude-opus-5"), true);
+const opus5 = findKnownModel("anthropic", "claude-opus-5");
+assert.equal(opus5?.context, 1_000_000);
+assert.equal(opus5?.maxOutput, 128_000);
+const subscriptionOpus5 = findKnownModel("claude_subscription", "claude-opus-5");
+assert.equal(subscriptionOpus5?.context, 1_000_000);
+assert.equal(subscriptionOpus5?.maxOutput, 128_000);
+assert.equal(
+  resolveProviderReasoningEffort({
+    provider: "anthropic",
+    model: "claude-opus-5",
+    reasoningEffort: "maximum",
+  }),
+  "max",
+);
+
+// OpenAI Responses always requests a readable reasoning summary when reasoning
+// is active. Display/capture flags control what the app does with that summary,
+// but must not silently remove it from the provider request.
+{
+  let responsesReasoningRequestBody: Record<string, unknown> | null = null;
+  const responsesReasoningSse = [
+    "event: response.reasoning_summary_part.added",
+    'data: {"type":"response.reasoning_summary_part.added","part":{"type":"summary_text","text":"Checked the roleplay context."}}',
+    "",
+    "event: response.output_text.delta",
+    'data: {"type":"response.output_text.delta","delta":"Visible reply"}',
+    "",
+    "event: response.completed",
+    'data: {"type":"response.completed","response":{"status":"completed","output":[{"id":"msg_1","type":"message","content":[{"type":"output_text","text":"Visible reply"}]}],"usage":{"input_tokens":12,"output_tokens":7,"total_tokens":19,"output_tokens_details":{"reasoning_tokens":4}}}}',
+    "",
+    "data: [DONE]",
+    "",
+  ].join("\n");
+  const responsesReasoningServer = createServer(async (request, response) => {
+    const chunks: Buffer[] = [];
+    for await (const chunk of request) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    responsesReasoningRequestBody = JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown>;
+    response.writeHead(200, { "content-type": "text/event-stream" });
+    response.end(responsesReasoningSse);
+  });
+  await new Promise<void>((resolve) => responsesReasoningServer.listen(0, "127.0.0.1", resolve));
+  try {
+    const address = responsesReasoningServer.address();
+    assert.ok(address && typeof address === "object");
+    const provider = new OpenAIProvider(
+      `http://127.0.0.1:${address.port}/v1`,
+      "test",
+      undefined,
+      undefined,
+      undefined,
+      "openai",
+    );
+    let thinking = "";
+    assert.equal(
+      await collectProviderOutput(provider, {
+        model: "gpt-5.6-sol",
+        stream: true,
+        reasoningEffort: "xhigh",
+        excludePastReasoning: false,
+        onThinking: (chunk) => {
+          thinking += chunk;
+        },
+      }),
+      "Visible reply",
+    );
+    assert.equal(thinking, "Checked the roleplay context.");
+    assert.ok(responsesReasoningRequestBody);
+    assert.deepEqual(responsesReasoningRequestBody.reasoning, {
+      effort: "xhigh",
+      context: "all_turns",
+      summary: "auto",
+    });
+  } finally {
+    await new Promise<void>((resolve, reject) =>
+      responsesReasoningServer.close((error) => (error ? reject(error) : resolve())),
+    );
+  }
+}
+
+// Opus 5 uses adaptive thinking, output_config.effort, and rejects legacy
+// sampling knobs. Capturing Roleplay reasoning must explicitly request the
+// summarized display even though thinking itself is on by default.
+{
+  const anthropicRequestBodies: Array<Record<string, unknown>> = [];
+  const anthropicServer = createServer(async (request, response) => {
+    const chunks: Buffer[] = [];
+    for await (const chunk of request) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    anthropicRequestBodies.push(JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown>);
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(
+      JSON.stringify({
+        content: [
+          { type: "thinking", thinking: "Summarized Claude reasoning." },
+          { type: "text", text: "Claude reply" },
+        ],
+        stop_reason: "end_turn",
+        usage: { input_tokens: 10, output_tokens: 6 },
+      }),
+    );
+  });
+  await new Promise<void>((resolve) => anthropicServer.listen(0, "127.0.0.1", resolve));
+  try {
+    const address = anthropicServer.address();
+    assert.ok(address && typeof address === "object");
+    const provider = new AnthropicProvider(`http://127.0.0.1:${address.port}`, "test");
+    let thinking = "";
+    assert.equal(
+      await collectProviderOutput(provider, {
+        model: "claude-opus-5",
+        stream: false,
+        captureReasoning: true,
+        reasoningEffort: "max",
+        temperature: 0.7,
+        topK: 32,
+        onThinking: (chunk) => {
+          thinking += chunk;
+        },
+      }),
+      "Claude reply",
+    );
+    assert.equal(thinking, "Summarized Claude reasoning.");
+    const maxEffortBody = anthropicRequestBodies[0];
+    assert.ok(maxEffortBody);
+    assert.deepEqual(maxEffortBody.thinking, { type: "adaptive", display: "summarized" });
+    assert.deepEqual(maxEffortBody.output_config, { effort: "max" });
+    assert.equal("temperature" in maxEffortBody, false);
+    assert.equal("top_k" in maxEffortBody, false);
+    assert.equal("top_p" in maxEffortBody, false);
+
+    await collectProviderOutput(provider, {
+      model: "claude-opus-5",
+      stream: false,
+      captureReasoning: true,
+      reasoningEffort: "none",
+      temperature: 0.7,
+      topK: 32,
+    });
+    const disabledBody = anthropicRequestBodies[1];
+    assert.ok(disabledBody);
+    assert.deepEqual(disabledBody.thinking, { type: "disabled" });
+    assert.equal("output_config" in disabledBody, false);
+    assert.equal("temperature" in disabledBody, false);
+    assert.equal("top_k" in disabledBody, false);
+    assert.equal("top_p" in disabledBody, false);
+  } finally {
+    await new Promise<void>((resolve, reject) =>
+      anthropicServer.close((error) => (error ? reject(error) : resolve())),
+    );
+  }
+}
+
+{
+  let subscriptionOptions: Record<string, unknown> | null = null;
+  __setSdkForTesting({
+    query: ((args: { options: Record<string, unknown> }) => {
+      subscriptionOptions = args.options;
+      return (async function* () {
+        yield {
+          type: "stream_event",
+          event: { type: "content_block_delta", delta: { type: "text_delta", text: "Subscription reply" } },
+        };
+        yield {
+          type: "result",
+          subtype: "success",
+          result: "",
+          usage: { input_tokens: 9, output_tokens: 5 },
+          modelUsage: { "claude-opus-5": {} },
+          fast_mode_state: "off",
+        };
+      })();
+    }) as never,
+  });
+  try {
+    const provider = new ClaudeSubscriptionProvider("", "");
+    assert.equal(
+      await collectProviderOutput(provider, {
+        model: "claude-opus-5",
+        stream: true,
+        captureReasoning: true,
+        reasoningEffort: "xhigh",
+      }),
+      "Subscription reply",
+    );
+    assert.ok(subscriptionOptions);
+    assert.deepEqual(subscriptionOptions.thinking, { type: "adaptive", display: "summarized" });
+    assert.equal(subscriptionOptions.effort, "xhigh");
+  } finally {
+    __setSdkForTesting(null);
+  }
+}
 
 let openRouterRequestBody: Record<string, unknown> | null = null;
 const openRouterServer = createServer(async (request, response) => {
@@ -293,6 +581,32 @@ try {
   assert.equal(capturedOpenRouterBody.connection_only, "inherited");
   assert.equal(capturedOpenRouterBody.awesomesauce, "enabled");
   assert.deepEqual(capturedOpenRouterBody.nested, { connection: true, shared: "chat", level: 3 });
+
+  openRouterRequestBody = null;
+  await collectProviderOutput(provider, {
+    model: "openai/gpt-5.1",
+    stream: false,
+    reasoningEffort: "none",
+    enabledParameters: { reasoningEffort: true },
+  });
+  const disabledOpenRouterBody = openRouterRequestBody as Record<string, unknown> | null;
+  assert.ok(disabledOpenRouterBody);
+  assert.deepEqual(disabledOpenRouterBody.reasoning, { effort: "none" });
+
+  openRouterRequestBody = null;
+  await collectProviderOutput(provider, {
+    model: "google/gemini-3.5-flash",
+    stream: false,
+    reasoningEffort: "none",
+    enabledParameters: { reasoningEffort: true },
+  });
+  const mandatoryOpenRouterBody = openRouterRequestBody as Record<string, unknown> | null;
+  assert.ok(mandatoryOpenRouterBody);
+  assert.equal(
+    "reasoning" in mandatoryOpenRouterBody,
+    false,
+    "known reasoning-mandatory OpenRouter models must keep their provider default",
+  );
 } finally {
   await new Promise<void>((resolve, reject) =>
     openRouterServer.close((error) => (error ? reject(error) : resolve())),
@@ -419,6 +733,10 @@ assert.equal(isOpenRouterApiUrl("https://openrouter.ai/api/v1"), true);
 assert.equal(isOpenRouterApiUrl("https://api.openrouter.ai/v1"), true);
 assert.equal(isOpenRouterApiUrl("https://openrouter.ai.example.com/v1"), false);
 assert.equal(isOpenRouterApiUrl("not a URL"), false);
+assert.equal(resolveMainGenerationToolChoice({ forceToolCall: true }, 0), "required");
+assert.equal(resolveMainGenerationToolChoice({ forceToolCall: "true" }, 0), "required");
+assert.equal(resolveMainGenerationToolChoice({ forceToolCall: true }, 1), "auto");
+assert.equal(resolveMainGenerationToolChoice({ forceToolCall: false }, 0), "auto");
 assert.equal(normalizeCohereOpenAIBaseUrl("https://api.cohere.com"), "https://api.cohere.ai/compatibility/v1");
 assert.equal(normalizeCohereOpenAIBaseUrl("https://api.cohere.ai/"), "https://api.cohere.ai/compatibility/v1");
 assert.equal(normalizeCohereOpenAIBaseUrl("https://api.cohere.com/v1"), "https://api.cohere.ai/compatibility/v1");
@@ -580,5 +898,177 @@ await assert.rejects(
   /cancelled/,
 );
 assert.equal(abortedFallback.calls, 0, "user cancellation must not trigger a fallback request");
+
+// Issue #4010 — GPT-5.6 (Responses API) streams function-call arguments in
+// `response.function_call_arguments.delta` events keyed by `item_id`, not
+// `call_id`. Accumulating by call_id left tool arguments empty, so Web Search
+// received blank/malformed JSON. Verify the streamed query is reassembled.
+{
+  let responsesToolRequestBody: Record<string, unknown> | null = null;
+  const responsesToolSse = [
+    'event: response.output_item.added',
+    'data: {"type":"response.output_item.added","item":{"id":"fc_1","type":"function_call","call_id":"call_1","name":"web_search","arguments":""}}',
+    '',
+    'event: response.function_call_arguments.delta',
+    'data: {"type":"response.function_call_arguments.delta","item_id":"fc_1","output_index":0,"delta":"{\\"query\\":\\"latest "}',
+    '',
+    'event: response.function_call_arguments.delta',
+    'data: {"type":"response.function_call_arguments.delta","item_id":"fc_1","output_index":0,"delta":"marinara news\\"}"}',
+    '',
+    'event: response.function_call_arguments.done',
+    'data: {"type":"response.function_call_arguments.done","item_id":"fc_1","output_index":0,"arguments":"{\\"query\\":\\"latest marinara news\\"}"}',
+    '',
+    'event: response.output_item.done',
+    'data: {"type":"response.output_item.done","item":{"id":"fc_1","type":"function_call","call_id":"call_1","name":"web_search"}}',
+    '',
+    'event: response.completed',
+    'data: {"type":"response.completed","response":{"status":"completed"}}',
+    '',
+    'data: [DONE]',
+    '',
+  ].join("\n");
+  const responsesServer = createServer(async (request, response) => {
+    const chunks: Buffer[] = [];
+    for await (const chunk of request) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    responsesToolRequestBody = JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown>;
+    response.writeHead(200, { "content-type": "text/event-stream" });
+    response.end(responsesToolSse);
+  });
+  await new Promise<void>((resolve) => responsesServer.listen(0, "127.0.0.1", resolve));
+  try {
+    const address = responsesServer.address();
+    assert.ok(address && typeof address === "object");
+    const provider = new OpenAIProvider(
+      `http://127.0.0.1:${address.port}/v1`,
+      "test",
+      undefined,
+      undefined,
+      undefined,
+      "openai",
+      undefined,
+      true,
+    );
+    const result = await provider.chatComplete([{ role: "user", content: "search please" }], {
+      model: "gpt-5.6",
+      stream: true,
+      toolChoice: "required",
+      tools: [
+        {
+          type: "function",
+          function: { name: "web_search", description: "Search the web", parameters: { type: "object", properties: { query: { type: "string" } } } },
+        },
+      ],
+    });
+    assert.equal(result.toolCalls.length, 1, "GPT-5.6 Responses stream must surface the function call");
+    assert.ok(responsesToolRequestBody);
+    assert.equal(responsesToolRequestBody.tool_choice, "required");
+    assert.equal(typeof responsesToolRequestBody.tool_choice, "string");
+    assert.equal(result.toolCalls[0].function.name, "web_search");
+    assert.equal(
+      result.toolCalls[0].function.arguments,
+      '{"query":"latest marinara news"}',
+      "streamed function-call arguments must be accumulated by item_id, not dropped",
+    );
+    assert.equal(result.toolCalls[0].id, "call_1", "the tool call must keep its call_id for function_call_output");
+  } finally {
+    await new Promise<void>((resolve, reject) => responsesServer.close((error) => (error ? reject(error) : resolve())));
+  }
+}
+
+// GPT-5.6 may report hidden reasoning tokens while sending the displayable
+// reasoning summary only in the final Responses payload. Roleplay persists the
+// onThinking callback as `extra.thinking`, so recover that final summary without
+// duplicating any summary text that was already streamed.
+{
+  let responsesReasoningRequestBody: Record<string, unknown> | null = null;
+  const streamedThenFinalSse = [
+    "event: response.reasoning_summary_text.delta",
+    'data: {"type":"response.reasoning_summary_text.delta","delta":"Reviewing "}',
+    "",
+    "event: response.reasoning_summary_text.done",
+    'data: {"type":"response.reasoning_summary_text.done","text":"Reviewing the tools."}',
+    "",
+    "event: response.reasoning_summary_part.done",
+    'data: {"type":"response.reasoning_summary_part.done","part":{"type":"summary_text","text":"Reviewing the tools."}}',
+    "",
+    "event: response.output_item.done",
+    'data: {"type":"response.output_item.done","item":{"id":"rs_2","type":"reasoning","summary":[{"type":"summary_text","text":"Reviewing the tools."}]}}',
+    "",
+    "event: response.output_text.delta",
+    'data: {"type":"response.output_text.delta","delta":"Done."}',
+    "",
+    "event: response.completed",
+    'data: {"type":"response.completed","response":{"status":"completed","output":[{"id":"rs_2","type":"reasoning","summary":[{"type":"summary_text","text":"Reviewing the tools."}]},{"id":"msg_2","type":"message","content":[{"type":"output_text","text":"Done."}]}],"usage":{"input_tokens":10,"output_tokens":8,"total_tokens":18,"output_tokens_details":{"reasoning_tokens":5}}}}',
+    "",
+    "data: [DONE]",
+    "",
+  ].join("\n");
+  const responsesReasoningServer = createServer(async (request, response) => {
+    const chunks: Buffer[] = [];
+    for await (const chunk of request) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    responsesReasoningRequestBody = JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown>;
+    response.writeHead(200, { "content-type": "text/event-stream" });
+    response.end(streamedThenFinalSse);
+  });
+  await new Promise<void>((resolve) => responsesReasoningServer.listen(0, "127.0.0.1", resolve));
+  try {
+    const address = responsesReasoningServer.address();
+    assert.ok(address && typeof address === "object");
+    const provider = new OpenAIProvider(
+      `http://127.0.0.1:${address.port}/v1`,
+      "test",
+      undefined,
+      undefined,
+      undefined,
+      "openai",
+    );
+
+    let streamedThinking = "";
+    const completion = await provider.chatComplete([{ role: "user", content: "test" }], {
+      model: "gpt-5.6-sol",
+      stream: true,
+      enableThinking: true,
+      captureReasoning: true,
+      reasoningEffort: "xhigh",
+      onThinking: (chunk) => {
+        streamedThinking += chunk;
+      },
+    });
+    assert.equal(completion.content, "Done.");
+    assert.equal(
+      streamedThinking,
+      "Reviewing the tools.",
+      "final reasoning items must fill missing streamed text without duplicating it",
+    );
+    assert.ok(responsesReasoningRequestBody);
+    assert.deepEqual(responsesReasoningRequestBody.reasoning, {
+      effort: "xhigh",
+      summary: "auto",
+    });
+
+    responsesReasoningRequestBody = null;
+    await provider.chatComplete([{ role: "user", content: "test provider default" }], {
+      model: "gpt-5.6-sol",
+      stream: true,
+      reasoningEffort: "xhigh",
+      enabledParameters: { reasoningEffort: false },
+    });
+    assert.ok(responsesReasoningRequestBody);
+    assert.equal(
+      "reasoning" in responsesReasoningRequestBody,
+      false,
+      "disabled Responses reasoning must leave the provider default untouched",
+    );
+    assert.equal(
+      "include" in responsesReasoningRequestBody,
+      false,
+      "disabled Responses reasoning must not request encrypted reasoning output",
+    );
+  } finally {
+    await new Promise<void>((resolve, reject) =>
+      responsesReasoningServer.close((error) => (error ? reject(error) : resolve())),
+    );
+  }
+}
 
 process.stdout.write("Provider compatibility regression passed.\n");

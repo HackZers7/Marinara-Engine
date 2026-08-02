@@ -87,6 +87,19 @@ export function characterAppearanceFromRow(row: { data: unknown }) {
   return readIllustratorAppearance(data) ?? normalizeIllustratorAppearance(data.description) ?? "";
 }
 
+export function characterNoodleImageContextFromRow(row: { data: unknown }) {
+  const data = parseRecord(row.data);
+  const extensions = parseRecord(data.extensions);
+  return {
+    personality: typeof data.personality === "string" ? data.personality.trim() : "",
+    imageInstructions:
+      extensions.applyConversationImageInstructionsToNoodle === true &&
+      typeof extensions.conversationImageInstructions === "string"
+        ? extensions.conversationImageInstructions.trim()
+        : "",
+  };
+}
+
 function galleryImageUrl(filePath: string, fallbackChatId: string) {
   const filename = basename(filePath.replace(/\\/g, "/"));
   return `/api/gallery/file/${encodeURIComponent(fallbackChatId)}/${encodeURIComponent(filename)}`;
@@ -123,49 +136,56 @@ export async function generateNoodlePostImage(input: {
     input.imageConnection.id,
   );
   let characterDescription = "";
+  let characterImageInstructions = "";
+  let characterPersonality = "";
   let referenceImages: string[] | undefined;
 
-  if (
-    input.account.kind === "character" &&
-    (input.settings.imageGenerationIncludeDescriptions || input.settings.imageGenerationUseAvatarReferences)
-  ) {
+  if (input.account.kind === "character") {
     const character = await input.characters.getById(input.account.entityId);
     if (character) {
-      const referenceAccountByEntityId = new Map(
-        [input.account, ...input.referenceAccounts]
-          .filter((account) => account.kind === "character")
-          .map((account) => [account.entityId, account]),
-      );
-      const referenceRows = await Promise.all(
-        Array.from(referenceAccountByEntityId.keys()).map((characterId) => input.characters.getById(characterId)),
-      );
-      const chatCharacters = referenceRows
-        .filter((row): row is NonNullable<typeof row> => !!row)
-        .map((row) => {
-          const account = referenceAccountByEntityId.get(row.id);
-          return {
-            id: row.id,
-            name: account?.displayName || characterNameFromRow(row),
-            avatarPath: row.avatarPath ?? null,
-            appearance: characterAppearanceFromRow(row),
-          };
+      const imageContext = characterNoodleImageContextFromRow(character);
+      characterPersonality = imageContext.personality;
+      characterImageInstructions = imageContext.imageInstructions;
+
+      if (input.settings.imageGenerationIncludeDescriptions || input.settings.imageGenerationUseAvatarReferences) {
+        const referenceAccountByEntityId = new Map(
+          [input.account, ...input.referenceAccounts]
+            .filter((account) => account.kind === "character")
+            .map((account) => [account.entityId, account]),
+        );
+        const referenceRows = await Promise.all(
+          Array.from(referenceAccountByEntityId.keys()).map((characterId) =>
+            characterId === character.id ? Promise.resolve(character) : input.characters.getById(characterId),
+          ),
+        );
+        const chatCharacters = referenceRows
+          .filter((row): row is NonNullable<typeof row> => !!row)
+          .map((row) => {
+            const account = referenceAccountByEntityId.get(row.id);
+            return {
+              id: row.id,
+              name: account?.displayName || characterNameFromRow(row),
+              avatarPath: row.avatarPath ?? null,
+              appearance: characterAppearanceFromRow(row),
+            };
+          });
+        const referenceResolution = await resolveIllustratorCharacterReferences({
+          charactersStore: input.characters,
+          chatCharacters,
+          persona: null,
+          requestedNames: [input.account.displayName],
+          promptText: [input.account.displayName, input.postContent, input.draftPrompt].join("\n"),
+          maxReferences: 6,
         });
-      const referenceResolution = await resolveIllustratorCharacterReferences({
-        charactersStore: input.characters,
-        chatCharacters,
-        persona: null,
-        requestedNames: [input.account.displayName],
-        promptText: [input.account.displayName, input.postContent, input.draftPrompt].join("\n"),
-        maxReferences: 6,
-      });
-      if (input.settings.imageGenerationIncludeDescriptions && referenceResolution.appearanceBlock) {
-        characterDescription = referenceResolution.appearanceBlock;
-      }
-      if (input.settings.imageGenerationUseAvatarReferences) {
-        const builtInMariReferences =
-          input.account.entityId === PROFESSOR_MARI_ID ? readProfessorMariReferenceImages() : [];
-        const combinedReferences = [...builtInMariReferences, ...referenceResolution.referenceImages];
-        if (combinedReferences.length > 0) referenceImages = Array.from(new Set(combinedReferences)).slice(0, 6);
+        if (input.settings.imageGenerationIncludeDescriptions && referenceResolution.appearanceBlock) {
+          characterDescription = referenceResolution.appearanceBlock;
+        }
+        if (input.settings.imageGenerationUseAvatarReferences) {
+          const builtInMariReferences =
+            input.account.entityId === PROFESSOR_MARI_ID ? readProfessorMariReferenceImages() : [];
+          const combinedReferences = [...builtInMariReferences, ...referenceResolution.referenceImages];
+          if (combinedReferences.length > 0) referenceImages = Array.from(new Set(combinedReferences)).slice(0, 6);
+        }
       }
     }
   }
@@ -176,6 +196,8 @@ export async function generateNoodlePostImage(input: {
     draftPrompt: input.draftPrompt,
     userInstructions: input.settings.imageGenerationPrompt,
     characterDescription,
+    characterImageInstructions,
+    characterPersonality,
   });
   const compiledPrompt = compileImagePrompt({
     kind: "illustration",

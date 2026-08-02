@@ -59,6 +59,20 @@ function fallbackOptions(options: ChatOptions, connection: FallbackConnection): 
       : typeof options.maxTokens === "number"
         ? options.maxTokens
         : undefined;
+  const reasoningSendDisabled = stored?.enabledParameters?.reasoningEffort === false;
+  const hasStoredReasoningEffort = stored?.reasoningEffort !== undefined;
+  const reasoningEffort = reasoningSendDisabled
+    ? undefined
+    : stored?.reasoningEffort === "maximum"
+      ? "max"
+      : stored?.reasoningEffort === null
+        ? "none"
+        : (stored?.reasoningEffort ?? options.reasoningEffort);
+  const enableThinking = reasoningSendDisabled
+    ? false
+    : hasStoredReasoningEffort
+      ? stored?.reasoningEffort !== null
+      : options.enableThinking;
 
   return {
     ...options,
@@ -74,12 +88,8 @@ function fallbackOptions(options: ChatOptions, connection: FallbackConnection): 
     minP: stored?.minP ?? options.minP,
     frequencyPenalty: stored?.frequencyPenalty ?? options.frequencyPenalty,
     presencePenalty: stored?.presencePenalty ?? options.presencePenalty,
-    reasoningEffort:
-      stored?.reasoningEffort === "maximum"
-        ? "max"
-        : stored?.reasoningEffort === null
-          ? undefined
-          : (stored?.reasoningEffort ?? options.reasoningEffort),
+    reasoningEffort,
+    enableThinking,
     verbosity: stored?.verbosity === null ? undefined : (stored?.verbosity ?? options.verbosity),
     serviceTier: stored?.serviceTier ?? options.serviceTier,
     stop: stored?.stopSequences ?? options.stop,

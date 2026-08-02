@@ -42,7 +42,7 @@ The app fills in these defaults per Source:
 | PocketTTS         | http://localhost:49112    | pocket-tts             | alba                            |
 | xAI Voice         | https://api.x.ai/v1       | grok-tts               | eve                             |
 
-For **ElevenLabs**, the **Model** field offers a dropdown of speech models. Pick a normal speech model. Model IDs that contain `ttv` are voice-design models, not speech models, and they cannot read text out loud. If you choose one by mistake, playback fails with an error that tells you to use a speech model instead.
+For **ElevenLabs**, the **Model** field loads the speech-capable models available through your connection and always keeps the full list visible when you open it. Pick a normal speech model. Model IDs that contain `ttv` are voice-design models, not speech models, and they cannot read text out loud. If you choose one by mistake, playback fails with an error that tells you to use a speech model instead.
 
 ### PocketTTS is a separate program
 
@@ -61,9 +61,9 @@ The **Voice Option** setting decides how voices are assigned:
 
 Pick the voice in the **All Characters Voice** field. PocketTTS shows voices returned by your server in a dropdown and keeps a text field beside it for a custom voice ID, URL, or path.
 
-To load the real voice list from your provider, first save the card with TTS enabled. Then click the **Refresh voices** button (the circular-arrow icon). Before you connect, the app shows a short built-in fallback list so the field is not empty. That fallback list may be out of date, so refresh to get your provider's current voices.
+To load the real voice list from your provider, enter the connection details and click the **Refresh voices** button (the circular-arrow icon). You can do this before enabling playback. Refresh saves the current card first, so a newly entered API key is used immediately. Before you connect, the app shows a short built-in fallback list so the field is not empty. A provider error is shown instead of silently presenting that fallback as a successful refresh.
 
-For **ElevenLabs**, you must pick a voice. The dropdown starts on "Select an ElevenLabs voice", and playback is blocked until you choose a real one.
+For **ElevenLabs**, you must pick a voice. Marinara loads the paginated account library, including personal, workspace, saved, and default voices. The picker has a search box and a permanently visible scrollbar when the library is longer than the panel. It also reports how many voices were loaded. The picker starts on "Select an ElevenLabs voice", and playback is blocked until you choose a real one.
 
 ### Selected per character
 
@@ -73,7 +73,7 @@ For **ElevenLabs**, you must pick a voice. The dropdown starts on "Select an Ele
 4. Pick a character in the left dropdown and a voice in the right dropdown.
 5. Repeat for each character you want to give a custom voice.
 
-You must create your characters first. If you have none yet, the app tells you to add characters in the Characters tab before assigning voices. Characters without a personal voice fall back to the global voice. See [Creating and Editing Characters](../characters/creating-and-editing-characters.md).
+The **Refresh** button in the Character Voices box reloads the same provider library without switching back to the one-voice mode. You must create your characters first. If you have none yet, the app tells you to add characters in the Characters tab before assigning voices. Characters without a personal voice fall back to the global voice. See [Creating and Editing Characters](../characters/creating-and-editing-characters.md).
 
 ## Narrator Voice
 

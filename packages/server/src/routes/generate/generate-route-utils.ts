@@ -3,7 +3,9 @@ import {
   GENERATION_PARAMETER_SEND_KEYS,
   SUMMARY_TAIL_MESSAGES,
   applyTrackerFieldLocksToGameStatePatch,
+  compileChatSummaryEntries,
   generationParametersSchema,
+  normalizeChatSummaryEntries,
   normalizeTextForMatch,
   normalizeSummaryTailMessages,
   normalizeWorldCustomFields,
@@ -528,7 +530,7 @@ export function isMessageHiddenFromAIForCharacter(
 }
 
 export function isRoleplaySummaryMode(chatMode: string): boolean {
-  return chatMode === "roleplay" || chatMode === "visual_novel";
+  return chatMode === "roleplay";
 }
 
 /**
@@ -625,9 +627,25 @@ export function selectRollingSummaryMessages<T extends { id: string; extra?: unk
   return visible.slice(-Math.max(size, sinceBoundary));
 }
 
-export function resolveRoleplayChatSummary(chatMode: string, chatMetadata: Record<string, unknown>): string | null {
+export function resolveRoleplayChatSummary(
+  chatMode: string,
+  chatMetadata: Record<string, unknown>,
+  options: { excludeMessageIds?: readonly string[] } = {},
+): string | null {
   if (!isRoleplaySummaryMode(chatMode)) return null;
-  return ((chatMetadata.summary as string) ?? "").trim() || null;
+  const summary = ((chatMetadata.summary as string) ?? "").trim() || null;
+  const excludedMessageIds = new Set((options.excludeMessageIds ?? []).filter(Boolean));
+  if (excludedMessageIds.size === 0) return summary;
+
+  const entries = normalizeChatSummaryEntries(chatMetadata.summaryEntries);
+  // Legacy summaries have no per-message provenance, so they cannot be
+  // safely retained while regenerating a historical message.
+  if (entries.length === 0) return null;
+  const retainedEntries = entries.filter((entry) => {
+    const coveredMessageIds = [...(entry.messageIds ?? []), ...(entry.hiddenMessageIds ?? [])];
+    return !coveredMessageIds.some((messageId) => excludedMessageIds.has(messageId));
+  });
+  return retainedEntries.length === entries.length ? summary : compileChatSummaryEntries(retainedEntries);
 }
 
 function escapeRegex(value: string): string {
@@ -859,7 +877,7 @@ export function shouldRestoreRegenerationCharacterTarget(
   configuredMode: unknown,
   characterIds: string[],
 ): boolean {
-  const isRoleplayGroup = chatMode === "roleplay" || chatMode === "visual_novel";
+  const isRoleplayGroup = chatMode === "roleplay";
   return !(isRoleplayGroup && characterIds.length > 1 && resolveGroupGenerationMode(chatMode, configuredMode) === "merged");
 }
 
@@ -942,7 +960,9 @@ export function formatSeparateAgentInjection(agentType: string, text: string, wr
         ? { heading: "Knowledge Retrieval", tag: "knowledge_retrieval" }
         : agentType === "director"
           ? { heading: "Narrative Director", tag: "narrative_director" }
-          : { heading: agentType, tag: agentType.replace(/[^a-z0-9_-]/gi, "_") };
+          : agentType === "long-term-memory"
+            ? { heading: "Long-Term Memory", tag: "long_term_memory" }
+            : { heading: agentType, tag: agentType.replace(/[^a-z0-9_-]/gi, "_") };
 
   if (wrapFormat === "none") return `${meta.heading}:\n${text}`;
   if (wrapFormat === "markdown") return `## ${meta.heading}\n${text}`;
@@ -1064,6 +1084,11 @@ export function parseStoredGenerationParameters(raw: unknown): StoredGenerationP
   }
   if (isPlainRecord(source.customParameters)) {
     out.customParameters = mergeCustomParameters({}, source.customParameters);
+  }
+  if (isPlainRecord(source.managedCustomParameters)) {
+    const managedCustomParameters =
+      generationParametersSchema.shape.managedCustomParameters.safeParse(source.managedCustomParameters);
+    if (managedCustomParameters.success) out.managedCustomParameters = managedCustomParameters.data;
   }
   if (isPlainRecord(source.enabledParameters)) {
     const enabledParameters: GenerationParameterSendMap = {};

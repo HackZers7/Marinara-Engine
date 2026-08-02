@@ -5,6 +5,10 @@ import { User } from "lucide-react";
 import { cn } from "../../lib/utils";
 import { PendingTypingDots } from "./PendingTypingDots";
 import {
+  MESSAGE_SELECTION_CHECKBOX_CLASS,
+  MESSAGE_SELECTION_CHECKBOX_SELECTED_CLASS,
+} from "./message-selection-styles";
+import {
   HiddenFromAIConversationSummary,
   DiceMessageContent,
   MessageContent,
@@ -16,8 +20,10 @@ import {
   formatTimestamp,
   type MessageRenderContext,
 } from "./ConversationMessageShared";
+import { useTranslation as useUiTranslation } from "react-i18next";
 
 export function ConversationMessageLine({ ctx }: { ctx: MessageRenderContext }) {
+  const { t: localizeUi } = useUiTranslation();
   const {
     message,
     extra,
@@ -26,6 +32,7 @@ export function ConversationMessageLine({ ctx }: { ctx: MessageRenderContext }) 
     displayName,
     avatarUrl,
     avatarCropStyle,
+    avatarCornerClass,
     nameColor,
     mentionNames,
     quoteFormat,
@@ -74,16 +81,17 @@ export function ConversationMessageLine({ ctx }: { ctx: MessageRenderContext }) 
             type="button"
             role="checkbox"
             aria-checked={isSelected}
-            aria-label={isSelected ? "Deselect message" : "Select message"}
+            aria-label={isSelected ?localizeUi("ui.chat.chatmessage.deselectMessage") :localizeUi("ui.chat.chatmessage.selectMessage")}
             onClick={(e) => { e.stopPropagation(); onToggleSelect?.(); }}
             className={cn(
-              "h-5 w-5 rounded border-2 flex items-center justify-center transition-colors cursor-pointer",
-              isSelected
-                ? "border-[var(--destructive)] bg-[var(--destructive)]"
-                : "border-[var(--muted-foreground)]/40 bg-[var(--secondary)]",
+              MESSAGE_SELECTION_CHECKBOX_CLASS,
+              "flex items-center justify-center",
+              isSelected && MESSAGE_SELECTION_CHECKBOX_SELECTED_CLASS,
             )}
           >
-            {isSelected && <span className="text-white text-xs font-bold">✓</span>}
+              {isSelected && (
+                <span className="text-xs font-bold text-[var(--marinara-chat-chrome-panel-bg)]">✓</span>
+              )}
           </button>
         </div>
       )}
@@ -99,9 +107,12 @@ export function ConversationMessageLine({ ctx }: { ctx: MessageRenderContext }) 
               <button
                 type="button"
                 onClick={(e) => ctx.onOpenAboutMe?.(e.currentTarget.getBoundingClientRect())}
-                aria-label={`View ${displayName}'s about me`}
-                title={`View ${displayName}'s about me`}
-                className="relative block h-10 w-10 overflow-hidden rounded-full bg-[var(--accent)] cursor-pointer transition-opacity hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--primary)]/50"
+                aria-label={localizeUi("ui.chat.conversationmessagebubble.viewValue1SAboutMe", { value1: displayName })}
+                title={localizeUi("ui.chat.conversationmessagebubble.viewValue1SAboutMe", { value1: displayName })}
+                className={cn(
+                  "relative block h-10 w-10 overflow-hidden bg-[var(--accent)] cursor-pointer transition-opacity hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--primary)]/50",
+                  avatarCornerClass,
+                )}
               >
                 {avatarUrl ? (
                   <img src={avatarUrl} alt={displayName} loading="lazy" className="h-full w-full object-cover" style={avatarCropStyle} />
@@ -112,7 +123,7 @@ export function ConversationMessageLine({ ctx }: { ctx: MessageRenderContext }) 
                 )}
               </button>
             ) : (
-              <div className="relative h-10 w-10 overflow-hidden rounded-full bg-[var(--accent)]">
+              <div className={cn("relative h-10 w-10 overflow-hidden bg-[var(--accent)]", avatarCornerClass)}>
                 {avatarUrl ? (
                   <img src={avatarUrl} alt={displayName} loading="lazy" className="h-full w-full object-cover" style={avatarCropStyle} />
                 ) : (
@@ -194,7 +205,10 @@ export function ConversationMessageLine({ ctx }: { ctx: MessageRenderContext }) 
 
         {!isHiddenCollapsed && (
           <>
-            <ConversationMessageTranslation translatedText={translatedText} isTranslating={isTranslating} />
+            <ConversationMessageTranslation
+              translatedText={ctx.showTranslationOnly ? null : translatedText}
+              isTranslating={isTranslating}
+            />
             <ConversationMessageAttachments
               attachments={extra.attachments ?? []}
               renderedContent={renderedContent}

@@ -4,9 +4,15 @@
 import type { LegacyPersonaAvatarCrop, PersonaAvatarCrop } from "./persona.js";
 
 export type NoodleAccountKind = "persona" | "character" | "random_user";
-export type NoodleAccountVisibility = "public" | "private";
+/**
+ * Which simulated platform an account lives on. This is content separation
+ * between two fictional products, NOT a privacy or security control — see
+ * `NoodlePostAccess` for the actual paywall/visibility concept.
+ */
+export type NoodlePlatform = "noodle" | "noodler";
 export type NoodleInteractionType = "like" | "repost" | "reply" | "vote";
 export type NoodlePostSource = "manual" | "generated";
+/** The real privacy concept: who may read a NoodleR post. Deliberately keeps the word "public". */
 export type NoodlePostAccess = "public" | "subscriber" | "ppv";
 export type NoodleTheme = "system" | "light" | "dark";
 export type NoodleCarryoverMode = "off" | "conversation" | "roleplay" | "game" | "all";
@@ -34,7 +40,37 @@ export interface NoodleAccountSocialSettings {
   notificationsReadAt?: string;
 }
 
-export type NoodleAccountSchedulerSettings = Record<string, never>;
+export type NoodleAutoPostingIntensity = 1 | 3 | 6;
+
+export interface NoodleAutoPostingSettings {
+  enabled: boolean;
+  /** Low/Medium/High = at most 1/3/6 automatic posts per day. */
+  intensity: NoodleAutoPostingIntensity;
+  /** NoodleR-owned image enablement; independent of public Noodle's enableImagePrompts. */
+  imagesEnabled: boolean;
+  /** Server-owned; excluded from client-editable patches. */
+  nextRunAt: string | null;
+}
+
+export interface NoodleAccountSchedulerSettings {
+  autoPosting?: NoodleAutoPostingSettings;
+}
+
+/** Per-creator outcome of the global "Refresh NoodleR now" action; one creator never rolls back another. */
+export type NoodlerRefreshNowOutcomeStatus =
+  | "generated"
+  | "disabled"
+  | "busy"
+  | "connection_required"
+  | "connection_not_found"
+  | "noodler_account_not_found"
+  | "skipped"
+  | "error";
+
+export interface NoodlerRefreshNowOutcome {
+  accountId: string;
+  status: NoodlerRefreshNowOutcomeStatus;
+}
 export interface NoodleAccountPrivacySettings {
   identityDisclosure?: NoodleIdentityDisclosure;
   stagePersonality?: string;
@@ -58,6 +94,15 @@ export interface NoodlePoll {
   options: NoodlePollOption[];
 }
 
+export interface NoodlePostImageCrop {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  sourceWidth: number;
+  sourceHeight: number;
+}
+
 export interface NoodleSettings {
   refreshesPerDay: number;
   participantSelectionMode: NoodleParticipantSelectionMode;
@@ -76,6 +121,7 @@ export interface NoodleSettings {
   allowGalleryImageAttachments: boolean;
   imageCaptioningEnabled: boolean;
   imageCaptioningConnectionId: string | null;
+  imageCaptioningUseConnectionDefault: boolean;
   enableLorebookContext: boolean;
   includeCharacterSchedules: boolean;
   enableEnhancedTimelineWriting: boolean;
@@ -89,6 +135,12 @@ export interface NoodleSettings {
   theme: NoodleTheme;
   generationConnectionId: string | null;
   enableNoodler: boolean;
+  /** Editable creative guidance injected into every NoodleR post generation. */
+  noodlerGenerationGuidance: string;
+  /** Master switch for automatic posting; pauses the scheduler without disabling NoodleR. */
+  autoPostingScheduleEnabled: boolean;
+  /** Cadence applied when a creator's automatic posting is first turned on. */
+  autoPostingDefaultIntensity: NoodleAutoPostingIntensity;
 }
 
 export interface NoodleAccount {
@@ -102,15 +154,15 @@ export interface NoodleAccount {
   avatarCrop: NoodleAvatarCrop | null;
   invited: boolean;
   settings: NoodleAccountSettings;
-  visibility: NoodleAccountVisibility;
-  publicAccountId: string | null;
+  platform: NoodlePlatform;
+  noodleAccountId: string | null;
   createdAt: string;
   updatedAt: string;
 }
 
 export interface NoodlerStageProfile {
   id: string;
-  publicAccountId: string | null;
+  noodleAccountId: string | null;
   handle: string;
   displayName: string;
   bio: string;
@@ -125,6 +177,7 @@ export interface NoodlerStageProfile {
 
 export interface NoodlerManagedStageProfile extends NoodlerStageProfile {
   access: NoodleAccountAccessSettings;
+  autoPosting: NoodleAutoPostingSettings;
 }
 
 export interface NoodlerProfileSource {
@@ -164,11 +217,24 @@ export interface NoodlePost {
   updatedAt: string;
 }
 
+export interface NoodlerManagedPost extends NoodlePost {
+  title: string | null;
+}
+
 export interface NoodleAccountSubscription {
   id: string;
   viewerAccountId: string;
   creatorAccountId: string;
   createdAt: string;
+}
+
+export interface NoodlerSubscriber {
+  id: string;
+  displayName: string;
+  handle: string;
+  avatarUrl: string | null;
+  avatarCrop: NoodleAvatarCrop | null;
+  subscribedAt: string;
 }
 
 export interface NoodlePostUnlock {
@@ -184,12 +250,16 @@ export interface NoodlerPostView {
   access: NoodlePostAccess;
   ppvPrice: number | null;
   locked: boolean;
+  title: string | null;
   content: string | null;
   imageUrl: string | null;
   imagePrompt: string | null;
   metadata: Record<string, unknown> | null;
   createdAt: string;
+  /** Empty for locked posts — use likeCount/replyCount for the teaser footer. */
   interactions: NoodleInteraction[];
+  likeCount: number;
+  replyCount: number;
 }
 
 export interface NoodlerViewerCreator {

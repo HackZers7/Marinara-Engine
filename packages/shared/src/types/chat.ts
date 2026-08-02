@@ -11,8 +11,8 @@ import type { SpotifySourceType } from "./spotify.js";
 
 export type { SpotifySourceType } from "./spotify.js";
 
-/** The four primary chat modes the engine supports. */
-export type ChatMode = "conversation" | "roleplay" | "visual_novel" | "game";
+/** The three primary chat modes the engine supports. */
+export type ChatMode = "conversation" | "roleplay" | "game";
 
 /** How a multi-character (group) chat is handled. */
 export type GroupChatMode = "merged" | "individual";
@@ -229,8 +229,21 @@ export type GameStoryboardViewerDisplayMode = "floating" | "background";
 
 /** Extra metadata stored on a chat. */
 export interface ChatMetadata {
+  /** Chat-local tracker icon overrides keyed by persona id, unique character id, or tracker character slot. */
+  trackerStatIconOverrides?: Record<
+    string,
+    import("../constants/stat-icons.js").TrackerStatIconAssignment[]
+  >;
   /** Compiled enabled rolling summary text for context injection. Derived from summaryEntries when present. */
   summary: string | null;
+  /** Display label for a branch; absent on root chats and older branches. */
+  branchName?: string;
+  /** Immediate source chat for Engine-created branches. */
+  branchParentChatId?: string | null;
+  /** Source message at which an Engine-created branch was forked. */
+  branchParentMessageId?: string | null;
+  /** Copied message corresponding to branchParentMessageId. */
+  branchMessageId?: string | null;
   /** Structured rolling summary entries. Missing means legacy summary-only metadata. */
   summaryEntries?: ChatSummaryEntry[];
   /** Recent message count used by manual rolling summary generation and automatic summaries. */
@@ -250,7 +263,7 @@ export interface ChatMetadata {
   /** Maximum output tokens requested from the model for manual and automatic Roleplay chat summaries. */
   summaryMaxTokens?: number;
   /**
-   * When true, the automatic roleplay/visual-novel rolling summary hides the
+   * When true, the automatic roleplay rolling summary hides the
    * messages it summarized (hiddenFromAI=true) except the most-recent
    * `summaryTailMessages`, so the summary is a net token reduction. Opt-in:
    * undefined/false never hides (back-compat for existing chats). Read by the
@@ -276,6 +289,10 @@ export interface ChatMetadata {
   illustratorUseAvatarReferences?: boolean;
   /** Optional per-chat LLM connection override used only to write Illustrator/selfie image prompts. */
   illustratorPromptConnectionId?: string | null;
+  /** Optional per-chat image generation connection override used by Illustrator. */
+  illustratorImageConnectionId?: string | null;
+  /** Number of image variants generated for each Illustrator request. */
+  illustratorImagesPerGeneration?: number;
   /** Whether Roleplay Illustrator may generate and activate a reusable background after a scene-location change. */
   illustratorAutoBackgroundsEnabled?: boolean;
   /** Whether Conversation selfie commands should send the matching character avatar as a reference image. */
@@ -298,7 +315,7 @@ export interface ChatMetadata {
   narrativeDirectorMode?: "natural" | "random";
   /** Whether Narrative Director maintains a hidden Secret Plot arc for this roleplay chat. */
   narrativeDirectorSecretPlotEnabled?: boolean;
-  /** Assistant-message cadence for Narrative Director Secret Plot maintenance. */
+  /** User/assistant message cadence for Narrative Director Secret Plot maintenance. */
   narrativeDirectorSecretPlotRunInterval?: number;
   /** Explicit target lorebook for the Lorebook Keeper in this chat. Null/omitted = auto-pick. */
   lorebookKeeperTargetLorebookId?: string | null;
@@ -308,6 +325,8 @@ export interface ChatMetadata {
   customEmojiSelection?: CustomEmojiSelectionPrefs;
   /** Tool/function IDs scoped to this chat. Non-empty = only these tools are sent; empty = use all enabled tools. */
   activeToolIds: string[];
+  /** Require a compatible provider to call one enabled tool on the first tool round. */
+  forceToolCall?: boolean;
   /** Per-chat variable selections for preset variables (variableName → value or values) */
   presetChoices: Record<string, string | string[]>;
   /** Chat-wide string variables persisted by agent tool calls (key → value). */
@@ -393,14 +412,34 @@ export interface ChatMetadata {
    *  user turned off via the chat Lorebooks panel land here; the scope filter
    *  drops them before injection without unbinding the book. */
   excludedLorebookIds?: string[];
-  /** ID of the chat preset most recently applied to this chat (drives the preset bar dropdown). */
+  /** ID of the settings profile most recently applied to this chat (drives the profile dropdown). */
   appliedChatPresetId?: string | null;
   /** Custom prompt prefix used by the /impersonate slash command. */
   impersonatePrompt?: string | null;
   /** How outgoing user messages are translated: not at all, automatically before send, or on-demand via a draft button. */
   translationInputBehavior?: "off" | "auto" | "draft";
-  /** Optional per-chat AI translation system prompt override. Missing or blank uses the default prompt. */
+  /** Show a manual draft translation button beside the send control. */
+  showInputTranslateButton?: boolean;
+  /** Legacy shared translation target. Directional targets fall back to this value. */
+  translationTargetLang?: string;
+  /** Target language used when translating the user's outgoing draft. */
+  translationInputTargetLang?: string;
+  /** Target language used when translating incoming assistant responses. */
+  translationOutputTargetLang?: string;
+  /** Legacy shared AI translation prompt. Directional prompts fall back to this value. */
   translationPrompt?: string | null;
+  /** AI system prompt for outgoing draft translation. Supports {{targetLanguage}}. */
+  translationInputPrompt?: string | null;
+  /** AI system prompt for incoming response translation. Supports {{targetLanguage}}. */
+  translationOutputPrompt?: string | null;
+  /** Legacy shared max tokens for AI translation. Directional values fall back to this. */
+  translationMaxTokens?: number | null;
+  /** Max tokens for outgoing draft (input) AI translation. 0 = provider maximum, missing = default. */
+  translationInputMaxTokens?: number | null;
+  /** Max tokens for incoming response (output) AI translation. 0 = provider maximum, missing = default. */
+  translationOutputMaxTokens?: number | null;
+  /** Show only the translated text in place of the original message once a translation exists. */
+  translationDisplayOnly?: boolean;
   /** Allow roleplay characters to create direct-message conversation chats with hidden [dm] commands. */
   roleplayDmCommandsEnabled?: boolean;
   /** Chat-scoped Intiface Central WebSocket URL for haptic manual and auto-connect. */
@@ -409,7 +448,7 @@ export interface ChatMetadata {
   hapticSensitivity?: HapticFeedbackSensitivity;
   /** When true, very brief accidental brushes may trigger small haptic feedback. Missing/false = only deliberate contact. */
   hapticIncidentalContact?: boolean;
-  /** Music source constraint for Music DJ in roleplay and visual novel chats. */
+  /** Music source constraint for Music DJ in roleplay chats. */
   spotifySourceType?: SpotifySourceType;
   /** Spotify playlist ID used when spotifySourceType is "playlist". */
   spotifyPlaylistId?: string | null;
@@ -496,6 +535,8 @@ export interface ChatMetadata {
   gameMaps?: import("./game.js").GameMap[];
   /** ID of the map the party is currently on. */
   activeGameMapId?: string | null;
+  /** Inactive recovery map retained only until an initial hierarchical map is saved or Game start falls back. */
+  gameInitialMapFallback?: import("./game.js").GameMap | null;
   /** Summaries of all previous sessions */
   gamePreviousSessionSummaries?: import("./game.js").SessionSummary[];
   /** GM-only: overarching story arc and plot (never sent to party agent) */
@@ -530,6 +571,8 @@ export interface ChatMetadata {
   gameLastIllustrationTag?: string;
   /** Connection used for Game Mode scene-video generation. */
   gameVideoConnectionId?: string | null;
+  /** Master visibility/runtime switch for manual Game Mode scene videos. */
+  gameSceneVideosEnabled?: boolean;
   /** Selected Game Mode scene/storyboard video prompt template. */
   gameVideoPromptTemplateId?: string | null;
   /** Selected Game Mode prompt template for storyboard keyframe clips only. */
@@ -544,6 +587,8 @@ export interface ChatMetadata {
   gameStoryboardAutoIllustrationsEnabled?: boolean;
   /** When true, completed Game Mode GM turns automatically create storyboard keyframe videos. */
   gameStoryboardAutoGenerationEnabled?: boolean;
+  /** Master visibility/runtime switch for Game Mode storyboard controls. */
+  gameStoryboardsEnabled?: boolean;
   /** Target number of Game Mode storyboard keyframes to create per GM turn. */
   gameStoryboardKeyframeCount?: number;
   /** Per-chat storyboard animation clip duration in seconds. Null/omitted uses Video Generation settings. */
@@ -619,7 +664,7 @@ export interface ChatMetadata {
    * How many of the most recent messages to keep verbatim even after they've
    * been summarized. In conversation mode this bridges the day boundary so
    * characters pick up the actual flow of recent conversation, not just the
-   * gist. In roleplay/visual-novel mode it is the protected tail for
+   * gist. In roleplay mode it is the protected tail for
    * `hideSummarisedMessages`: the last N messages stay visible (never hidden)
    * when the auto-summary hides the rest. 0 disables (hide the whole batch).
    * Any non-negative whole number is accepted. Default: 10.
@@ -810,6 +855,8 @@ export interface GenerateRequest {
   regenerateMessageId: string | null;
   /** If set, append the generated continuation to this assistant message */
   continueMessageId?: string | null;
+  /** Whether a continued response is separated from the existing message by a blank line. */
+  continueAddsNewline?: boolean;
   /** Override connection for this generation */
   connectionId: string | null;
   /** Background currently displayed on the active chat surface. */

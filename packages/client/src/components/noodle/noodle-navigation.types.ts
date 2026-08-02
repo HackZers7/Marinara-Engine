@@ -10,7 +10,9 @@ export type NoodleNavigationState =
       accountId: string | null;
       connection: NoodleProfileConnection | null;
     }
-  | { mode: "private"; view: "hub" }
-  | { mode: "private"; view: "profiles" }
+  | { mode: "noodler"; view: "hub" }
+  | { mode: "noodler"; view: "profiles" }
+  | { mode: "noodler"; view: "profile"; accountId: string }
+  | { mode: "noodler"; view: "create-profile"; noodleAccountId: string }
   | { mode: "verification" }
   | { mode: "settings" };

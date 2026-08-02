@@ -7,6 +7,12 @@ import {
   normalizeAgentImportEntry,
 } from "../../packages/client/src/lib/agent-transfer.js";
 import { collectFolderPackageEntries } from "../../packages/client/src/lib/folder-package-transfer.js";
+import {
+  CUSTOM_AGENT_PERMISSIONS_EXPLICIT_SETTING,
+  customAgentHasCapability,
+  getCustomAgentResultCapability,
+  isExternallyImportedAgent,
+} from "../../packages/shared/src/index.js";
 
 const imported = normalizeAgentImportEntry({
   type: "untrusted-agent",
@@ -39,6 +45,48 @@ assert.deepEqual(
   imported.settings.customCapabilities,
   { edit_messages: true },
   "non-tool custom-agent configuration should remain portable",
+);
+assert.deepEqual(imported.requestedCapabilities, ["edit_messages"]);
+assert.equal(
+  customAgentHasCapability(
+    {
+      resultType: "haptic_command",
+      customCapabilities: {},
+      [CUSTOM_AGENT_PERMISSIONS_EXPLICIT_SETTING]: true,
+    },
+    "control_haptics",
+  ),
+  false,
+  "an explicitly reviewed import must not gain a capability from its result type",
+);
+assert.equal(
+  customAgentHasCapability(
+    {
+      enabledTools: ["save_lorebook_entry"],
+      lorebookWriteEnabled: true,
+      customCapabilities: {},
+      [CUSTOM_AGENT_PERMISSIONS_EXPLICIT_SETTING]: true,
+    },
+    "edit_lorebooks",
+  ),
+  false,
+  "an explicitly reviewed import must not regain lorebook access from legacy tool settings",
+);
+assert.equal(
+  customAgentHasCapability({ enabledTools: ["save_lorebook_entry"] }, "edit_lorebooks"),
+  true,
+  "legacy locally authored agents must retain automatic lorebook capability derivation",
+);
+assert.equal(getCustomAgentResultCapability("haptic_command"), "control_haptics");
+assert.equal(
+  isExternallyImportedAgent("custom-local", { customAgentImportSource: "folder" }),
+  true,
+  "folder imports must remain identifiable at runtime",
+);
+assert.equal(
+  isExternallyImportedAgent("custom-local", {}),
+  false,
+  "locally authored custom Agents must not be mistaken for imports",
 );
 
 const builtInCollision = normalizeAgentImportEntry({
@@ -136,6 +184,16 @@ const panelPath = fileURLToPath(
 );
 const panelSource = await readFile(panelPath, "utf8");
 assert.doesNotMatch(panelSource, /importCustomToolEntries|useCreateCustomTool/);
-assert.match(panelSource, /Skipped .* bundled function.* for safety/);
+assert.match(panelSource, /settings\.agentImports\.review\.functionsSkipped/);
+
+const routePath = fileURLToPath(new URL("../../packages/server/src/routes/agents.routes.ts", import.meta.url));
+const routeSource = await readFile(routePath, "utf8");
+assert.match(routeSource, /getCustomAgentImportPolicy/);
+assert.match(routeSource, /requirePrivilegedAccess\(req, reply, \{ feature: "Custom Agent import" \}\)/);
+assert.match(routeSource, /CUSTOM_AGENT_PERMISSIONS_EXPLICIT_SETTING\] = true/);
+
+const generationHookPath = fileURLToPath(new URL("../../packages/client/src/hooks/use-generate.ts", import.meta.url));
+const generationHookSource = await readFile(generationHookPath, "utf8");
+assert.match(generationHookSource, /style\.textContent = sanitizeAppCss\(css\)/);
 
 console.info("Agent import security regressions passed.");

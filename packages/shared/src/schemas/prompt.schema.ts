@@ -3,6 +3,11 @@
 // ──────────────────────────────────────────────
 import { z } from "zod";
 
+export const managedGenerationParameterValueSchema = z.object({
+  enabled: z.boolean(),
+  value: z.number().finite(),
+});
+
 export const promptRoleSchema = z.enum(["system", "user", "assistant"]);
 
 export const injectionPositionSchema = z.enum(["ordered", "depth"]);
@@ -57,6 +62,7 @@ export const generationParametersSchema = z.object({
     .max(20)
     .default([]),
   customParameters: z.record(z.unknown()).default({}),
+  managedCustomParameters: z.record(managedGenerationParameterValueSchema).default({}),
   enabledParameters: z
     .object({
       temperature: z.boolean().optional(),

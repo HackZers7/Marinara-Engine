@@ -9,6 +9,7 @@ import {
 import { AnimatePresence, motion } from "framer-motion";
 import { MoreHorizontal } from "lucide-react";
 import { cn } from "../../lib/utils";
+import { useTranslation as useUiTranslation } from "react-i18next";
 
 export interface QuickReplyAction {
   id: string;
@@ -26,6 +27,7 @@ interface QuickReplyMenuProps {
 }
 
 export function QuickReplyMenu({ actions, disabled = false }: QuickReplyMenuProps) {
+  const { t: localizeUi } = useUiTranslation();
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
@@ -146,7 +148,7 @@ export function QuickReplyMenu({ actions, disabled = false }: QuickReplyMenuProp
         type="button"
         onClick={() => void handleSelect(singleAction)}
         disabled={singleDisabled}
-        aria-label={`${singleAction.label}: ${singleAction.description}`}
+        aria-label={localizeUi("ui.chat.quickreplymenu.value1Value2", { value1: singleAction.label, value2: singleAction.description })}
         className={cn(
           "flex h-11 w-11 shrink-0 items-center justify-center rounded-full transition-all duration-200 focus-visible:ring-2 focus-visible:ring-foreground/20 sm:h-8 sm:w-8",
           !singleDisabled
@@ -168,7 +170,7 @@ export function QuickReplyMenu({ actions, disabled = false }: QuickReplyMenuProp
         onClick={() => setOpen((v) => !v)}
         onKeyDown={handleTriggerKeyDown}
         disabled={isDisabled}
-        aria-label="Quick replies"
+        aria-label={localizeUi("settings.quickReplies.label")}
         aria-haspopup="menu"
         aria-expanded={open}
         className={cn(
@@ -179,7 +181,7 @@ export function QuickReplyMenu({ actions, disabled = false }: QuickReplyMenuProp
               ? "text-foreground/40 hover:bg-foreground/10 hover:text-foreground/70 active:scale-90"
               : "text-foreground/20",
         )}
-        title="Quick replies"
+        title={localizeUi("settings.quickReplies.label")}
       >
         <MoreHorizontal size="1rem" />
       </button>
@@ -190,7 +192,7 @@ export function QuickReplyMenu({ actions, disabled = false }: QuickReplyMenuProp
             <motion.div
               key="quick-replies-rail"
               role="menu"
-              aria-label="Quick replies"
+              aria-label={localizeUi("settings.quickReplies.label")}
               aria-orientation="vertical"
               className="flex flex-col items-center gap-1.5"
               initial="closed"
@@ -212,7 +214,7 @@ export function QuickReplyMenu({ actions, disabled = false }: QuickReplyMenuProp
                   disabled={action.disabled}
                   onClick={() => void handleSelect(action)}
                   onKeyDown={(event) => handleItemKeyDown(event, index)}
-                  aria-label={`${action.label}: ${action.description}`}
+                  aria-label={localizeUi("ui.chat.quickreplymenu.value1Value2", { value1: action.label, value2: action.description })}
                   className={cn(
                     "group relative flex h-11 w-11 items-center justify-center rounded-full border shadow-xl outline-none transition-colors focus-visible:ring-2 focus-visible:ring-foreground/20 sm:h-10 sm:w-10",
                     action.disabled

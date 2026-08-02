@@ -6,11 +6,16 @@ import type { DB } from "../../packages/server/src/db/connection.js";
 import { eq } from "../../packages/server/src/db/file-query.js";
 import { createFileNativeDB } from "../../packages/server/src/db/file-backed-store.js";
 import { noodleAccounts } from "../../packages/server/src/db/schema/noodle.js";
+import { createAppSettingsStorage } from "../../packages/server/src/services/storage/app-settings.storage.js";
 import {
+  DEFAULT_NOODLE_SETTINGS,
   noodleAccountSettingsPatchSchema,
   noodleAccountUpdateSchema,
 } from "../../packages/shared/src/schemas/noodle.schema.js";
-import { createNoodleStorage } from "../../packages/server/src/services/storage/noodle.storage.js";
+import {
+  createNoodleStorage,
+  normalizeNoodleSettings,
+} from "../../packages/server/src/services/storage/noodle.storage.js";
 import { resolveNoodleAvatarCropAfterProfileUpdate } from "../../packages/server/src/services/noodle/noodle-profile-avatar.js";
 
 const sourceCrop = { x: 12, y: 18, width: 62, height: 62, unit: "%" as const };
@@ -59,6 +64,27 @@ assert.equal(
   null,
 );
 
+// One invalid stored field must not reset unrelated settings: a bad autoPostingDefaultIntensity
+// used to wipe lorebook context, invited character folders, and the generation connection.
+const salvaged = normalizeNoodleSettings({
+  autoPostingDefaultIntensity: 4,
+  enableLorebookContext: true,
+  invitedCharacterGroupIds: ["folder-1"],
+  generationConnectionId: "conn-1",
+  refreshesPerDay: 6,
+});
+assert.equal(salvaged.enableLorebookContext, true);
+assert.deepEqual(salvaged.invitedCharacterGroupIds, ["folder-1"]);
+assert.equal(salvaged.generationConnectionId, "conn-1");
+assert.equal(salvaged.refreshesPerDay, 6);
+assert.equal(salvaged.autoPostingDefaultIntensity, DEFAULT_NOODLE_SETTINGS.autoPostingDefaultIntensity);
+
+// The pre-rename guidance key must still be read (rename must not reset customized text).
+assert.equal(
+  normalizeNoodleSettings({ privateGenerationGuidance: "custom guidance" }).noodlerGenerationGuidance,
+  "custom guidance",
+);
+
 const storageDir = mkdtempSync(join(tmpdir(), "marinara-noodle-settings-"));
 process.env.FILE_STORAGE_DIR = storageDir;
 
@@ -75,6 +101,14 @@ try {
   assert.equal(updated.allowRandomUsers, true);
   assert.equal(updated.includeCharacterSchedules, true);
   assert.equal(updated.maxGeneratedPostsPerRefresh, 11);
+  // Legacy read → current write → downgrade read. Saving any setting must keep the old
+  // guidance key mirrored, or a rollback to a pre-rename build loses the customized text.
+  await firstNoodle.updateSettings({ noodlerGenerationGuidance: "custom guidance" });
+  const persistedSettings = JSON.parse(
+    (await createAppSettingsStorage(firstDb as unknown as DB).get("noodle.settings")) ?? "{}",
+  ) as Record<string, unknown>;
+  assert.equal(persistedSettings.noodlerGenerationGuidance, "custom guidance");
+  assert.equal(persistedSettings.privateGenerationGuidance, "custom guidance");
   const concurrentAccount = await firstNoodle.upsertAccountFromProfile({
     kind: "persona",
     entityId: "concurrent-settings",
@@ -92,7 +126,9 @@ try {
   const concurrentlyUpdatedAccount = await firstNoodle.getAccountById(concurrentAccount.id);
   assert.equal(concurrentlyUpdatedAccount?.settings.profile.bannerUrl, "/banner.png");
   assert.equal(concurrentlyUpdatedAccount?.settings.social.notificationsReadAt, "2026-07-17T09:00:00.000Z");
-  assert.deepEqual(concurrentlyUpdatedAccount?.settings.scheduler, {});
+  assert.deepEqual(concurrentlyUpdatedAccount?.settings.scheduler, {
+    autoPosting: { enabled: false, intensity: 1, imagesEnabled: false, nextRunAt: null },
+  });
   assert.deepEqual(concurrentlyUpdatedAccount?.settings.privacy, {
     access: { hiddenFromAccountIds: [], subscriptionIncludesPpv: false },
   });
@@ -140,7 +176,7 @@ try {
       followingAccountTimestamps: { "legacy-follow": "2026-07-17T10:00:00.000Z" },
       notificationsReadAt: "2026-07-17T11:00:00.000Z",
     },
-    scheduler: {},
+    scheduler: { autoPosting: { enabled: false, intensity: 1, imagesEnabled: false, nextRunAt: null } },
     privacy: { access: { hiddenFromAccountIds: [], subscriptionIncludesPpv: false } },
   });
   await firstDb
@@ -166,7 +202,7 @@ try {
       followingAccountIds: ["valid-follow"],
       followingAccountTimestamps: { "valid-follow": "2026-07-17T12:00:00.000Z" },
     },
-    scheduler: {},
+    scheduler: { autoPosting: { enabled: false, intensity: 1, imagesEnabled: false, nextRunAt: null } },
     privacy: { access: { hiddenFromAccountIds: [], subscriptionIncludesPpv: false } },
   });
   const followTargetA = await firstNoodle.upsertAccountFromProfile({
@@ -279,7 +315,7 @@ try {
   assert.deepEqual(renamedCharacterAccount.settings, {
     profile: { profileGenerated: true, location: "Snezhnaya" },
     social: {},
-    scheduler: {},
+    scheduler: { autoPosting: { enabled: false, intensity: 1, imagesEnabled: false, nextRunAt: null } },
     privacy: { access: { hiddenFromAccountIds: [], subscriptionIncludesPpv: false } },
   });
   const creatorSource = await firstNoodle.upsertAccountFromProfile({
@@ -287,65 +323,67 @@ try {
     entityId: "access-creator",
     displayName: "Access Creator",
   });
-  const privateCreator = await firstNoodle.createPrivateAccount(creatorSource.id, {
+  const noodlerCreator = await firstNoodle.createNoodlerAccount(creatorSource.id, {
     displayName: "After Hours",
     handle: "after_hours",
     bio: "",
     stagePersonality: "Reserved",
     disclosureMode: "secret",
   });
-  assert.ok(privateCreator);
+  assert.ok(noodlerCreator);
   const viewer = await firstNoodle.upsertAccountFromProfile({
     kind: "persona",
     entityId: "access-viewer",
     displayName: "Access Viewer",
   });
-  const ppvPost = await firstNoodle.createPrivatePost({
-    authorAccountId: privateCreator.id,
+  const ppvPost = await firstNoodle.createNoodlerPost({
+    authorAccountId: noodlerCreator.id,
     content: "Locked content",
     access: "ppv",
     ppvPrice: 5,
   });
   assert.ok(ppvPost);
   const [firstSubscription, duplicateSubscription] = await Promise.all([
-    firstNoodle.subscribe(viewer.id, privateCreator.id),
-    firstNoodle.subscribe(viewer.id, privateCreator.id),
+    firstNoodle.subscribe(viewer.id, noodlerCreator.id),
+    firstNoodle.subscribe(viewer.id, noodlerCreator.id),
   ]);
+  assert.ok(firstSubscription);
   assert.equal(firstSubscription?.id, duplicateSubscription?.id);
   const [firstUnlock, duplicateUnlock] = await Promise.all([
     firstNoodle.unlockPost(viewer.id, ppvPost.id),
     firstNoodle.unlockPost(viewer.id, ppvPost.id),
   ]);
+  assert.ok(firstUnlock);
   assert.equal(firstUnlock?.id, duplicateUnlock?.id);
-  assert.equal(await firstNoodle.subscribe(creatorSource.id, privateCreator.id), null);
+  assert.equal(await firstNoodle.subscribe(creatorSource.id, noodlerCreator.id), null);
   const personaCreatorSource = await firstNoodle.upsertAccountFromProfile({
     kind: "persona",
     entityId: "access-persona-creator",
     displayName: "Persona Creator",
   });
-  const personaPrivateCreator = await firstNoodle.createPrivateAccount(personaCreatorSource.id, {
+  const personaNoodlerCreator = await firstNoodle.createNoodlerAccount(personaCreatorSource.id, {
     displayName: "Persona After Hours",
     handle: "persona_after_hours",
     bio: "",
     stagePersonality: "Reserved",
     disclosureMode: "secret",
   });
-  assert.ok(personaPrivateCreator);
-  const personaPpvPost = await firstNoodle.createPrivatePost({
-    authorAccountId: personaPrivateCreator!.id,
+  assert.ok(personaNoodlerCreator);
+  const personaPpvPost = await firstNoodle.createNoodlerPost({
+    authorAccountId: personaNoodlerCreator!.id,
     content: "Persona locked content",
     access: "ppv",
     ppvPrice: 5,
   });
   assert.ok(personaPpvPost);
-  assert.equal(await firstNoodle.subscribe(personaCreatorSource.id, personaPrivateCreator!.id), null);
+  assert.equal(await firstNoodle.subscribe(personaCreatorSource.id, personaNoodlerCreator!.id), null);
   assert.equal(await firstNoodle.unlockPost(personaCreatorSource.id, personaPpvPost!.id), null);
   assert.equal(await firstNoodle.unlockPost(viewer.id, "missing-post"), null);
-  assert.equal(await firstNoodle.updateAccount(privateCreator.id, { displayName: "Bypassed identity" }), null);
-  const deletedPrivateCreator = await firstNoodle.deletePrivateAccount(privateCreator.id);
-  assert.equal(deletedPrivateCreator?.id, privateCreator.id);
-  assert.equal(await firstNoodle.getPrivateAccountById(privateCreator.id), null);
-  assert.equal(await firstNoodle.getPrivatePostById(ppvPost.id), null);
+  assert.equal(await firstNoodle.updateAccount(noodlerCreator.id, { displayName: "Bypassed identity" }), null);
+  const deletedNoodlerCreator = await firstNoodle.deleteNoodlerAccount(noodlerCreator.id);
+  assert.equal(deletedNoodlerCreator?.id, noodlerCreator.id);
+  assert.equal(await firstNoodle.getNoodlerAccountById(noodlerCreator.id), null);
+  assert.equal(await firstNoodle.getNoodlerPostById(ppvPost.id), null);
   assert.equal((await firstNoodle.listSubscriptionsForViewer(viewer.id)).length, 0);
   assert.equal((await firstNoodle.listPostUnlocksForViewer(viewer.id)).length, 0);
   assert.ok(await firstNoodle.getAccountById(creatorSource.id));

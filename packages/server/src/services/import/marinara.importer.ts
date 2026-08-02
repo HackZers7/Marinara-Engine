@@ -36,9 +36,10 @@ function resolveNativePosition(value: unknown): number {
   if (typeof value === "string") {
     if (value === "after_char") return 1;
     if (value === "at_depth" || value === "depth") return 2;
+    if (value === "outlet") return 7;
     return 0;
   }
-  return typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= 2 ? value : 0;
+  return typeof value === "number" && Number.isInteger(value) && [0, 1, 2, 7].includes(value) ? value : 0;
 }
 
 function normalizeDefaultChoices(value: unknown): Record<string, string | string[]> {
@@ -578,6 +579,7 @@ async function importLorebookPayload(data: unknown, db: DB) {
           : [],
         additionalMatchingSources: readMatchingSources(e.additionalMatchingSources),
         position: resolveNativePosition(e.position),
+        outletName: String(e.outletName ?? ""),
         depth: Number(e.depth ?? 4),
         order: Number(e.order ?? 100),
         role: resolveLorebookEntryRole(e.role),

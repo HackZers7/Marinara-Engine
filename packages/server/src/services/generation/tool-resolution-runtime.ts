@@ -3,6 +3,8 @@ import type { AgentContext } from "@marinara-engine/shared";
 import type { LLMToolDefinition } from "../llm/base-provider.js";
 import type { ResolvedAgent } from "../agents/agent-pipeline.js";
 import {
+  createCustomToolArgumentsValidator,
+  executeToolCallForModel,
   executeToolCalls,
   type CustomToolDef,
   type CustomToolHiddenContext,
@@ -139,6 +141,13 @@ function booleanText(value: unknown): boolean {
 
 function booleanFalseText(value: unknown): boolean {
   return value === false || value === "false" || value === "0" || value === 0;
+}
+
+export function resolveMainGenerationToolChoice(
+  chatMetadata: Record<string, unknown>,
+  round: number,
+): "auto" | "required" {
+  return round === 0 && booleanText(chatMetadata.forceToolCall) ? "required" : "auto";
 }
 
 function isSpotifyMusicAgent(agent: ResolvedAgent): boolean {
@@ -393,6 +402,7 @@ async function loadToolDefinitions(args: {
         staticResult: customTool.staticResult,
         scriptBody: customTool.scriptBody,
         includeHiddenContext: booleanText(customTool.includeHiddenContext),
+        validateArguments: createCustomToolArgumentsValidator(schemaObject),
       });
 
       allToolDefs.push({
@@ -854,12 +864,11 @@ export async function resolveGenerationTools({
             allowed: Array.from(allowedToolNames),
           });
         }
-        const results = await executeToolCalls([call], {
+        const result = await executeToolCallForModel(call, {
           ...baseToolExecutionContext,
           saveLorebookEntry,
           replaceChatMessageContent: replaceChatMessageContentForAgent,
         });
-        const result = results[0]?.result ?? "Tool execution failed";
         if (agent.type === "spotify" && call.function.name === "spotify_play") {
           try {
             const parsed = JSON.parse(result) as Record<string, unknown>;

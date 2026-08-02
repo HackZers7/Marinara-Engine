@@ -12,6 +12,8 @@ import { logger } from "../lib/logger.js";
 import { getFileStorageDir } from "../config/runtime-config.js";
 import * as schema from "./schema/index.js";
 import { inArray, isFileCondition, isFileOrdering, type FileCondition, type FileOrdering } from "./file-query.js";
+import { migrateLegacyNoodleAccountRow } from "./noodle-platform-migration.js";
+import { migrateRetiredChatModeRow, RETIRED_CHAT_MODE_TABLES } from "./retired-chat-mode-migration.js";
 import {
   getFileTableConfig,
   FileUniqueConstraintError,
@@ -188,6 +190,7 @@ export const FILE_BACKED_TABLES = [
   "custom_tools",
   "game_state_snapshots",
   "spatial_context_snapshots",
+  "capability_documents",
   "game_engine_state",
   "game_checkpoints",
   "game_scene_videos",
@@ -238,9 +241,10 @@ export const CASCADES: Array<{ parent: FileBackedTable; child: FileBackedTable; 
       childKey: "creatorAccountId",
     },
     { parent: "noodle_accounts", child: "noodle_post_unlocks", parentKey: "id", childKey: "viewerAccountId" },
-    { parent: "noodle_accounts", child: "noodle_accounts", parentKey: "id", childKey: "publicAccountId" },
+    { parent: "noodle_accounts", child: "noodle_accounts", parentKey: "id", childKey: "noodleAccountId" },
     { parent: "noodle_accounts", child: "noodle_posts", parentKey: "id", childKey: "authorAccountId" },
     { parent: "noodle_posts", child: "noodle_post_unlocks", parentKey: "id", childKey: "postId" },
+    { parent: "noodle_posts", child: "noodle_interactions", parentKey: "id", childKey: "postId" },
     { parent: "chats", child: "messages", parentKey: "id", childKey: "chatId" },
     { parent: "chats", child: "conversation_call_sessions", parentKey: "id", childKey: "chatId" },
     { parent: "chats", child: "conversation_call_messages", parentKey: "id", childKey: "chatId" },
@@ -561,6 +565,27 @@ async function quarantineUnrecoverableFiles(paths: string[], context: string): P
     }
   }
   return quarantined;
+}
+
+function isRowRecord(value: unknown): value is Row {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+async function preserveMalformedRowSource(path: string, table: string): Promise<QuarantinedFile[]> {
+  if (!existsSync(path)) return [];
+  const to = quarantinePath(path, corruptionTimestamp());
+  try {
+    await copyFile(path, to);
+    return [{ from: path, to }];
+  } catch (err) {
+    logger.error(
+      err,
+      "[file-storage] Failed to preserve table %s source %s before removing malformed rows.",
+      table,
+      path,
+    );
+    return [];
+  }
 }
 
 function parseJsonFile<T>(path: string, fallback: T): ParseResult<T> {
@@ -1284,9 +1309,40 @@ class FileTableStore {
         recoveredFromFallback,
         unreadablePaths,
       } = parseJsonFile<Row[]>(path, []);
-      const normalized = (Array.isArray(rows) ? rows : []).map((row) => normalizeRow(meta, row));
+      const parsedRows = Array.isArray(rows) ? rows : [];
+      const source = parsedRows.filter(isRowRecord);
+      const malformedRowCount = parsedRows.length - source.length;
+      if (malformedRowCount > 0) {
+        const sourcePath = recoveredFromBackup && existsSync(`${path}.bak`) ? `${path}.bak` : path;
+        const files = await preserveMalformedRowSource(sourcePath, table);
+        if (files.length > 0) this.quarantinedTables.push({ table, files });
+        logger.error(
+          { table, file: sourcePath, malformedRowCount, preservedFiles: files.map((file) => file.to) },
+          "[file-storage] Skipped malformed table rows and preserved the source file for manual recovery.",
+        );
+        this.backupRecoveredPaths.add(path);
+        this.dirtyTables.add(table);
+        this.dirty = true;
+      }
+      const migrate = table === "noodle_accounts"
+        ? migrateLegacyNoodleAccountRow
+        : (RETIRED_CHAT_MODE_TABLES as readonly string[]).includes(table)
+          ? migrateRetiredChatModeRow
+          : null;
+      const normalized = source.map((row) => normalizeRow(meta, migrate ? migrate(row) : row));
       this.tables.set(table, normalized);
       counts[table] = normalized.length;
+      if (source.some((row) => row.mode === "visual_novel")) {
+        // Persist the normalized mode so the rewrite happens once, not on every boot.
+        this.dirtyTables.add(table);
+        this.dirty = true;
+      }
+      if (migrate === migrateLegacyNoodleAccountRow && source.some((row) => row.platform === undefined)) {
+        // Persist the renamed keys on the next flush, alongside the `visibility` /
+        // `publicAccountId` rollback mirrors the migration deliberately retains.
+        this.dirtyTables.add(table);
+        this.dirty = true;
+      }
       if (recoveredFromBackup || recoveredFromFallback) {
         this.backupRecoveredPaths.add(path);
         // Same self-heal: rewrite the corrupt main file from in-memory data on

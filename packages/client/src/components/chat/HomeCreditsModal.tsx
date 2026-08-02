@@ -1,18 +1,19 @@
 import { ExternalLink } from "lucide-react";
 import { Modal } from "../ui/Modal";
+import { Trans, useTranslation } from "react-i18next";
 
 const FONT_AWESOME_D20_SOURCE_URL = "https://github.com/FortAwesome/Font-Awesome/blob/5.15.4/svgs/solid/dice-d20.svg";
 const CC_BY_4_0_LICENSE_URL = "https://creativecommons.org/licenses/by/4.0/";
 
 const CONTRIBUTORS = [
-  { login: "SpicyMarinara", url: "https://github.com/SpicyMarinara", contributions: 1552 },
+  { login: "SpicyMarinara", url: "https://github.com/SpicyMarinara", contributions: 1663 },
   { login: "cha1latte", url: "https://github.com/cha1latte", contributions: 319 },
-  { login: "kolacheee", url: "https://github.com/kolacheee", contributions: 213 },
+  { login: "kolacheee", url: "https://github.com/kolacheee", contributions: 214 },
   { login: "Romuromylus", url: "https://github.com/Romuromylus", contributions: 202 },
-  { login: "thetopham", url: "https://github.com/thetopham", contributions: 122 },
+  { login: "thetopham", url: "https://github.com/thetopham", contributions: 125 },
+  { login: "Gunterlie", url: "https://github.com/Gunterlie", contributions: 90 },
   { login: "LukaTheHero", url: "https://github.com/LukaTheHero", contributions: 86 },
-  { login: "Gunterlie", url: "https://github.com/Gunterlie", contributions: 81 },
-  { login: "Xelvanis", url: "https://github.com/Xelvanis", contributions: 75 },
+  { login: "Xelvanis", url: "https://github.com/Xelvanis", contributions: 86 },
   { login: "TheLonelyDevil9", url: "https://github.com/TheLonelyDevil9", contributions: 69 },
   { login: "Promansis", url: "https://github.com/Promansis", contributions: 64 },
   { login: "coxde", url: "https://github.com/coxde", contributions: 60 },
@@ -26,13 +27,14 @@ const CONTRIBUTORS = [
   { login: "NeoKazuya", url: "https://github.com/NeoKazuya", contributions: 7 },
   { login: "felorhik", url: "https://github.com/felorhik", contributions: 6 },
   { login: "bignast", url: "https://github.com/bignast", contributions: 6 },
-  { login: "amauragis", url: "https://github.com/amauragis", contributions: 5 },
-  { login: "mm14141", url: "https://github.com/mm14141", contributions: 5 },
   { login: "jake9000", url: "https://github.com/jake9000", contributions: 5 },
-  { login: "JurijPietrowicz", url: "https://github.com/JurijPietrowicz", contributions: 4 },
+  { login: "JurijPietrowicz", url: "https://github.com/JurijPietrowicz", contributions: 5 },
+  { login: "mm14141", url: "https://github.com/mm14141", contributions: 5 },
+  { login: "amauragis", url: "https://github.com/amauragis", contributions: 5 },
   { login: "marysia", url: "https://github.com/marysia", contributions: 4 },
-  { login: "LightD31", url: "https://github.com/LightD31", contributions: 3 },
   { login: "myaiexp", url: "https://github.com/myaiexp", contributions: 3 },
+  { login: "kh0p", url: "https://github.com/kh0p", contributions: 3 },
+  { login: "LightD31", url: "https://github.com/LightD31", contributions: 3 },
   { login: "Lochalan", url: "https://github.com/Lochalan", contributions: 2 },
   { login: "Lamboozled", url: "https://github.com/Lamboozled", contributions: 2 },
   { login: "ailthrim", url: "https://github.com/ailthrim", contributions: 2 },
@@ -60,6 +62,8 @@ const CONTRIBUTORS = [
 ];
 
 const SPECIAL_THANKS = [
+  "DSBwizzard",
+  "Nevi",
   "Xel",
   "Jorge",
   "Cha1latte",
@@ -103,16 +107,17 @@ const SPECIAL_THANKS = [
 ];
 
 export function HomeCreditsModal({ open, onClose }: { open: boolean; onClose: () => void }) {
+  const { t } = useTranslation();
   return (
-    <Modal open={open} onClose={onClose} title="Credits" width="max-w-2xl">
+    <Modal open={open} onClose={onClose} title={t("home.actions.credits")} width="max-w-2xl">
       <div className="space-y-5">
         <section className="space-y-2">
           <div>
             <h3 className="text-xs font-semibold uppercase tracking-wide text-[var(--muted-foreground)]">
-              GitHub Contributors
+              {t("home.credits.contributors")}
             </h3>
             <p className="mt-1 text-xs text-[var(--muted-foreground)]">
-              Synced from the Marinara Engine GitHub contributors list.
+              {t("home.credits.contributorsDescription")}
             </p>
           </div>
           <div className="grid max-h-[18rem] grid-cols-1 gap-2 overflow-y-auto pr-1 sm:grid-cols-2">
@@ -136,35 +141,33 @@ export function HomeCreditsModal({ open, onClose }: { open: boolean; onClose: ()
 
         <section className="space-y-2">
           <h3 className="text-xs font-semibold uppercase tracking-wide text-[var(--muted-foreground)]">
-            Special Thanks
+            {t("home.credits.specialThanks")}
           </h3>
           <p className="text-xs leading-relaxed text-[var(--muted-foreground)]">{SPECIAL_THANKS.join(", ")}.</p>
         </section>
 
         <section className="space-y-2">
           <h3 className="text-xs font-semibold uppercase tracking-wide text-[var(--muted-foreground)]">
-            Third-Party Assets
+            {t("home.credits.thirdPartyAssets")}
           </h3>
           <p className="text-xs leading-relaxed text-[var(--muted-foreground)]">
-            The tracker panel d20 icon uses the path geometry from{" "}
-            <a
-              href={FONT_AWESOME_D20_SOURCE_URL}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="font-medium text-[var(--primary)] underline-offset-2 hover:underline"
-            >
-              Font Awesome Free 5.15.4 dice-d20
-            </a>{" "}
-            by Fonticons, Inc., licensed under{" "}
-            <a
-              href={CC_BY_4_0_LICENSE_URL}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="font-medium text-[var(--primary)] underline-offset-2 hover:underline"
-            >
-              CC BY 4.0
-            </a>
-            {". The path formatting was adapted for React; the geometry is unchanged."}
+            <Trans
+              i18nKey="home.credits.thirdPartyAssetsDescription"
+              components={[
+                <a
+                  href={FONT_AWESOME_D20_SOURCE_URL}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="font-medium text-[var(--primary)] underline-offset-2 hover:underline"
+                />,
+                <a
+                  href={CC_BY_4_0_LICENSE_URL}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="font-medium text-[var(--primary)] underline-offset-2 hover:underline"
+                />,
+              ]}
+            />
           </p>
         </section>
       </div>
