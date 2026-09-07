@@ -82,19 +82,14 @@ function mirrorStyles(
     if (previousTarget) {
       if (previousTarget.nextElementSibling !== target) previousTarget.after(target);
     } else {
-      const firstMirroredStyle = targetDocument.head.querySelector<MirroredStyleNode>(
-        `[${DETACHED_STYLE_ATTRIBUTE}]`,
-      );
+      const firstMirroredStyle = targetDocument.head.querySelector<MirroredStyleNode>(`[${DETACHED_STYLE_ATTRIBUTE}]`);
       if (firstMirroredStyle !== target) targetDocument.head.insertBefore(target, firstMirroredStyle);
     }
     previousTarget = target;
   }
 }
 
-function prepareTrackerPanelWindow(
-  popup: Window & typeof globalThis,
-  title: string,
-): TrackerPanelWindowTarget {
+function prepareTrackerPanelWindow(popup: Window & typeof globalThis, title: string): TrackerPanelWindowTarget {
   const popupDocument = popup.document;
   popupDocument.title = title;
   popupDocument.head.replaceChildren();
@@ -159,7 +154,7 @@ export function TrackerPanelDetachedWindow({
   target,
 }: {
   host: HTMLElement;
-  onClosed: () => void;
+  onClosed: (target: TrackerPanelWindowTarget) => void;
   target: TrackerPanelWindowTarget;
 }) {
   useLayoutEffect(() => {
@@ -178,7 +173,7 @@ export function TrackerPanelDetachedWindow({
     const syncStyles = () => mirrorStyles(document, popupDocument, mirroredStyles);
     const handlePopupClose = () => {
       target.removeOpenerPageHideListener();
-      onClosed();
+      onClosed(target);
     };
 
     syncDocumentPresentation();

@@ -39,6 +39,9 @@ export function ConversationMessageBubble({ ctx }: { ctx: MessageRenderContext }
     mentionNames,
     quoteFormat,
     charByName,
+    charIdByName,
+    selfCharacterId,
+    galleryIndex,
     groupedSegments,
     visibleSegments,
     renderedContent,
@@ -89,7 +92,11 @@ export function ConversationMessageBubble({ ctx }: { ctx: MessageRenderContext }
               type="button"
               role="checkbox"
               aria-checked={isSelected}
-              aria-label={isSelected ?localizeUi("ui.chat.chatmessage.deselectMessage") :localizeUi("ui.chat.chatmessage.selectMessage")}
+              aria-label={
+                isSelected
+                  ? localizeUi("ui.chat.chatmessage.deselectMessage")
+                  : localizeUi("ui.chat.chatmessage.selectMessage")
+              }
               tabIndex={0}
               onClick={(e) => {
                 e.stopPropagation();
@@ -107,9 +114,7 @@ export function ConversationMessageBubble({ ctx }: { ctx: MessageRenderContext }
                 isSelected && MESSAGE_SELECTION_CHECKBOX_SELECTED_CLASS,
               )}
             >
-              {isSelected && (
-                <span className="text-xs font-bold text-[var(--marinara-chat-chrome-panel-bg)]">✓</span>
-              )}
+              {isSelected && <span className="text-xs font-bold text-[var(--marinara-chat-chrome-panel-bg)]">✓</span>}
             </button>
           </div>
         )}
@@ -122,7 +127,9 @@ export function ConversationMessageBubble({ ctx }: { ctx: MessageRenderContext }
                 <button
                   type="button"
                   onClick={(e) => ctx.onOpenAboutMe?.(e.currentTarget.getBoundingClientRect())}
-                  aria-label={localizeUi("ui.chat.conversationmessagebubble.viewValue1SAboutMe", { value1: displayName })}
+                  aria-label={localizeUi("ui.chat.conversationmessagebubble.viewValue1SAboutMe", {
+                    value1: displayName,
+                  })}
                   title={localizeUi("ui.chat.conversationmessagebubble.viewValue1SAboutMe", { value1: displayName })}
                   className={cn(
                     "relative block h-10 w-10 overflow-hidden bg-[var(--accent)] cursor-pointer transition-opacity hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--primary)]/50",
@@ -161,7 +168,7 @@ export function ConversationMessageBubble({ ctx }: { ctx: MessageRenderContext }
                 </div>
               )}
               {(showActions || forceShowActions || showMessageNumbers) && messageIndex != null && (
-                <span className="mt-0.5 block text-center text-[0.5rem] font-medium text-[var(--muted-foreground)] select-none">
+                <span className="mari-conversation-transcript-chrome-text mt-0.5 block text-center text-[0.5rem] font-medium select-none">
                   #{messageIndex}
                 </span>
               )}
@@ -186,10 +193,14 @@ export function ConversationMessageBubble({ ctx }: { ctx: MessageRenderContext }
             >
               {hiddenFromAIHeader}
               {!isUser && (
-                <ConversationMessageName displayName={displayName} nameColor={nameColor} onOpenAboutMe={ctx.onOpenAboutMe} />
+                <ConversationMessageName
+                  displayName={displayName}
+                  nameColor={nameColor}
+                  onOpenAboutMe={ctx.onOpenAboutMe}
+                />
               )}
               {!hideTimestamp && !isUser && (
-                <span className="mari-message-timestamp text-[0.6875rem] text-[var(--muted-foreground)]/60">
+                <span className="mari-message-timestamp mari-conversation-transcript-chrome-text text-[0.6875rem]">
                   {formatTimestamp(message.createdAt)}
                 </span>
               )}
@@ -212,8 +223,10 @@ export function ConversationMessageBubble({ ctx }: { ctx: MessageRenderContext }
           ) : groupedSegments && !isUser ? (
             <div className="flex flex-col items-start gap-1.5">
               {groupedSegments.slice(0, visibleSegments).map((grp, i) => {
-                const segChar =
-                  grp.speaker && charByName ? charByName.get(normalizeTextForMatch(grp.speaker)) : null;
+                const segChar = grp.speaker && charByName ? charByName.get(normalizeTextForMatch(grp.speaker)) : null;
+                const segSelfId =
+                  (grp.speaker && charIdByName ? charIdByName.get(normalizeTextForMatch(grp.speaker)) : null) ??
+                  selfCharacterId;
                 const segName = segChar?.convoDisplayName?.trim() || segChar?.name || grp.speaker || "";
                 const displayLines = splitGroupedSegmentDisplayLines(grp);
 
@@ -231,6 +244,8 @@ export function ConversationMessageBubble({ ctx }: { ctx: MessageRenderContext }
                         emojiMap={emojiMap}
                         stickerMap={stickerMap}
                         onImageOpen={(url) => onImageOpen(url)}
+                        selfCharacterId={selfCharacterId}
+                        galleryIndex={galleryIndex}
                       />
                     </div>
                   );
@@ -254,6 +269,8 @@ export function ConversationMessageBubble({ ctx }: { ctx: MessageRenderContext }
                       emojiMap={emojiMap}
                       stickerMap={stickerMap}
                       onImageOpen={(url) => onImageOpen(url)}
+                      selfCharacterId={segSelfId}
+                      galleryIndex={galleryIndex}
                     />
                   </div>
                 ));
@@ -280,9 +297,14 @@ export function ConversationMessageBubble({ ctx }: { ctx: MessageRenderContext }
                       emojiMap={emojiMap}
                       stickerMap={stickerMap}
                       onImageOpen={(url) => onImageOpen(url)}
+                      selfCharacterId={selfCharacterId}
+                      galleryIndex={galleryIndex}
                     />
                   )}
-                  <PendingTypingDots label={localizeUi("ui.chat.conversationmessagebubble.stillTyping")} dotClassName="bg-[var(--muted-foreground)]/60" />
+                  <PendingTypingDots
+                    label={localizeUi("ui.chat.conversationmessagebubble.stillTyping")}
+                    dotClassName="bg-[var(--muted-foreground)]/60"
+                  />
                 </div>
               ) : extra.diceRollResult ? (
                 <DiceMessageContent diceRollResult={extra.diceRollResult} createdAt={message.createdAt} />
@@ -293,6 +315,8 @@ export function ConversationMessageBubble({ ctx }: { ctx: MessageRenderContext }
                   emojiMap={emojiMap}
                   stickerMap={stickerMap}
                   onImageOpen={(url) => onImageOpen(url)}
+                  selfCharacterId={selfCharacterId}
+                  galleryIndex={galleryIndex}
                 />
               )}
             </div>

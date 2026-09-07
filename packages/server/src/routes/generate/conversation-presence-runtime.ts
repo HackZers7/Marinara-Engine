@@ -1,10 +1,8 @@
 import { normalizeTextForMatch } from "@marinara-engine/shared";
+import type { ConversationStatusOverride } from "@marinara-engine/shared";
 
 import type { DB } from "../../db/connection.js";
-import {
-  dailyCapForCharacter,
-  getAutonomousDailyBudget,
-} from "../../services/conversation/autonomous.service.js";
+import { dailyCapForCharacter, getAutonomousDailyBudget } from "../../services/conversation/autonomous.service.js";
 import {
   getDirectMessageDelay,
   getEffectiveCurrentStatus,
@@ -12,10 +10,6 @@ import {
   getTodaySchedule,
   type WeekSchedule,
 } from "../../services/conversation/schedule.service.js";
-import {
-  getEnabledConversationSchedules,
-  parseConversationStatusOverrides,
-} from "../../services/generation/conversation-context-utils.js";
 import type { GenerationPromptMessage } from "../../services/generation/prompt-message-scope.js";
 import { getActiveTurnGame } from "../../services/turn-games/turn-game-runner.service.js";
 import { isMessageHiddenFromAI, parseExtra } from "./generate-route-utils.js";
@@ -33,6 +27,25 @@ export type ConversationPromptCharacterInfo = {
   talkativeness: number;
 };
 
+export type ConversationResponderDelay = {
+  delayMs: number;
+  status: string;
+};
+
+export function orderConversationRespondersByDelay(
+  characterIds: string[],
+  delays: ReadonlyMap<string, ConversationResponderDelay>,
+): string[] {
+  return characterIds
+    .map((characterId, index) => ({ characterId, index, delayMs: delays.get(characterId)?.delayMs ?? 0 }))
+    .sort((left, right) => left.delayMs - right.delayMs || left.index - right.index)
+    .map(({ characterId }) => characterId);
+}
+
+export function remainingConversationPresenceDelay(delayMs: number, startedAt: number, now = Date.now()): number {
+  return Math.max(0, delayMs - Math.max(0, now - startedAt));
+}
+
 type ConversationPresenceChatsStore = {
   patchMetadata(
     chatId: string,
@@ -40,6 +53,10 @@ type ConversationPresenceChatsStore = {
     options?: { touchUpdatedAt?: boolean },
   ): Promise<unknown>;
   listMessages(chatId: string): Promise<any[]>;
+  resolveConversationPresenceState(chatId: string): Promise<{
+    schedules: Record<string, WeekSchedule>;
+    statusOverrides: Record<string, ConversationStatusOverride>;
+  }>;
 };
 
 type ConversationPresenceCharactersStore = {
@@ -61,6 +78,7 @@ export async function resolveConversationPresenceRuntime(args: {
   regenerateMessageId?: string | null;
   impersonate?: boolean;
   skipPresenceDelay?: boolean;
+  deferPresenceDelayToResponders?: boolean;
   supportsHiddenFromAI: boolean;
   contextMessageLimit: number | null | undefined;
   chatMessages: any[];
@@ -78,11 +96,17 @@ export async function resolveConversationPresenceRuntime(args: {
   charNameList: string;
   isGroup: boolean;
   respondingCharacterIds: string[];
+  responderDelays: Record<string, ConversationResponderDelay>;
+  presenceDelayStartedAt: number;
   chatMessages: any[];
   finalMessages: GenerationPromptMessage[];
 }> {
-  const schedules = getEnabledConversationSchedules(args.chatMeta) as Record<string, WeekSchedule>;
-  const statusOverrides = parseConversationStatusOverrides(args.chatMeta.conversationStatusOverrides);
+  // Resolve from the character cards rather than trusting `args.chatMeta`, whose
+  // cached copies can predate a schedule or presence override set from another
+  // chat or from the Character Editor moments ago.
+  const presence = await args.chats.resolveConversationPresenceState(args.chatId);
+  const schedules = presence.schedules;
+  const statusOverrides = presence.statusOverrides;
   const convoCharInfo = await resolveConversationPromptCharacters({
     characterIds: args.characterIds,
     chars: args.chars,
@@ -142,9 +166,7 @@ export async function resolveConversationPresenceRuntime(args: {
     seatedGameCharIds.has(character.charId) ? "online" : character.status;
 
   if (!args.regenerateMessageId && !args.impersonate) {
-    respondingConvoCharInfo = respondingConvoCharInfo.filter(
-      (character) => effectiveStatus(character) !== "offline",
-    );
+    respondingConvoCharInfo = respondingConvoCharInfo.filter((character) => effectiveStatus(character) !== "offline");
   }
   if (respondingConvoCharInfo.length === 0 && !args.regenerateMessageId && !args.impersonate) {
     args.writeSse({ type: "offline", characters: requestedResponderNames });
@@ -161,6 +183,8 @@ export async function resolveConversationPresenceRuntime(args: {
   }
   const respondingConvoCharNames = respondingConvoCharInfo.map((character) => character.displayName);
   const respondingCharacterIds = respondingConvoCharInfo.map((character) => character.charId);
+  const presenceDelayStartedAt = Date.now();
+  let responderDelays: Record<string, ConversationResponderDelay> = {};
 
   let chatMessages = args.chatMessages;
   let finalMessages = args.finalMessages;
@@ -171,15 +195,28 @@ export async function resolveConversationPresenceRuntime(args: {
       const cStatus = effectiveStatus(character);
       return (rank[cStatus] ?? 0) > (rank[worst] ?? 0) ? cStatus : worst;
     }, "online");
-    const delayMs = hasMentions
-      ? getMentionDelay(worstStatus as "online" | "idle" | "dnd" | "offline")
-      : respondingConvoCharInfo.reduce((maxDelay, character) => {
-          const schedule = schedules[character.charId];
-          return Math.max(
-            maxDelay,
-            getDirectMessageDelay(effectiveStatus(character) as "online" | "idle" | "dnd" | "offline", schedule),
-          );
-        }, 0);
+    if (args.deferPresenceDelayToResponders) {
+      responderDelays = Object.fromEntries(
+        respondingConvoCharInfo.map((character) => {
+          const status = effectiveStatus(character) as "online" | "idle" | "dnd" | "offline";
+          const delayMs = hasMentions
+            ? getMentionDelay(status)
+            : getDirectMessageDelay(status, schedules[character.charId]);
+          return [character.charId, { delayMs, status }];
+        }),
+      );
+    }
+    const delayMs = args.deferPresenceDelayToResponders
+      ? 0
+      : hasMentions
+        ? getMentionDelay(worstStatus as "online" | "idle" | "dnd" | "offline")
+        : respondingConvoCharInfo.reduce((maxDelay, character) => {
+            const schedule = schedules[character.charId];
+            return Math.max(
+              maxDelay,
+              getDirectMessageDelay(effectiveStatus(character) as "online" | "idle" | "dnd" | "offline", schedule),
+            );
+          }, 0);
 
     if (delayMs > 0) {
       args.writeSse({
@@ -220,7 +257,9 @@ export async function resolveConversationPresenceRuntime(args: {
       }
       finalMessages = args.resolveHistoryMessageMacros(finalMessages);
     }
-    args.writeSse({ type: "typing", characters: respondingConvoCharNames });
+    if (!args.deferPresenceDelayToResponders) {
+      args.writeSse({ type: "typing", characters: respondingConvoCharNames });
+    }
   }
 
   if (args.regenerateMessageId) {
@@ -233,6 +272,8 @@ export async function resolveConversationPresenceRuntime(args: {
     convoCharNames,
     charNameList,
     respondingCharacterIds,
+    responderDelays,
+    presenceDelayStartedAt,
     args,
     chatMessages,
     finalMessages,
@@ -243,7 +284,7 @@ async function resolveConversationPromptCharacters(args: {
   characterIds: string[];
   chars: ConversationPresenceCharactersStore;
   schedules: Record<string, WeekSchedule>;
-  statusOverrides: ReturnType<typeof parseConversationStatusOverrides>;
+  statusOverrides: Record<string, ConversationStatusOverride>;
   actualNow: Date;
   promptNow: Date;
 }): Promise<ConversationPromptCharacterInfo[]> {
@@ -326,7 +367,7 @@ async function resolveSeatedTurnGameCharacterIds(db: DB, chatId: string): Promis
     : new Set<string>();
 }
 
-async function waitForConversationPresenceDelay(delayMs: number, abortSignal: AbortSignal): Promise<void> {
+export async function waitForConversationPresenceDelay(delayMs: number, abortSignal: AbortSignal): Promise<void> {
   await new Promise<void>((resolve) => {
     if (abortSignal.aborted) {
       resolve();
@@ -359,6 +400,8 @@ function buildPresenceResult(args: {
   convoCharNames: string[];
   charNameList: string;
   respondingCharacterIds: string[];
+  responderDelays?: Record<string, ConversationResponderDelay>;
+  presenceDelayStartedAt?: number;
   args: { chatMessages: any[]; finalMessages: GenerationPromptMessage[] };
   chatMessages?: any[];
   finalMessages?: GenerationPromptMessage[];
@@ -371,6 +414,8 @@ function buildPresenceResult(args: {
     charNameList: args.charNameList,
     isGroup: args.convoCharNames.length > 1,
     respondingCharacterIds: args.respondingCharacterIds,
+    responderDelays: args.responderDelays ?? {},
+    presenceDelayStartedAt: args.presenceDelayStartedAt ?? Date.now(),
     chatMessages: args.chatMessages ?? args.args.chatMessages,
     finalMessages: args.finalMessages ?? args.args.finalMessages,
   };

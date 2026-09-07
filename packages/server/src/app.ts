@@ -22,9 +22,11 @@ import { seedDefaultRegexScripts } from "./db/seed-regex.js";
 import { buildAssetManifest, ensureAssetDirs } from "./services/game/asset-manifest.service.js";
 import { recoverGalleryImages } from "./services/storage/gallery-recovery.js";
 import { migrateCharacterExtendedDescriptionsToLorebooks } from "./services/lorebook/extended-descriptions-migration.js";
+import { migrateTtsSettingsToAudioConnection } from "./services/connections/tts-audio-connection-migration.js";
 import { migrateLegacyDefaultAgentPrompts } from "./services/agents/default-prompt-migration.js";
 import { APP_VERSION, resetTurnGameRegistry } from "@marinara-engine/shared";
 import { existsSync } from "fs";
+import { readFile } from "fs/promises";
 import { join, resolve, dirname } from "path";
 import { fileURLToPath } from "url";
 import { getBuildCommit, getBuildLabel } from "./config/build-info.js";
@@ -38,8 +40,6 @@ import {
 import { corsDelegate } from "./config/cors-config.js";
 import { sidecarProcessService } from "./services/sidecar/sidecar-process.service.js";
 import { startServerAutonomousScheduler } from "./services/conversation/server-autonomous-scheduler.service.js";
-import { startNoodleRefreshScheduler } from "./services/noodle/noodle-refresh-scheduler.service.js";
-import { startNoodleAutoPostScheduler } from "./services/noodle/noodle-autopost-scheduler.service.js";
 import { preparePersonalExtensionTrust } from "./services/setup/personal-extension-trust.js";
 import { personalServerExtensionRuntime } from "./services/extensions/personal-server-extension-runtime.js";
 import { runWithGenerationFallbackNotifier } from "./services/generation/fallback-notification.js";
@@ -50,13 +50,45 @@ import { capabilityModuleRuntime } from "./services/capability-packages/capabili
 import { migrateLegacyCapabilities } from "./services/capability-packages/legacy-capability-migration.js";
 import { createClientStaticOptions } from "./config/client-static-config.js";
 import { hostValidationHook } from "./middleware/host-validation.js";
+import { androidLocalAuthHook, androidLocalLoginRoute } from "./middleware/android-local-auth.js";
+import { arch, platform, release } from "node:os";
+import { execFileSync } from "node:child_process";
+import { getRuntimeMemorySnapshot } from "./utils/runtime-memory.js";
 
 const isLite = process.env.MARINARA_LITE === "true" || process.env.MARINARA_LITE === "1";
 const MAX_UPLOAD_BYTES = 256 * 1024 * 1024;
 
+function resolveServerOs(): string {
+  const hostPlatform = platform();
+  const hostRelease = release();
+  const hostArch = arch();
+  if (hostPlatform === "darwin") {
+    try {
+      const version = execFileSync("sw_vers", ["-productVersion"], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+        timeout: 2_000,
+      }).trim();
+      return `macOS ${version || hostRelease} (${hostArch})`;
+    } catch {
+      return `macOS ${hostRelease} (${hostArch})`;
+    }
+  }
+  if (hostPlatform === "win32") return `Windows ${hostRelease} (${hostArch})`;
+  if (hostPlatform === "android" || process.env.PREFIX?.includes("com.termux")) {
+    return `Android / Termux ${hostRelease} (${hostArch})`;
+  }
+  if (hostPlatform === "linux") return `Linux ${hostRelease} (${hostArch})`;
+  return `${hostPlatform} ${hostRelease} (${hostArch})`;
+}
+
+const SERVER_OS = resolveServerOs();
+
 export async function buildApp(https?: { cert: Buffer; key: Buffer }) {
   const hadUserStateBeforeStartup = existsSync(join(getFileStorageDir(), "manifest.json"));
   const app = Fastify({
+    // Restart has its own bounded fallback; normal shutdown must not interrupt active generations.
+    forceCloseConnections: false,
     logger: {
       level: getLogLevel(),
       transport: getNodeEnv() !== "production" ? { target: "pino-pretty", options: { colorize: true } } : undefined,
@@ -114,6 +146,13 @@ export async function buildApp(https?: { cert: Buffer; key: Buffer }) {
         app.log.info("Removed obsolete downloadable copies of core features: %s", removedCorePackages.join(", "));
       }
       await migrateLegacyCapabilities(db, hadUserStateBeforeStartup);
+      const noodleMigration =
+        await capabilityPackageManager.migrateExtractedNoodleAvailability(hadUserStateBeforeStartup);
+      if ("pending" in noodleMigration && noodleMigration.pending) {
+        app.log.debug("Optional Noodle package is not in the active catalog yet; migration remains pending");
+      } else if (noodleMigration.migrated) {
+        app.log.info("Installed the optional Noodle package for an upgraded profile");
+      }
     } catch (error) {
       app.log.warn(error, "Optional package availability migration did not complete; it will retry next startup");
     }
@@ -131,6 +170,11 @@ export async function buildApp(https?: { cert: Buffer; key: Buffer }) {
   await seedDefaultRegexScripts(db);
   await migrateLegacyDefaultAgentPrompts(db);
   await migrateCharacterExtendedDescriptionsToLorebooks(db);
+  try {
+    await migrateTtsSettingsToAudioConnection(db);
+  } catch (error) {
+    app.log.warn(error, "TTS audio-connection migration did not complete; it will retry next startup");
+  }
   await seedDefaultBackgrounds();
   await seedDefaultGameAssets();
 
@@ -179,6 +223,10 @@ export async function buildApp(https?: { cert: Buffer; key: Buffer }) {
   // ── CSRF / Origin protection for unsafe API requests ──
   app.addHook("onRequest", csrfProtectionHook);
 
+  // APK-managed Termux installs use a per-install secret so unrelated Android
+  // apps cannot inherit the server's ordinary loopback trust.
+  app.addHook("onRequest", androidLocalAuthHook);
+
   // ── Prevent caching of API JSON responses ──
   // Without explicit Cache-Control, browsers apply heuristic caching which
   // can return stale data when React Query refetches after mutations.
@@ -200,9 +248,19 @@ export async function buildApp(https?: { cert: Buffer; key: Buffer }) {
 
   // ── Routes ──
   await registerRoutes(app);
+  await androidLocalLoginRoute(app);
 
   // Trusted downloaded server capabilities register while Fastify is still mutable.
   await capabilityModuleRuntime.start(app);
+  // A package can install its own art during activate(), which runs AFTER the boot-time scan above, so
+  // without this its assets stay invisible to everything reading the manifest until the NEXT restart.
+  // Idempotent — the same scan the upload routes already re-run. Guarded because it walks files a package
+  // just wrote: a stale manifest costs that package its art, failing to boot costs the user everything.
+  try {
+    buildAssetManifest();
+  } catch (error) {
+    app.log.warn({ err: error }, "[capability] post-activation asset rescan failed; manifest may be stale");
+  }
   await personalServerExtensionRuntime.start(db);
   // Server-backed agent definitions are visible only after their runtime reaches
   // functional readiness. Packages without a server entrypoint remain available
@@ -211,12 +269,6 @@ export async function buildApp(https?: { cert: Buffer; key: Buffer }) {
 
   // ── Server-side autonomous conversation scheduler ──
   startServerAutonomousScheduler(app);
-
-  // ── Automatic Noodle timeline refresh scheduler ──
-  startNoodleRefreshScheduler(app);
-
-  // ── NoodleR per-creator automatic-posting scheduler ──
-  startNoodleAutoPostScheduler(app);
 
   // ── Sidecar bootstrap (background, skipped in lite mode) ──
   if (!isLite) {
@@ -230,7 +282,8 @@ export async function buildApp(https?: { cert: Buffer; key: Buffer }) {
   // ── Serve client build in production ──
   const __dirname = dirname(fileURLToPath(import.meta.url));
   const clientDist = resolve(__dirname, "..", "..", "client", "dist");
-  if (existsSync(clientDist)) {
+  const clientIndex = resolve(clientDist, "index.html");
+  if (existsSync(clientIndex)) {
     await app.register(fastifyStatic, createClientStaticOptions(clientDist));
 
     // SPA fallback — serve index.html for non-API routes
@@ -242,10 +295,13 @@ export async function buildApp(https?: { cert: Buffer; key: Buffer }) {
       reply.header("Cache-Control", "no-cache, must-revalidate");
       reply.header("Pragma", "no-cache");
       reply.header("Expires", "0");
-      return reply.sendFile("index.html", clientDist);
+      return reply.type("text/html; charset=utf-8").send(await readFile(clientIndex));
     });
   } else {
-    app.log.warn("Client build not found at %s; serving API only. Run `pnpm build` to build the frontend.", clientDist);
+    app.log.warn(
+      "Client build entry not found at %s; serving API only. Run `pnpm build` to build the frontend.",
+      clientIndex,
+    );
   }
 
   // ── Health Check ──
@@ -262,6 +318,8 @@ export async function buildApp(https?: { cert: Buffer; key: Buffer }) {
       version: APP_VERSION,
       commit,
       build: getBuildLabel(),
+      serverOs: SERVER_OS,
+      memory: getRuntimeMemorySnapshot(),
       timestamp: new Date().toISOString(),
       capabilityPackages: {
         status: capabilityPackages

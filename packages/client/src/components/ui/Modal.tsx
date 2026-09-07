@@ -14,6 +14,7 @@ import {
 } from "./neutral-surface-styles";
 import { useDialogFocusScope } from "../../hooks/use-dialog-focus-scope";
 import { useBackdropDismiss } from "../../hooks/use-backdrop-dismiss";
+import { useBackDismiss } from "../../hooks/use-back-dismiss";
 import { useLocalizedUiText } from "../../localization/use-localized-ui-text";
 import { useTranslation as useUiTranslation } from "react-i18next";
 
@@ -33,6 +34,8 @@ interface ModalProps {
   mobileFullscreen?: boolean;
   /** Optional feature-local classes applied to the full panel, including its header. */
   panelClassName?: string;
+  /** Optional feature-local classes applied to the scrollable content area. */
+  contentClassName?: string;
   /** Optional feature-local style variables applied to the full panel. */
   panelStyle?: CSSProperties;
   closeDisabled?: boolean;
@@ -53,6 +56,7 @@ export function Modal({
   chatFloatingPanel = false,
   mobileFullscreen = false,
   panelClassName,
+  contentClassName,
   panelStyle,
   closeDisabled = false,
   dragThrough = false,
@@ -69,6 +73,12 @@ export function Modal({
   const enterRafRef = useRef<number | null>(null);
   const backdropDismiss = useBackdropDismiss(onClose, closeDisabled);
   useDialogFocusScope(open && mounted, panelRef, initialFocusRef, restoreFocusRef, focusScopePortalSelector);
+  // Hardware / gesture back closes the topmost modal. While closing is disabled
+  // the press is absorbed rather than ignored, matching Escape: an in-flight
+  // operation must not be interrupted by backgrounding the app.
+  useBackDismiss(open, () => {
+    if (!closeDisabled) onClose();
+  });
 
   useEffect(() => {
     if (enterRafRef.current !== null) {
@@ -192,7 +202,7 @@ export function Modal({
         {/* Content */}
         <div
           ref={contentRef}
-          className={`min-h-0 flex-1 overflow-y-auto overscroll-contain px-5 py-4 ${NEUTRAL_PANEL_SCROLL_AREA}`}
+          className={`min-h-0 flex-1 overflow-y-auto overscroll-contain px-5 py-4 ${NEUTRAL_PANEL_SCROLL_AREA} ${contentClassName ?? ""}`}
         >
           {children}
         </div>

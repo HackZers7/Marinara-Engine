@@ -8,6 +8,8 @@ The default message is:
 
 There is no New Draft action and there are no import controls in this section. Ask Professor Mari to create or revise a draft. She can save code, but she cannot approve or enable it.
 
+To write and import your own package, use the [Personal Extension authoring guide](writing-personal-extensions.md). Self-authored packages use the separately gated External Extensions flow.
+
 ## Review and enable
 
 Every draft starts disabled. Marinara fingerprints the exact executable code with SHA-256. Open the draft, inspect the code, compare the displayed hash, then choose **Review and Run** only if you accept that exact version. Any executable edit or restored revision disables the extension and requires a fresh approval.
@@ -18,7 +20,7 @@ Sandboxing reduces authority; it does not make arbitrary code trustworthy. A mal
 
 A Browser Extension runs in a dedicated Worker inside an opaque-origin sandboxed iframe. It cannot access Marinara's page, DOM, cookies, browser storage, origin APIs, or network. Its capabilities are private extension storage, logging, managed timers, cleanup registration, constrained windows, safe host contribution slots, and a read-only snapshot of the active chat and Character IDs. It can receive selected fields from the active Character cards or selected Persona only when the corresponding permissions are declared and approved.
 
-Extensions can add top-bar actions, Extensions menu items, and persistent right-side panels with `marinara.ui.registerContribution(...)`. Marinara renders these surfaces using the active theme and a fixed set of controls: headings, text, preformatted output, buttons, text inputs, selects, toggles, sliders, color controls, and spacers. An extension supplies content and state, never HTML, CSS, URLs, React components, or host event handlers.
+Extensions can add top-bar or side-panel actions, Extensions menu items, and persistent right-side panels with `marinara.ui.registerContribution(...)`. Marinara renders these surfaces using the active theme and a fixed set of controls: headings, text, preformatted output, buttons, text inputs, selects, toggles, sliders, color controls, and spacers. An extension supplies content and state, never HTML, CSS, URLs, React components, or host event handlers.
 
 These UI capabilities and rules are identical for every sandboxed Browser Extension regardless of source. An imported third-party (External) Extension uses this safe runtime unless its package explicitly requests **Full page access** or uses the pre-sandbox `marinara.extension` format described below.
 
@@ -62,7 +64,24 @@ const panel = marinara.ui.registerContribution({
 marinara.onCleanup(() => panel.remove());
 ```
 
-Use `kind: "button"` for a compact top-bar/Extensions-menu action and `kind: "menu-item"` for a menu-only action. Both invoke `onActivate`. A `panel` invokes `onActivate` when opened; its buttons invoke `onEvent` with the current values of every panel control. The returned handle supports `update({ label?, description?, icon?, elements? })` and `remove()`. IDs may contain letters, numbers, `.`, `_`, and `-`.
+Use `kind: "button"` for a compact action and `kind: "menu-item"` for an Extensions-menu action. Buttons default to `surface: "top-bar"`. They can instead target `chats`, `bots`, `characters`, `personas`, `lorebooks`, `presets`, `connections`, `agents`, or `settings`, with `position` set to `header`, `before-content`, or `after-content`. The `icon` accepts any kebab-case Lucide icon name supported by Marinara. Both action kinds invoke `onActivate`. A `panel` invokes `onActivate` when opened; its buttons invoke `onEvent` with the current values of every panel control. The returned handle supports kind-specific updates: `button` accepts `label`, `description`, `icon`, `surface`, and `position`; `menu-item` accepts `label`, `description`, and `icon`; `panel` accepts `label`, `description`, `icon`, and `elements`. All handles support `remove()`. IDs may contain letters, numbers, `.`, `_`, and `-`.
+
+For example, this places a native action above the Presets panel content:
+
+```js
+marinara.ui.registerContribution({
+  id: "preset-helper",
+  kind: "button",
+  label: "Preset helper",
+  description: "Run the preset helper",
+  icon: "list-sparkles",
+  surface: "presets",
+  position: "before-content",
+  onActivate: () => {
+    // Run extension behavior here.
+  },
+});
+```
 
 Complex tools can build multi-step interfaces by updating the panel elements after an event. Keep application state in `marinara.storage`; do not encode it in markup.
 
@@ -131,6 +150,8 @@ If an External Extension genuinely depends on host DOM access, it may request:
 
 **Full page access is not a sandbox capability.** The approved JavaScript and CSS run inside Marinara's page. The code can read or change anything visible to the current browser session, inspect chats and cards, use browser storage, make network requests, and call same-origin Marinara APIs. It has the same practical page authority as code pasted into the browser console. Professor Mari drafts cannot request it.
 
+Full page extensions should use `marinara.fetch(...)` for network requests. It has the same signature and result as `window.fetch`, while allowing **Settings > Addons > External Extensions** to show that extension's session request count, transferred bytes reported by responses, recent request rate, and sustained high-traffic warning. Raw `window.fetch` remains available because full page access is trusted page code, but those requests cannot be attributed to the extension.
+
 Marinara recognizes the older `kind: "marinara.extension"` v1 envelope without an explicit `capabilities` field as a pre-sandbox package and assigns **Full page access** during import. This allows legacy packages such as WeatherTweaker to reach the correct review flow instead of silently failing in a Worker. A modern package that uses that envelope but wants the safe runtime must include `"capabilities": []`.
 
 The two External Extension gates and exact-hash approval still apply. A code, CSS, or permission change disables the extension and requires fresh approval. Disabling removes Marinara's script and stylesheet nodes, cancels timers created through the compatibility API, and runs callbacks registered through `marinara.onCleanup(...)`. Because page code can create unregistered listeners, timers, globals, or DOM changes, cleanup is best effort; reload the page after disabling an extension if anything remains.
@@ -148,8 +169,11 @@ Browser Extensions are sandboxed by the browser itself, so they work everywhere.
 | macOS                   | ✅ Sandboxed                 | ⚠️ Explicit trust required    | ✅ Sandboxed (Seatbelt)               |
 | Linux (with Bubblewrap) | ✅ Sandboxed                 | ⚠️ Explicit trust required    | ✅ Sandboxed (Bubblewrap)             |
 | Linux (without `bwrap`) | ✅ Sandboxed                 | ⚠️ Explicit trust required    | ⛔ Disabled — install `bwrap`         |
+| Docker (default)        | ✅ Sandboxed                 | ⚠️ Explicit trust required    | ⛔ Disabled — container privileges    |
 | Windows                 | ✅ Sandboxed                 | ⚠️ Explicit trust required    | ⛔ Disabled — use a Browser Extension |
 | Android                 | ✅ Sandboxed                 | ⚠️ Explicit trust required    | ⛔ Disabled — use a Browser Extension |
+
+The official Docker image contains Bubblewrap, but its least-privileged default container cannot create the nested namespaces and mounts Bubblewrap needs. Marinara tests the sandbox at runtime and leaves Server Extensions disabled when the container denies them. See [Troubleshooting](../TROUBLESHOOTING.md#a-server-extension-says-no-supported-sandbox-is-available) for the explicit Docker permission override and its security tradeoff.
 
 On Windows and Android there is no supported OS process sandbox, so Server Extensions are unavailable by design. Use a Browser Extension instead, or run the Marinara server on macOS or Linux (with `bwrap`) if you need a Server Extension.
 
@@ -184,6 +208,7 @@ If an extension misbehaves, choose **Disable**. If the interface is unavailable,
 
 ## Related guides
 
+- [Writing Personal Extensions](writing-personal-extensions.md)
 - [Professor Mari](../home/professor-mari.md)
 - [Server Configuration](../CONFIGURATION.md)
 - [Backup and Restore](../data/backup-and-restore.md)

@@ -4,6 +4,7 @@
 import {
   BaseLLMProvider,
   llmFetch,
+  llmHttpErrorFromResponse,
   sanitizeApiError,
   type ChatCompletionResult,
   type ChatMessage,
@@ -135,6 +136,38 @@ function formatAnthropicTools(tools: LLMToolDefinition[] | undefined): Array<Rec
     description: tool.function.description,
     input_schema: tool.function.parameters,
   }));
+}
+
+export function applyAnthropicToolChoice(
+  body: Record<string, unknown>,
+  options: Pick<ChatOptions, "model" | "toolChoice" | "tools">,
+): "applied" | "manual-thinking" | "mythos" | "none" {
+  if (!options.tools?.length) {
+    delete body.tool_choice;
+    return "none";
+  }
+  const setToolChoiceType = (type: "auto" | "any") => {
+    const current = isRecord(body.tool_choice) ? body.tool_choice : {};
+    body.tool_choice = { ...current, type };
+    delete (body.tool_choice as Record<string, unknown>).name;
+  };
+  if (options.toolChoice !== "required") {
+    setToolChoiceType("auto");
+    return "none";
+  }
+
+  if (options.model.toLowerCase().includes("mythos")) {
+    setToolChoiceType("auto");
+    return "mythos";
+  }
+  const thinking = isRecord(body.thinking) ? body.thinking : null;
+  if (thinking?.type === "enabled") {
+    setToolChoiceType("auto");
+    return "manual-thinking";
+  }
+
+  setToolChoiceType("any");
+  return "applied";
 }
 
 function imageContentBlocks(images?: string[]): AnthropicContentBlock[] {
@@ -386,6 +419,15 @@ export class AnthropicProvider extends BaseLLMProvider {
       }
     }
 
+    const toolChoiceResult = applyAnthropicToolChoice(body, options);
+    if (toolChoiceResult === "manual-thinking") {
+      logger.warn(
+        "Anthropic manual extended thinking does not support forced tool use; falling back to automatic tool choice",
+      );
+    } else if (toolChoiceResult === "mythos") {
+      logger.warn("Claude Mythos does not support forced tool use; falling back to automatic tool choice");
+    }
+
     const response = await llmFetch(url, {
       method: "POST",
       headers: {
@@ -400,7 +442,10 @@ export class AnthropicProvider extends BaseLLMProvider {
 
     if (!response.ok) {
       const errorText = await response.text();
-      throw new Error(`Anthropic API error ${response.status}: ${sanitizeApiError(errorText)}`);
+      throw llmHttpErrorFromResponse(
+        `Anthropic API error ${response.status}: ${sanitizeApiError(errorText)}`,
+        response,
+      );
     }
 
     const json = (await response.json()) as AnthropicMessageResponse;
@@ -583,7 +628,10 @@ export class AnthropicProvider extends BaseLLMProvider {
 
     if (!response.ok) {
       const errorText = await response.text();
-      throw new Error(`Anthropic API error ${response.status}: ${sanitizeApiError(errorText)}`);
+      throw llmHttpErrorFromResponse(
+        `Anthropic API error ${response.status}: ${sanitizeApiError(errorText)}`,
+        response,
+      );
     }
 
     if (!options.stream) {

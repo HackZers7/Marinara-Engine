@@ -16,12 +16,14 @@ import {
 } from "@marinara-engine/shared";
 import { toast } from "sonner";
 import { useUIStore, type ConversationMessageStyle } from "../../stores/ui.store";
-import { cn, copyToClipboard, getAvatarCropStyle, parseAvatarCropJson } from "../../lib/utils";
+import { cn, copyToClipboard, getAvatarCropStyle } from "../../lib/utils";
+import { normalizeAvatarCrop } from "@marinara-engine/shared";
 import { resolveMessageMacros } from "../../lib/chat-macros";
 import { useTranslate } from "../../hooks/use-translate";
 import { useApplyRegex } from "../../hooks/use-apply-regex";
 import { api } from "../../lib/api-client";
 import { chatKeys } from "../../hooks/use-chats";
+import { useChatGalleryFilenameIndex } from "../../hooks/use-characters";
 import type { CharacterMap, MessageSelectionToggle, PersonaInfo } from "./chat-area.types";
 import { MESSAGE_SELECTION_SURFACE_CLASS } from "./message-selection-styles";
 import { GenerationReplayDetailsModal, hasGenerationReplayDetails } from "./GenerationReplayDetailsModal";
@@ -39,8 +41,10 @@ import { MessageReactions } from "./MessageReactions";
 import { MessageThinkingModal } from "./MessageThinkingModal";
 import { useChatStore } from "../../stores/chat.store";
 import { parseChatMetadata } from "../../lib/chat-display";
+import { resolveMessageReasoningDisplay } from "../../lib/message-reasoning";
 import {
   findRetargetableUserReaction,
+  removeCharacterReaction,
   reactionTargetOf,
   splitReactionsBySegment,
   toggleReaction,
@@ -215,12 +219,15 @@ export const ConversationMessage = memo(function ConversationMessage({
       : null;
   const generationReplay = hasGenerationReplayDetails(extra.generationReplay) ? extra.generationReplay : null;
   const canRegenerate = !isUser || generationReplay !== null;
-  const thinking =
-    typeof extra?.thinking === "string" && extra.thinking.trim().length > 0 ? (extra.thinking as string) : null;
+  const {
+    summary: thinking,
+    summaryUnavailable: reasoningSummaryUnavailable,
+    hasReasoning,
+  } = resolveMessageReasoningDisplay(extra);
 
   useEffect(() => {
-    if (!thinking) setShowThinking(false);
-  }, [thinking]);
+    if (!hasReasoning) setShowThinking(false);
+  }, [hasReasoning]);
 
   const reactions = useMemo<MessageReaction[]>(
     () => (Array.isArray(extra.reactions) ? extra.reactions : []),
@@ -253,6 +260,21 @@ export const ConversationMessage = memo(function ConversationMessage({
     (scopedCharacterMap
       ? (Array.from(scopedCharacterMap.values()).find((c): c is NonNullable<typeof c> => !!c) ?? null)
       : null);
+  // Speaking character id for portable card://self/gallery refs. Mirrors
+  // resolvedCharacterInfo exactly (same message.characterId gate + fallback),
+  // so the resolved image and the shown name/avatar always belong to the same
+  // character. Null for user/system messages — self never resolves there.
+  const selfCharacterId =
+    isUser || isSystem
+      ? null
+      : message.characterId
+        ? charInfo
+          ? message.characterId
+          : (fallbackChatCharacterEntry?.id ?? message.characterId)
+        : null;
+  // Chat-wide filename index (group chats only): lets card://self refs fall
+  // back to whichever chat character owns the file when the speaker doesn't.
+  const galleryIndex = useChatGalleryFilenameIndex(chatCharacterIds);
 
   const msgPersona = isUser && !plainUserMessages && extra.personaSnapshot ? extra.personaSnapshot : null;
   const avatarUrl = isUser
@@ -263,7 +285,7 @@ export const ConversationMessage = memo(function ConversationMessage({
   const personaAvatarCrop = isUser
     ? plainUserMessages
       ? null
-      : (parseAvatarCropJson(msgPersona?.avatarCrop) ?? personaInfo?.avatarCrop ?? null)
+      : (normalizeAvatarCrop(msgPersona?.avatarCrop) ?? personaInfo?.avatarCrop ?? null)
     : null;
   const avatarCropStyle = isUser
     ? getAvatarCropStyle(personaAvatarCrop)
@@ -425,7 +447,9 @@ export const ConversationMessage = memo(function ConversationMessage({
         await api.patch(`/chats/${message.chatId}/messages/${message.id}/extra`, { attachments: updated });
       } catch (err) {
         qc.setQueryData(msgKey, previous);
-        toast.error(err instanceof Error ? err.message :localizeUi("ui.chat.conversationmessage.failedToRemoveAttachment"));
+        toast.error(
+          err instanceof Error ? err.message : localizeUi("ui.chat.conversationmessage.failedToRemoveAttachment"),
+        );
       } finally {
         await qc.invalidateQueries({ queryKey: msgKey });
       }
@@ -457,7 +481,9 @@ export const ConversationMessage = memo(function ConversationMessage({
         await api.patch(`/chats/${message.chatId}/messages/${message.id}/extra`, { reactions: next });
       } catch (err) {
         qc.setQueryData(msgKey, previous);
-        toast.error(err instanceof Error ? err.message :localizeUi("ui.chat.conversationmessage.failedToUpdateReaction"));
+        toast.error(
+          err instanceof Error ? err.message : localizeUi("ui.chat.conversationmessage.failedToUpdateReaction"),
+        );
       } finally {
         await qc.invalidateQueries({ queryKey: msgKey });
       }
@@ -488,10 +514,18 @@ export const ConversationMessage = memo(function ConversationMessage({
     [handleToggleReaction],
   );
 
+  const handleRemoveCharacterReaction = useCallback(
+    (reaction: MessageReaction) => applyReactions(removeCharacterReaction(reactions, reaction)),
+    [applyReactions, reactions],
+  );
+
   // ── Speaker-segment parsing (for grouped / group-in-bubble) ──
-  const charByName = useMemo(() => {
-    if (!scopedCharacterMap) return null;
-    const map = new Map<string, NonNullable<ReturnType<CharacterMap["get"]>>>();
+  // Built as a pair in one pass: CharInfo carries no id, and grouped segments
+  // need the speaker's id to resolve portable card://self gallery refs.
+  const { charByName, charIdByName } = useMemo(() => {
+    if (!scopedCharacterMap) return { charByName: null, charIdByName: null };
+    const byName = new Map<string, NonNullable<ReturnType<CharacterMap["get"]>>>();
+    const idByName = new Map<string, string>();
     for (const [id, v] of scopedCharacterMap) {
       if (v) {
         const aliases = [v.name, v.convoDisplayName].filter(
@@ -499,12 +533,14 @@ export const ConversationMessage = memo(function ConversationMessage({
         );
         for (const alias of aliases) {
           const key = normalizeTextForMatch(alias);
-          if (id === message.characterId) map.set(key, v);
-          else if (!map.has(key)) map.set(key, v);
+          if (id === message.characterId || !byName.has(key)) {
+            byName.set(key, v);
+            idByName.set(key, id);
+          }
         }
       }
     }
-    return map;
+    return { charByName: byName, charIdByName: idByName };
   }, [scopedCharacterMap, message.characterId]);
 
   const mentionNames = useMemo(() => {
@@ -795,6 +831,9 @@ export const ConversationMessage = memo(function ConversationMessage({
     onOpenAboutMe,
     mentionNames,
     charByName,
+    charIdByName,
+    selfCharacterId,
+    galleryIndex,
     quoteFormat,
     renderedContent: displayedContent,
     renderedContentParts: displayedContentParts,
@@ -826,7 +865,8 @@ export const ConversationMessage = memo(function ConversationMessage({
     isGuided,
     regenerateButtonTitle,
     regenerateGuidedClass,
-    thinking,
+    hasReasoning,
+    reasoningSummaryUnavailable,
     thinkingButtonRef,
     generationReplay,
     canRegenerate,
@@ -866,6 +906,7 @@ export const ConversationMessage = memo(function ConversationMessage({
     resolveReactorName,
     onPickSegmentReaction: handlePickSegmentReaction,
     onToggleReactionEntry: handleToggleReactionEntry,
+    onRemoveCharacterReaction: handleRemoveCharacterReaction,
     messageTextStyle,
     isBubbleStyle,
     bubbleGroupPosition,
@@ -891,6 +932,7 @@ export const ConversationMessage = memo(function ConversationMessage({
           reactions={messageReactions}
           resolveReactorName={resolveReactorName}
           onToggle={handleToggleReactionEntry}
+          onRemoveCharacter={handleRemoveCharacterReaction}
         />
       </div>
     ) : null;
@@ -898,9 +940,10 @@ export const ConversationMessage = memo(function ConversationMessage({
   // ── Shared modals (portals, rendered outside the layout) ──
   const modals = (
     <>
-      {showThinking && thinking && (
+      {showThinking && hasReasoning && (
         <MessageThinkingModal
           thinking={thinking}
+          summaryUnavailable={reasoningSummaryUnavailable}
           onClose={() => setShowThinking(false)}
           restoreFocusRef={thinkingButtonRef}
         />
@@ -1045,17 +1088,16 @@ export const ConversationMessage = memo(function ConversationMessage({
           "mari-message relative w-full min-w-0 max-w-full px-4 transition-colors",
           !noHoverGroup && "group",
           isBubbleStyle
-            ? cn("py-1", isUser ? "mari-message-user" : "mari-message-assistant", !isGrouped && "mt-2.5")
+            ? cn("py-1", isUser ? "mari-message-user" : "mari-message-assistant", !isGrouped && "mt-0.5")
             : cn(
-                "flex gap-4 py-0.5 hover:bg-[var(--secondary)]/30",
+                "py-0.5 hover:bg-[var(--secondary)]/30",
                 isUser ? "mari-message-user" : "mari-message-assistant",
-                isGrouped ? "mt-0" : "mt-4",
+                isGrouped ? "mt-0" : "mt-0.5",
                 isStreaming && "bg-[var(--secondary)]/20",
               ),
           isConversationStart && cn("rounded-lg ring-1", CONVERSATION_MESSAGE_CHROME_RING_CLASS),
           isHiddenFromAI && cn("rounded-lg ring-1 saturate-75", CONVERSATION_MESSAGE_CHROME_RING_CLASS),
           multiSelectMode && isSelected && MESSAGE_SELECTION_SURFACE_CLASS,
-          hideActions && thinking && !isUser && "max-sm:pb-8",
         )}
         data-message-id={message.id}
         data-message-role={message.role}
@@ -1063,21 +1105,26 @@ export const ConversationMessage = memo(function ConversationMessage({
         data-grouped={isGrouped || undefined}
         onClick={handleMobileTap}
       >
-        {isBubbleStyle ? <ConversationMessageBubble ctx={ctx} /> : <ConversationMessageLine ctx={ctx} />}
+        <div
+          className={cn("min-w-0 max-w-full", !isBubbleStyle && "flex gap-4")}
+          data-component="ConversationMessage.Content"
+        >
+          {isBubbleStyle ? <ConversationMessageBubble ctx={ctx} /> : <ConversationMessageLine ctx={ctx} />}
+        </div>
 
-        {(!hideActions || (!!thinking && !isUser)) && (
+        {(!hideActions || (hasReasoning && !isUser)) && (
           <ConversationMessageActions
-            isBubbleStyle={isBubbleStyle}
             isUser={isUser}
             showActions={showActions}
-            forceShowActions={hideActions && !!thinking ? true : forceShowActions}
-            thinkingOnly={hideActions && !!thinking}
+            forceShowActions={hideActions && hasReasoning ? true : forceShowActions}
+            thinkingOnly={hideActions && hasReasoning}
             copied={copied}
             translatedText={translatedText}
             isHiddenFromAI={isHiddenFromAI}
             canRegenerate={canRegenerate}
             isLastAssistantMessage={isLastAssistantMessage}
-            thinking={thinking}
+            hasReasoning={hasReasoning}
+            reasoningSummaryUnavailable={reasoningSummaryUnavailable}
             thinkingButtonRef={thinkingButtonRef}
             generationReplay={generationReplay}
             isGuided={isGuided}

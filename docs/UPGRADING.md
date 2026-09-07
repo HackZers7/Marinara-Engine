@@ -100,7 +100,7 @@ cd Marinara-Engine
 
 For a persistent opt-out, set `AUTO_UPDATE_ENABLED=false` in the project `.env`. This affects only launcher-managed Engine updates; manual updates and the in-app update controls remain available.
 
-If you use the Android app icon (the APK), open it and tap **Install / Start Marinara**. The APK is a sideloaded app, which means you installed it outside the official app store. It is a shell over Termux, so it updates the same Termux copy behind it.
+If you use the Android app icon (the APK), [download the latest APK](https://github.com/Pasta-Devs/Marinara-Engine/releases/latest/download/marinara-engine-android.apk) and open the downloaded file so Android updates the wrapper itself. Then open Marinara Engine and tap **Install / Start Marinara** to update and start the Termux copy behind it. The app preserves and exchanges its private localhost credential automatically; an update never asks you for signing credentials or that secret.
 
 ### iPhone and iPad
 
@@ -180,6 +180,12 @@ The **Refresh App** button sits in the same **Updates** section. It is not a ser
 Use **Refresh App** when the app looks stale or shows a blank screen after an update, but the server is already running the new version. It fixes a stuck web page. It does not change the server code, so it is not a substitute for a real upgrade.
 
 The button shows **Refreshing…** while it works, then the app reloads.
+
+## Downgrading to an older version
+
+Upgrades are always safe, but going backwards is not always possible directly. Newer versions of Marinara store chat messages in a newer on-disk format, and a version older than your data's format cannot read it. To protect your chat history, the launcher skips auto-updates that would land on an incompatible version, and the in-app updater refuses to apply one.
+
+If you need an older version anyway, a one-command conversion puts your data back in the old format first. See [Chats show no messages after switching to an older version](TROUBLESHOOTING.md#chats-show-no-messages-after-switching-to-an-older-version) for the steps.
 
 ## If an upgrade fails
 

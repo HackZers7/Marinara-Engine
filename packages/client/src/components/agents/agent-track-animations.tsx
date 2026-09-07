@@ -201,10 +201,28 @@ const continuity: Renderer = (status, color) => (
 const director: Renderer = (status, color) => (
   <div style={STAGE}>
     <span style={{ ...centered(20, 0, 4), height: 12, marginTop: -2, border: `2px solid ${color}`, borderRadius: 2 }} />
-    <div style={{ ...centered(20, 0, -6), height: 6, transformOrigin: "left center", animation: `atk-clap ${dur(1.4, status)} ease-in-out infinite` }}>
+    <div
+      style={{
+        ...centered(20, 0, -6),
+        height: 6,
+        transformOrigin: "left center",
+        animation: `atk-clap ${dur(1.4, status)} ease-in-out infinite`,
+      }}
+    >
       <span style={{ position: "absolute", inset: 0, border: `2px solid ${color}`, borderRadius: 2 }} />
       {[0, 7, 14].map((x) => (
-        <span key={x} style={{ position: "absolute", top: 1, left: x + 1, width: 3, height: 3, background: color, transform: "rotate(45deg)" }} />
+        <span
+          key={x}
+          style={{
+            position: "absolute",
+            top: 1,
+            left: x + 1,
+            width: 3,
+            height: 3,
+            background: color,
+            transform: "rotate(45deg)",
+          }}
+        />
       ))}
     </div>
   </div>
@@ -236,7 +254,14 @@ const echoChamber: Renderer = (status, color) => (
 const expression: Renderer = (status, color) => {
   const d = dur(1.6, status);
   const mouth = (path: string, anim: string): ReactNode => (
-    <svg viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" style={{ ...centered(22), animation: `${anim} ${d} ease-in-out infinite` }}>
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke={color}
+      strokeWidth="2"
+      strokeLinecap="round"
+      style={{ ...centered(22), animation: `${anim} ${d} ease-in-out infinite` }}
+    >
       <circle cx="8.5" cy="10" r="1.2" fill={color} stroke="none" />
       <circle cx="15.5" cy="10" r="1.2" fill={color} stroke="none" />
       <path d={path} />
@@ -254,7 +279,15 @@ const expression: Renderer = (status, color) => {
 const quest: Renderer = (status, color) => (
   <div style={STAGE}>
     <span style={{ ...centered(18), border: `2px solid ${color}`, borderRadius: 4, opacity: 0.55 }} />
-    <svg viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" style={{ ...centered(16), animation: `atk-check ${dur(1.3, status)} ease-in-out infinite` }}>
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke={color}
+      strokeWidth="3"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      style={{ ...centered(16), animation: `atk-check ${dur(1.3, status)} ease-in-out infinite` }}
+    >
       <path d="M5 13l4 4L19 6" />
     </svg>
   </div>
@@ -263,15 +296,28 @@ const quest: Renderer = (status, color) => (
 // background — a sun cresting a horizon ridge.
 const background: Renderer = (status, color) => (
   <div style={{ ...STAGE, overflow: "hidden", borderRadius: "9999px" }}>
-    <span style={{ ...centered(12, 0, 3), borderRadius: "9999px", backgroundColor: color, animation: `atk-rise ${dur(1.8, status)} ease-in-out infinite` }} />
-    <span style={{ position: "absolute", left: 4, right: 4, bottom: 9, height: 2, backgroundColor: color, opacity: 0.85 }} />
+    <span
+      style={{
+        ...centered(12, 0, 3),
+        borderRadius: "9999px",
+        backgroundColor: color,
+        animation: `atk-rise ${dur(1.8, status)} ease-in-out infinite`,
+      }}
+    />
+    <span
+      style={{ position: "absolute", left: 4, right: 4, bottom: 9, height: 2, backgroundColor: color, opacity: 0.85 }}
+    />
   </div>
 );
 
 // character-tracker — a heartbeat with a double thump.
 const characterTracker: Renderer = (status, color) => (
   <div style={STAGE}>
-    <svg viewBox="0 0 24 24" fill={color} style={{ ...centered(20), animation: `atk-beat ${dur(1, status)} ease-in-out infinite` }}>
+    <svg
+      viewBox="0 0 24 24"
+      fill={color}
+      style={{ ...centered(20), animation: `atk-beat ${dur(1, status)} ease-in-out infinite` }}
+    >
       <path d="M12 21s-7-4.6-9.3-9C1 8.6 2.5 5 6 5c2 0 3.2 1.2 4 2.3C10.8 6.2 12 5 14 5c3.5 0 5 3.6 3.3 7-2.3 4.4-9.3 9-9.3 9z" />
     </svg>
   </div>
@@ -307,8 +353,33 @@ const personaStats: Renderer = (status, color) => {
 // custom-tracker — a gauge needle sweeping across a dial.
 const customTracker: Renderer = (status, color) => (
   <div style={STAGE}>
-    <span style={{ ...centered(20, 0, 4), height: 10, marginTop: -1, borderTop: `2px solid ${color}`, borderLeft: `2px solid ${color}`, borderRight: `2px solid ${color}`, borderTopLeftRadius: 12, borderTopRightRadius: 12, opacity: 0.5 }} />
-    <div style={{ position: "absolute", left: "50%", top: "calc(50% + 6px)", width: 2, height: 11, marginLeft: -1, transformOrigin: "bottom center", backgroundColor: color, borderRadius: 2, animation: `atk-needle ${dur(1.3, status)} ease-in-out infinite` }} />
+    <span
+      style={{
+        ...centered(20, 0, 4),
+        height: 10,
+        marginTop: -1,
+        borderTop: `2px solid ${color}`,
+        borderLeft: `2px solid ${color}`,
+        borderRight: `2px solid ${color}`,
+        borderTopLeftRadius: 12,
+        borderTopRightRadius: 12,
+        opacity: 0.5,
+      }}
+    />
+    <div
+      style={{
+        position: "absolute",
+        left: "50%",
+        top: "calc(50% + 6px)",
+        width: 2,
+        height: 11,
+        marginLeft: -1,
+        transformOrigin: "bottom center",
+        backgroundColor: color,
+        borderRadius: 2,
+        animation: `atk-needle ${dur(1.3, status)} ease-in-out infinite`,
+      }}
+    />
     <span style={{ ...centered(4, 0, 6), borderRadius: "9999px", backgroundColor: color }} />
   </div>
 );
@@ -317,19 +388,79 @@ const customTracker: Renderer = (status, color) => (
 const illustrator: Renderer = (status, color) => (
   <div style={STAGE}>
     <div style={{ ...centered(14), animation: `atk-brush ${dur(1.3, status)} ease-in-out infinite` }}>
-      <span style={{ position: "absolute", left: 5, top: 0, width: 3, height: 11, borderRadius: 2, backgroundColor: color, opacity: 0.6 }} />
-      <span style={{ position: "absolute", left: 4, top: 10, width: 5, height: 5, borderRadius: "2px 2px 4px 4px", backgroundColor: color }} />
+      <span
+        style={{
+          position: "absolute",
+          left: 5,
+          top: 0,
+          width: 3,
+          height: 11,
+          borderRadius: 2,
+          backgroundColor: color,
+          opacity: 0.6,
+        }}
+      />
+      <span
+        style={{
+          position: "absolute",
+          left: 4,
+          top: 10,
+          width: 5,
+          height: 5,
+          borderRadius: "2px 2px 4px 4px",
+          backgroundColor: color,
+        }}
+      />
     </div>
-    <span style={{ ...centered(5, 8, 7), borderRadius: "9999px", backgroundColor: color, animation: `atk-dab ${dur(1.3, status)} ease-out infinite` }} />
+    <span
+      style={{
+        ...centered(5, 8, 7),
+        borderRadius: "9999px",
+        backgroundColor: color,
+        animation: `atk-dab ${dur(1.3, status)} ease-out infinite`,
+      }}
+    />
   </div>
 );
 
 // lorebook-keeper — a book with a flipping page.
 const lorebookKeeper: Renderer = (status, color) => (
   <div style={{ ...STAGE, perspective: 60 }}>
-    <span style={{ ...centered(9, -5), height: 16, marginTop: -8, border: `2px solid ${color}`, borderRadius: "2px 0 0 2px", opacity: 0.55 }} />
-    <span style={{ ...centered(9, 5), height: 16, marginTop: -8, border: `2px solid ${color}`, borderRadius: "0 2px 2px 0", opacity: 0.55 }} />
-    <span style={{ position: "absolute", left: "50%", top: "50%", width: 9, height: 16, marginTop: -8, transformOrigin: "left center", backgroundColor: color, opacity: 0.9, borderRadius: "0 2px 2px 0", animation: `atk-flip ${dur(1.5, status)} ease-in-out infinite` }} />
+    <span
+      style={{
+        ...centered(9, -5),
+        height: 16,
+        marginTop: -8,
+        border: `2px solid ${color}`,
+        borderRadius: "2px 0 0 2px",
+        opacity: 0.55,
+      }}
+    />
+    <span
+      style={{
+        ...centered(9, 5),
+        height: 16,
+        marginTop: -8,
+        border: `2px solid ${color}`,
+        borderRadius: "0 2px 2px 0",
+        opacity: 0.55,
+      }}
+    />
+    <span
+      style={{
+        position: "absolute",
+        left: "50%",
+        top: "50%",
+        width: 9,
+        height: 16,
+        marginTop: -8,
+        transformOrigin: "left center",
+        backgroundColor: color,
+        opacity: 0.9,
+        borderRadius: "0 2px 2px 0",
+        animation: `atk-flip ${dur(1.5, status)} ease-in-out infinite`,
+      }}
+    />
   </div>
 );
 
@@ -339,10 +470,40 @@ const cardEvolutionAuditor: Renderer = (status, color) => {
   return (
     <div style={STAGE}>
       {[-8, -3, 2, 7].map((x, i) => (
-        <span key={`a${x}`} style={{ position: "absolute", left: `calc(50% + ${x}px)`, top: "50%", width: 4, height: 4, marginLeft: -2, marginTop: -2, borderRadius: "9999px", backgroundColor: color, animation: `atk-dna-a ${d} ease-in-out infinite`, animationDelay: `${i * 0.14}s` }} />
+        <span
+          key={`a${x}`}
+          style={{
+            position: "absolute",
+            left: `calc(50% + ${x}px)`,
+            top: "50%",
+            width: 4,
+            height: 4,
+            marginLeft: -2,
+            marginTop: -2,
+            borderRadius: "9999px",
+            backgroundColor: color,
+            animation: `atk-dna-a ${d} ease-in-out infinite`,
+            animationDelay: `${i * 0.14}s`,
+          }}
+        />
       ))}
       {[-8, -3, 2, 7].map((x, i) => (
-        <span key={`b${x}`} style={{ position: "absolute", left: `calc(50% + ${x}px)`, top: "50%", width: 4, height: 4, marginLeft: -2, marginTop: -2, borderRadius: "9999px", backgroundColor: color, animation: `atk-dna-b ${d} ease-in-out infinite`, animationDelay: `${i * 0.14}s` }} />
+        <span
+          key={`b${x}`}
+          style={{
+            position: "absolute",
+            left: `calc(50% + ${x}px)`,
+            top: "50%",
+            width: 4,
+            height: 4,
+            marginLeft: -2,
+            marginTop: -2,
+            borderRadius: "9999px",
+            backgroundColor: color,
+            animation: `atk-dna-b ${d} ease-in-out infinite`,
+            animationDelay: `${i * 0.14}s`,
+          }}
+        />
       ))}
     </div>
   );
@@ -351,22 +512,73 @@ const cardEvolutionAuditor: Renderer = (status, color) => {
 // combat — two swords clashing with a spark.
 const combat: Renderer = (status, color) => (
   <div style={STAGE}>
-    <span style={{ ...centered(2, 0), height: 18, marginTop: -9, backgroundColor: color, borderRadius: 2, transformOrigin: "center", animation: `atk-clash-a ${dur(1.1, status)} ease-in-out infinite` }} />
-    <span style={{ ...centered(2, 0), height: 18, marginTop: -9, backgroundColor: color, borderRadius: 2, transformOrigin: "center", animation: `atk-clash-b ${dur(1.1, status)} ease-in-out infinite` }} />
-    <span style={{ ...centered(6, 0, -1), borderRadius: "9999px", backgroundColor: color, animation: `atk-flash ${dur(1.1, status)} ease-out infinite` }} />
+    <span
+      style={{
+        ...centered(2, 0),
+        height: 18,
+        marginTop: -9,
+        backgroundColor: color,
+        borderRadius: 2,
+        transformOrigin: "center",
+        animation: `atk-clash-a ${dur(1.1, status)} ease-in-out infinite`,
+      }}
+    />
+    <span
+      style={{
+        ...centered(2, 0),
+        height: 18,
+        marginTop: -9,
+        backgroundColor: color,
+        borderRadius: 2,
+        transformOrigin: "center",
+        animation: `atk-clash-b ${dur(1.1, status)} ease-in-out infinite`,
+      }}
+    />
+    <span
+      style={{
+        ...centered(6, 0, -1),
+        borderRadius: "9999px",
+        backgroundColor: color,
+        animation: `atk-flash ${dur(1.1, status)} ease-out infinite`,
+      }}
+    />
   </div>
 );
 
 // html — angle brackets converging around a blinking caret.
 const html: Renderer = (status, color) => (
   <div style={STAGE}>
-    <svg viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" style={{ ...centered(22), animation: `atk-brk-l ${dur(1.2, status)} ease-in-out infinite` }}>
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke={color}
+      strokeWidth="2.4"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      style={{ ...centered(22), animation: `atk-brk-l ${dur(1.2, status)} ease-in-out infinite` }}
+    >
       <path d="M9 7l-5 5 5 5" />
     </svg>
-    <svg viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" style={{ ...centered(22), animation: `atk-brk-r ${dur(1.2, status)} ease-in-out infinite` }}>
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke={color}
+      strokeWidth="2.4"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      style={{ ...centered(22), animation: `atk-brk-r ${dur(1.2, status)} ease-in-out infinite` }}
+    >
       <path d="M15 7l5 5-5 5" />
     </svg>
-    <span style={{ ...centered(2, 0), height: 10, marginTop: -5, backgroundColor: color, animation: `atk-blink ${dur(0.8, status)} step-end infinite` }} />
+    <span
+      style={{
+        ...centered(2, 0),
+        height: 10,
+        marginTop: -5,
+        backgroundColor: color,
+        animation: `atk-blink ${dur(0.8, status)} step-end infinite`,
+      }}
+    />
   </div>
 );
 
@@ -403,7 +615,19 @@ const knowledgeRetrieval: Renderer = (status, color) => (
     <span style={{ ...centered(20), border: `2px solid ${color}`, borderRadius: "9999px", opacity: 0.4 }} />
     <span style={{ ...centered(11), border: `1.5px solid ${color}`, borderRadius: "9999px", opacity: 0.3 }} />
     <div style={{ ...centered(20), animation: `atk-spin ${dur(1.3, status)} linear infinite` }}>
-      <span style={{ position: "absolute", left: "50%", top: "50%", width: 9, height: 2, marginTop: -1, transformOrigin: "left center", backgroundColor: color, borderRadius: 2 }} />
+      <span
+        style={{
+          position: "absolute",
+          left: "50%",
+          top: "50%",
+          width: 9,
+          height: 2,
+          marginTop: -1,
+          transformOrigin: "left center",
+          backgroundColor: color,
+          borderRadius: 2,
+        }}
+      />
     </div>
     <span style={{ ...centered(4), borderRadius: "9999px", backgroundColor: color }} />
   </div>
@@ -413,8 +637,23 @@ const knowledgeRetrieval: Renderer = (status, color) => (
 const knowledgeRouter: Renderer = (status, color) => (
   <div style={STAGE}>
     <span style={{ ...centered(6, -6), borderRadius: "9999px", backgroundColor: color, opacity: 0.85 }} />
-    <span style={{ ...centered(4, -6), borderRadius: "9999px", backgroundColor: color, animation: `atk-route ${dur(1.2, status)} ease-out infinite` }} />
-    <span style={{ ...centered(4, -6), borderRadius: "9999px", backgroundColor: color, animation: `atk-route2 ${dur(1.2, status)} ease-out infinite`, animationDelay: `${status === "running" ? 0.2 : 0.5}s` }} />
+    <span
+      style={{
+        ...centered(4, -6),
+        borderRadius: "9999px",
+        backgroundColor: color,
+        animation: `atk-route ${dur(1.2, status)} ease-out infinite`,
+      }}
+    />
+    <span
+      style={{
+        ...centered(4, -6),
+        borderRadius: "9999px",
+        backgroundColor: color,
+        animation: `atk-route2 ${dur(1.2, status)} ease-out infinite`,
+        animationDelay: `${status === "running" ? 0.2 : 0.5}s`,
+      }}
+    />
     <span style={{ ...centered(4, 7, -7), borderRadius: "9999px", border: `1.5px solid ${color}` }} />
     <span style={{ ...centered(4, 7, 7), borderRadius: "9999px", border: `1.5px solid ${color}` }} />
   </div>
@@ -445,8 +684,22 @@ const haptic: Renderer = (status, color) => (
 const cyoa: Renderer = (status, color) => (
   <div style={STAGE}>
     <span style={{ ...centered(5, -7), borderRadius: "9999px", backgroundColor: color }} />
-    <span style={{ ...centered(4, -7), borderRadius: "9999px", backgroundColor: color, animation: `atk-fork-a ${dur(1.3, status)} ease-out infinite` }} />
-    <span style={{ ...centered(4, -7), borderRadius: "9999px", backgroundColor: color, animation: `atk-fork-b ${dur(1.3, status)} ease-out infinite` }} />
+    <span
+      style={{
+        ...centered(4, -7),
+        borderRadius: "9999px",
+        backgroundColor: color,
+        animation: `atk-fork-a ${dur(1.3, status)} ease-out infinite`,
+      }}
+    />
+    <span
+      style={{
+        ...centered(4, -7),
+        borderRadius: "9999px",
+        backgroundColor: color,
+        animation: `atk-fork-b ${dur(1.3, status)} ease-out infinite`,
+      }}
+    />
     <span style={{ ...centered(5, 7, -8), borderRadius: "9999px", border: `1.5px solid ${color}` }} />
     <span style={{ ...centered(5, 7, 8), borderRadius: "9999px", border: `1.5px solid ${color}` }} />
   </div>
@@ -456,10 +709,39 @@ const cyoa: Renderer = (status, color) => (
 const worldState: Renderer = (status, color) => (
   <div style={STAGE}>
     <span style={{ ...centered(15), border: `2px solid ${color}`, borderRadius: "9999px", opacity: 0.85 }} />
-    <span style={{ ...centered(15), borderLeft: `1.5px solid ${color}`, borderRight: `1.5px solid ${color}`, borderRadius: "9999px", opacity: 0.5, transform: "translate(-50%,-50%) scaleX(0.45)" }} />
-    <span style={{ ...centered(15), borderTop: `1.5px solid ${color}`, borderBottom: `1.5px solid ${color}`, borderRadius: "9999px", opacity: 0.5, transform: "translate(-50%,-50%) scaleY(0.45)" }} />
+    <span
+      style={{
+        ...centered(15),
+        borderLeft: `1.5px solid ${color}`,
+        borderRight: `1.5px solid ${color}`,
+        borderRadius: "9999px",
+        opacity: 0.5,
+        transform: "translate(-50%,-50%) scaleX(0.45)",
+      }}
+    />
+    <span
+      style={{
+        ...centered(15),
+        borderTop: `1.5px solid ${color}`,
+        borderBottom: `1.5px solid ${color}`,
+        borderRadius: "9999px",
+        opacity: 0.5,
+        transform: "translate(-50%,-50%) scaleY(0.45)",
+      }}
+    />
     <div style={{ ...centered(22), animation: `atk-spin ${dur(1.6, status)} linear infinite` }}>
-      <span style={{ position: "absolute", left: "50%", top: 0, width: 4, height: 4, marginLeft: -2, borderRadius: "9999px", backgroundColor: color }} />
+      <span
+        style={{
+          position: "absolute",
+          left: "50%",
+          top: 0,
+          width: 4,
+          height: 4,
+          marginLeft: -2,
+          borderRadius: "9999px",
+          backgroundColor: color,
+        }}
+      />
     </div>
   </div>
 );
@@ -467,9 +749,25 @@ const worldState: Renderer = (status, color) => (
 // about-me-keeper — a persona card with a pulsing profile ring.
 const aboutMeKeeper: Renderer = (status, color) => (
   <div style={STAGE}>
-    <span style={{ ...centered(18), animation: `atk-pulse ${dur(1.4, status)} ease-in-out infinite`, border: `1.5px solid ${color}`, borderRadius: "9999px", opacity: 0.5 }} />
+    <span
+      style={{
+        ...centered(18),
+        animation: `atk-pulse ${dur(1.4, status)} ease-in-out infinite`,
+        border: `1.5px solid ${color}`,
+        borderRadius: "9999px",
+        opacity: 0.5,
+      }}
+    />
     <span style={{ ...centered(6, 0, -3), borderRadius: "9999px", backgroundColor: color }} />
-    <span style={{ ...centered(12, 0, 6), height: 7, marginTop: -1, borderRadius: "9999px 9999px 0 0", backgroundColor: color }} />
+    <span
+      style={{
+        ...centered(12, 0, 6),
+        height: 7,
+        marginTop: -1,
+        borderRadius: "9999px 9999px 0 0",
+        backgroundColor: color,
+      }}
+    />
   </div>
 );
 
@@ -480,7 +778,15 @@ const aboutMeKeeper: Renderer = (status, color) => (
 // main-generation — the model "typing" the visible reply.
 const mainGeneration: Renderer = (status, color) => (
   <div style={STAGE}>
-    <svg viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ ...centered(22, 0, -1), opacity: 0.9 }}>
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke={color}
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      style={{ ...centered(22, 0, -1), opacity: 0.9 }}
+    >
       <path d="M21 15a2 2 0 0 1-2 2H8l-4 3V5a2 2 0 0 1 2-2h13a2 2 0 0 1 2 2z" />
     </svg>
     {[-4, 0, 4].map((x, i) => (
@@ -503,11 +809,27 @@ const translation: Renderer = (status, color) => {
   const d = dur(1.8, status);
   return (
     <div style={STAGE}>
-      <svg viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" style={{ ...centered(20), animation: `atk-emote-a ${d} ease-in-out infinite` }}>
+      <svg
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke={color}
+        strokeWidth="2.4"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        style={{ ...centered(20), animation: `atk-emote-a ${d} ease-in-out infinite` }}
+      >
         <path d="M6 19l6-14 6 14" />
         <path d="M8.5 14h7" />
       </svg>
-      <svg viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ ...centered(20), animation: `atk-emote-b ${d} ease-in-out infinite` }}>
+      <svg
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke={color}
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        style={{ ...centered(20), animation: `atk-emote-b ${d} ease-in-out infinite` }}
+      >
         <path d="M4 7h16" />
         <path d="M12 4v3" />
         <path d="M6 11h12v9H6z" />
@@ -533,7 +855,17 @@ const fallback: Renderer = (status, color) => (
           animationDelay: `${i * (status === "running" ? 0.32 : 0.8)}s`,
         }}
       >
-        <span style={{ position: "absolute", left: -2.5, top: -11, width: 5, height: 5, borderRadius: "9999px", backgroundColor: color }} />
+        <span
+          style={{
+            position: "absolute",
+            left: -2.5,
+            top: -11,
+            width: 5,
+            height: 5,
+            borderRadius: "9999px",
+            backgroundColor: color,
+          }}
+        />
       </div>
     ))}
   </div>

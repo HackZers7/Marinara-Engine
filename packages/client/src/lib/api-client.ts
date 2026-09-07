@@ -109,6 +109,23 @@ export function getApiErrorMessage(value: unknown, fallback: string): string {
   return fallback;
 }
 
+/** Format the first usable Zod validation issue in an API error payload. */
+export function formatFirstApiValidationIssue(error: unknown, fallback: string): string {
+  if (error instanceof ApiError && isRecord(error.payload) && Array.isArray(error.payload.issues)) {
+    for (const issue of error.payload.issues) {
+      if (!isRecord(issue) || typeof issue.message !== "string" || !issue.message.trim()) continue;
+      const path = Array.isArray(issue.path)
+        ? issue.path.filter((segment) => typeof segment === "string" || typeof segment === "number").join(".")
+        : typeof issue.path === "string"
+          ? issue.path
+          : "";
+      return path ? `${path}: ${issue.message.trim()}` : issue.message.trim();
+    }
+  }
+  if (error instanceof Error && error.message.trim()) return error.message;
+  return fallback;
+}
+
 function getSseDataPayload(line: string): string | null {
   const normalized = line.endsWith("\r") ? line.slice(0, -1) : line;
   if (!normalized.startsWith("data:")) return null;
@@ -146,10 +163,6 @@ async function releaseSseReader(reader: ReadableStreamDefaultReader<Uint8Array>,
   } catch {
     /* lock may already be released */
   }
-}
-
-function getSseErrorMessage(parsed: Record<string, unknown>): string {
-  return typeof parsed.data === "string" ? parsed.data : "Generation error";
 }
 
 export function getJsonRepairRequest(error: unknown): JsonRepairRequest | null {
@@ -352,77 +365,7 @@ export const api = {
   },
 
   /**
-   * Stream an SSE endpoint. Returns an async iterable of parsed events.
-   */
-  stream: async function* (path: string, body?: unknown, signal?: AbortSignal): AsyncGenerator<string> {
-    const res = await apiFetch(path, {
-      method: "POST",
-      body: body !== undefined ? JSON.stringify(body) : undefined,
-      signal,
-    });
-    showGenerationFallbackHeader(res);
-
-    if (!res.ok || !res.body) {
-      let detail = `HTTP ${res.status}`;
-      let payload: unknown;
-      try {
-        const text = await res.text();
-        const json = JSON.parse(text) as unknown;
-        payload = json;
-        if (isRecord(json)) detail = findNestedApiErrorMessage(json.error ?? json.message) || text.slice(0, 200);
-        else detail = text.slice(0, 200);
-      } catch {
-        /* couldn't parse body */
-      }
-      throw new ApiError(res.status, detail, payload);
-    }
-
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
-    let completed = false;
-
-    try {
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) {
-          completed = true;
-          buffer += decoder.decode();
-          break;
-        }
-
-        buffer += decoder.decode(value, { stream: true });
-        const parsedBuffer = readSseDataPayloads(buffer);
-        buffer = parsedBuffer.rest;
-
-        for (const data of parsedBuffer.payloads) {
-          if (data === "[DONE]") return;
-          const parsed = parseSseJsonPayload(data);
-          if (!parsed) continue;
-          if (parsed.type === "fallback_used") showGenerationFallbackToast(parsed.data);
-          else if (parsed.type === "token" && typeof parsed.data === "string") yield parsed.data;
-          else if (parsed.type === "error") throw new ApiError(500, getSseErrorMessage(parsed), parsed);
-          else if (parsed.type === "done") return;
-        }
-      }
-
-      for (const data of readSseDataPayloads(buffer, true).payloads) {
-        if (data === "[DONE]") return;
-        const parsed = parseSseJsonPayload(data);
-        if (!parsed) continue;
-        if (parsed.type === "fallback_used") showGenerationFallbackToast(parsed.data);
-        else if (parsed.type === "token" && typeof parsed.data === "string") yield parsed.data;
-        else if (parsed.type === "error") throw new ApiError(500, getSseErrorMessage(parsed), parsed);
-        else if (parsed.type === "done") return;
-      }
-    } finally {
-      await releaseSseReader(reader, completed);
-    }
-  },
-
-  /**
    * Stream an SSE endpoint. Returns an async iterable of all typed events.
-   * Unlike `stream()`, this does NOT filter to only token events.
    */
   streamEvents: async function* (
     path: string,
@@ -439,14 +382,26 @@ export const api = {
 
     if (!res.ok || !res.body) {
       let detail = `HTTP ${res.status}`;
+      let payload: unknown;
       try {
         const text = await res.text();
-        const json = JSON.parse(text);
-        detail = json.error || json.message || text.slice(0, 200);
+        try {
+          const json = JSON.parse(text) as Record<string, unknown>;
+          payload = json;
+          detail =
+            (typeof json.error === "string" && json.error) ||
+            (typeof json.message === "string" && json.message) ||
+            text.slice(0, 200);
+        } catch {
+          detail = text.slice(0, 200) || detail;
+        }
       } catch {
-        /* couldn't parse body */
+        /* couldn't read body */
       }
-      throw new ApiError(res.status, detail);
+      // Carry the parsed body: pre-stream rejections (e.g. a spatial owner-turn
+      // 409) put their machine-readable `code` there, and the generate catch
+      // path forwards it into the synthesized capability event.
+      throw new ApiError(res.status, detail, payload);
     }
 
     const reader = res.body.getReader();
@@ -454,18 +409,15 @@ export const api = {
     let buffer = "";
     let completed = false;
 
-    // A backgrounded tab can leave the underlying socket half-open: after the
-    // tab resumes, reader.read() may never settle again and the stream hangs.
-    // Give a healthy stream enough time to deliver either content or the server's
-    // 15-second SSE keepalive before detaching. Disconnecting immediately on
-    // resume replaces a live typewriter with the fully persisted reply.
-    const watchResume = options?.disconnectOnResume === true && typeof document !== "undefined";
+    // A half-open socket can leave reader.read() pending forever, either after a
+    // backgrounded tab resumes or while the page remains visible. Give a healthy
+    // stream enough time to deliver content or the server's 15-second keepalive.
+    const watchPendingRead = options?.disconnectOnResume === true && typeof document !== "undefined";
     const resumeDisconnectGraceMs = Math.max(0, options?.resumeDisconnectGraceMs ?? 20_000);
-    let wasHidden = watchResume && document.visibilityState === "hidden";
     let readPending = false;
     let rejectOnResume: ((error: Error) => void) | null = null;
     let resumeDisconnectTimer: ReturnType<typeof setTimeout> | null = null;
-    const resumeDisconnect = watchResume
+    const resumeDisconnect = watchPendingRead
       ? new Promise<never>((_, reject) => {
           rejectOnResume = reject;
         })
@@ -476,7 +428,7 @@ export const api = {
       resumeDisconnectTimer = null;
     };
     const startResumeDisconnectTimer = () => {
-      if (!wasHidden || !readPending || resumeDisconnectTimer !== null) return;
+      if (!readPending || document.visibilityState !== "visible" || resumeDisconnectTimer !== null) return;
       resumeDisconnectTimer = setTimeout(() => {
         resumeDisconnectTimer = null;
         rejectOnResume?.(new StreamResumeDisconnectError());
@@ -484,19 +436,18 @@ export const api = {
     };
     const onVisibility = () => {
       if (document.visibilityState === "hidden") {
-        wasHidden = true;
         clearResumeDisconnectTimer();
       } else {
         startResumeDisconnectTimer();
       }
     };
-    if (watchResume) document.addEventListener("visibilitychange", onVisibility);
+    if (watchPendingRead) document.addEventListener("visibilitychange", onVisibility);
 
     try {
       while (true) {
         const read = reader.read();
         readPending = true;
-        if (watchResume && document.visibilityState === "visible") startResumeDisconnectTimer();
+        if (watchPendingRead) startResumeDisconnectTimer();
         let result: ReadableStreamReadResult<Uint8Array>;
         try {
           result = resumeDisconnect ? await Promise.race([read, resumeDisconnect]) : await read;
@@ -505,7 +456,6 @@ export const api = {
           clearResumeDisconnectTimer();
         }
         const { done, value } = result;
-        if (watchResume && document.visibilityState === "visible") wasHidden = false;
         if (done) {
           completed = true;
           buffer += decoder.decode();
@@ -535,7 +485,7 @@ export const api = {
         if (parsed.type === "error") return;
       }
     } finally {
-      if (watchResume) document.removeEventListener("visibilitychange", onVisibility);
+      if (watchPendingRead) document.removeEventListener("visibilitychange", onVisibility);
       clearResumeDisconnectTimer();
       await releaseSseReader(reader, completed);
     }

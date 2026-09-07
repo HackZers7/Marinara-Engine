@@ -12,12 +12,18 @@ import {
   type SetStateAction,
 } from "react";
 import { toast } from "sonner";
-import { usePresets, useDeletePreset, useDuplicatePreset, useSetDefaultPreset } from "../../hooks/use-presets";
+import {
+  usePresets,
+  useDeletePreset,
+  useDuplicatePreset,
+  useSetDefaultPreset,
+  useUploadPresetImage,
+} from "../../hooks/use-presets";
 import { useUpdateChat, useUpdateChatMetadata } from "../../hooks/use-chats";
 import {
   useRegexScripts,
   useDeleteRegexScript,
-  useCreateRegexScript,
+  useImportRegexScript,
   useUpdateRegexScript,
   useReorderRegexScripts,
   type RegexScriptRow,
@@ -59,12 +65,13 @@ import {
   Wrench,
   Upload,
   ShieldCheck,
+  Camera,
 } from "lucide-react";
 import { cn } from "../../lib/utils";
 import { sortBasicPanelItems } from "../../lib/panel-sort";
 import { downloadJsonFile } from "../../lib/download-json";
 import { downloadZipFile } from "../../lib/download-zip";
-import { getFolderImportEntries } from "@marinara-engine/shared";
+import { getFolderImportEntries, isPatternSafe, isStockMarinaraUniversalPreset } from "@marinara-engine/shared";
 import {
   createCustomToolFolderPackageFiles,
   importCustomToolEntries,
@@ -91,26 +98,21 @@ import { useLocalizedUiText } from "../../localization/use-localized-ui-text";
 import { useTranslation as useUiTranslation } from "react-i18next";
 import { clearActiveChatResourceDrag, writeChatResourceDragPayload } from "../../lib/chat-resource-drag";
 import { ChatResourceActionButton } from "../chat/ChatResourceActionButton";
+import { resolvePresetArtwork } from "../../lib/preset-artwork";
 
 type PresetRow = {
   id: string;
   name: string;
   description: string;
+  imagePath?: string | null;
   wrapFormat?: string;
   isDefault?: string | boolean;
   author?: string;
+  systemKey?: string;
   sectionOrder?: string | string[];
   createdAt?: string;
   updatedAt?: string;
 };
-
-const MARINARA_UNIVERSAL_PRESET_NAME = "Marinara's Universal Preset";
-const MARINARA_UNIVERSAL_PRESET_AUTHOR = "Marinara";
-const MARINARA_UNIVERSAL_PRESET_ARTWORK = "/illustrations/marinara-universal-preset.webp";
-
-function isMarinaraUniversalPreset(preset: PresetRow) {
-  return preset.name === MARINARA_UNIVERSAL_PRESET_NAME && preset.author === MARINARA_UNIVERSAL_PRESET_AUTHOR;
-}
 
 type JsonRecord = Record<string, unknown>;
 
@@ -198,6 +200,7 @@ function serializeRegexScript(script: RegexScriptRow) {
       ? script.applyMode
       : readRegexApplyMode(script as unknown as Record<string, unknown>),
     targetCharacterIds: parseStringArray(script.targetCharacterIds),
+    targetPromptPresetIds: parseStringArray(script.targetPromptPresetIds),
     order: script.order,
     minDepth: script.minDepth,
     maxDepth: script.maxDepth,
@@ -266,6 +269,7 @@ function normalizeRegexImportEntry(entry: unknown, fallbackOrder: number) {
     promptOnly: readRegexApplyMode(entry) === "prompt",
     applyMode: readRegexApplyMode(entry),
     targetCharacterIds: parseStringArray(entry.targetCharacterIds),
+    targetPromptPresetIds: parseStringArray(entry.targetPromptPresetIds),
     order: typeof entry.order === "number" ? fallbackOrder + entry.order : fallbackOrder,
     minDepth: parseNullableNumber(entry.minDepth),
     maxDepth: parseNullableNumber(entry.maxDepth),
@@ -282,8 +286,9 @@ export function PresetsPanel() {
   const deletePreset = useDeletePreset();
   const duplicatePreset = useDuplicatePreset();
   const setDefaultPreset = useSetDefaultPreset();
+  const uploadPresetImage = useUploadPresetImage();
   const deleteRegex = useDeleteRegexScript();
-  const createRegexScript = useCreateRegexScript();
+  const importRegexScript = useImportRegexScript();
   const updateRegex = useUpdateRegexScript();
   const reorderRegexScripts = useReorderRegexScripts();
   const createCustomTool = useCreateCustomTool();
@@ -310,6 +315,7 @@ export function PresetsPanel() {
   const [selectedPresetIds, setSelectedPresetIds] = useState<Set<string>>(new Set());
   const [exportingSelected, setExportingSelected] = useState(false);
   const [regexImportError, setRegexImportError] = useState<string | null>(null);
+  const [regexImportWarning, setRegexImportWarning] = useState<string | null>(null);
   const [regexImportSuccess, setRegexImportSuccess] = useState<string | null>(null);
   const [functionImportError, setFunctionImportError] = useState<string | null>(null);
   const [functionImportSuccess, setFunctionImportSuccess] = useState<string | null>(null);
@@ -322,6 +328,8 @@ export function PresetsPanel() {
   const [editingFolderId, setEditingFolderId] = useState<string | null>(null);
   const [editFolderName, setEditFolderName] = useState("");
   const [draggedPresetId, setDraggedPresetId] = useState<string | null>(null);
+  const presetImageInputRef = useRef<HTMLInputElement>(null);
+  const imageTargetPresetIdRef = useRef<string | null>(null);
   const suppressPresetClickRef = useRef(false);
   const handleFolderRenameGesture = useFolderRenameGesture();
 
@@ -449,6 +457,54 @@ export function PresetsPanel() {
     });
   }, []);
 
+  const handlePickPresetImage = useCallback((presetId: string) => {
+    imageTargetPresetIdRef.current = presetId;
+    if (presetImageInputRef.current) {
+      presetImageInputRef.current.value = "";
+      presetImageInputRef.current.click();
+    }
+  }, []);
+
+  const handlePresetImageSelected = useCallback(
+    (event: ChangeEvent<HTMLInputElement>) => {
+      const file = event.target.files?.[0];
+      const presetId = imageTargetPresetIdRef.current;
+      if (!file || !presetId) return;
+
+      if (!file.type.startsWith("image/")) {
+        imageTargetPresetIdRef.current = null;
+        toast.error(localizeUi("ui.panels.presetspanel.chooseAnImageFileForThePresetPicture"));
+        return;
+      }
+
+      const reader = new FileReader();
+      reader.onload = async () => {
+        const image = typeof reader.result === "string" ? reader.result : "";
+        if (!image) {
+          toast.error(localizeUi("ui.panels.agentspanel.couldNotReadThatImage"));
+          return;
+        }
+
+        try {
+          await uploadPresetImage.mutateAsync({ id: presetId, image });
+          toast.success(localizeUi("ui.panels.presetspanel.presetPictureUpdated"));
+        } catch (error) {
+          toast.error(
+            error instanceof Error ? error.message : localizeUi("ui.panels.presetspanel.failedToUploadPresetPicture"),
+          );
+        } finally {
+          imageTargetPresetIdRef.current = null;
+        }
+      };
+      reader.onerror = () => {
+        imageTargetPresetIdRef.current = null;
+        toast.error(localizeUi("ui.panels.agentspanel.couldNotReadThatImage"));
+      };
+      reader.readAsDataURL(file);
+    },
+    [localizeUi, uploadPresetImage],
+  );
+
   const handleExportSelected = async () => {
     if (selectedPresetIds.size === 0) return;
     setExportingSelected(true);
@@ -501,6 +557,7 @@ export function PresetsPanel() {
   const handleImportRegex = useCallback(
     async (event: ChangeEvent<HTMLInputElement>) => {
       setRegexImportError(null);
+      setRegexImportWarning(null);
       setRegexImportSuccess(null);
       const file = event.target.files?.[0];
       if (!file) return;
@@ -513,23 +570,34 @@ export function PresetsPanel() {
 
         let imported = 0;
         const failed: string[] = [];
+        const warnings: string[] = [];
         const orderBase = getNextRegexOrderBase((regexScripts ?? []) as RegexScriptRow[]);
         for (const [index, entry] of entries.entries()) {
           const unsupportedPlacements = getUnsupportedStRegexPlacements(entry);
-          if (unsupportedPlacements.length > 0) {
-            failed.push(
-              `Entry ${index + 1}: unsupported SillyTavern placement ${unsupportedPlacements.join(", ")} was skipped.`,
-            );
-            continue;
-          }
           const normalized = normalizeRegexImportEntry(entry, orderBase + index);
           if (!normalized) {
             failed.push(`Entry ${index + 1}: missing name or find pattern.`);
             continue;
           }
           try {
-            await createRegexScript.mutateAsync(normalized);
+            await importRegexScript.mutateAsync(normalized);
             imported++;
+            if (!isPatternSafe(normalized.findRegex.replace(/\{\{[^}]*\}\}/g, "x"))) {
+              warnings.push(
+                localizeUi("ui.regex.importUnsafePatternWarning", {
+                  value1: index + 1,
+                  value2: normalized.name,
+                }),
+              );
+            }
+            if (unsupportedPlacements.length > 0) {
+              warnings.push(
+                localizeUi("ui.panels.presetspanel.ignoredUnsupportedRegexPlacements", {
+                  value1: index + 1,
+                  value2: unsupportedPlacements.join(", "),
+                }),
+              );
+            }
           } catch (error) {
             failed.push(`Entry ${index + 1} (${normalized.name}): ${describeImportError(error)}`);
           }
@@ -541,6 +609,9 @@ export function PresetsPanel() {
         if (failed.length > 0) {
           setRegexImportError(`Skipped ${failed.length} regex script${failed.length === 1 ? "" : "s"}. ${failed[0]}`);
         }
+        if (warnings.length > 0) {
+          setRegexImportWarning(warnings.join(" "));
+        }
         if (imported === 0 && failed.length === 0) {
           setRegexImportError("No valid regex scripts found in file.");
         }
@@ -550,12 +621,27 @@ export function PresetsPanel() {
 
       event.target.value = "";
     },
-    [createRegexScript, regexScripts],
+    [importRegexScript, localizeUi, regexScripts],
   );
 
-  const handleExportFunctions = useCallback(() => {
+  const handleExportFunctions = useCallback(async () => {
     if (customToolRows.length === 0) {
       toast.error(localizeUi("ui.panels.presetspanel.noFunctionsToExport"));
+      return;
+    }
+
+    const includesWebhookCredentials = customToolRows.some(
+      (tool) => tool.executionType === "webhook" && Boolean(tool.webhookUrl),
+    );
+    if (
+      includesWebhookCredentials &&
+      !(await showConfirmDialog({
+        title: localizeUi("ui.panels.presetspanel.exportWebhookCredentials"),
+        message: localizeUi("ui.panels.presetspanel.exportWebhookCredentialsWarning"),
+        confirmLabel: localizeUi("ui.panels.presetspanel.exportWithCredentials"),
+        tone: "destructive",
+      }))
+    ) {
       return;
     }
 
@@ -815,7 +901,18 @@ export function PresetsPanel() {
       const sectionCount = getSectionCount(preset);
       const wrapFormat = (preset.wrapFormat ?? "xml") as string;
       const isDefault = String(preset.isDefault) === "true";
-      const hasMarinaraArtwork = isMarinaraUniversalPreset(preset);
+      const isStock = isStockMarinaraUniversalPreset(preset);
+      const artwork = resolvePresetArtwork(preset);
+      const pictureLabel = artwork
+        ? localizeUi("ui.panels.presetspanel.replacePresetPicture")
+        : localizeUi("ui.panels.presetspanel.uploadPresetPicture");
+      const imageContent = artwork ? (
+        <img src={artwork} alt="" className="h-full w-full object-cover" draggable={false} />
+      ) : (
+        <FileText size="1rem" />
+      );
+      const imageClasses =
+        "mari-panel-gradient-surface mari-panel-gradient--presets relative flex h-10 w-10 shrink-0 items-center justify-center rounded-xl shadow-sm";
 
       return (
         <div
@@ -879,29 +976,44 @@ export function PresetsPanel() {
                 {isBulkSelected && <Check size="0.75rem" />}
               </div>
             )}
-            <div className="mari-panel-gradient-surface mari-panel-gradient--presets relative flex h-10 w-10 shrink-0 items-center justify-center rounded-xl shadow-sm">
-              {hasMarinaraArtwork ? (
-                <img
-                  src={MARINARA_UNIVERSAL_PRESET_ARTWORK}
-                  alt=""
-                  className="h-full w-full rounded-xl object-cover"
-                  draggable={false}
-                />
-              ) : (
-                <FileText size="1rem" />
-              )}
-              {!selectionMode && isSelected && (
-                <div className="mari-panel-gradient-surface mari-panel-gradient--presets absolute -right-1 -top-1 flex h-4 w-4 items-center justify-center rounded-md shadow-sm">
-                  <Check size="0.625rem" />
-                </div>
-              )}
-            </div>
+            {selectionMode ? (
+              <div className={cn(imageClasses, "overflow-hidden")}>{imageContent}</div>
+            ) : isStock ? (
+              <div className={cn(imageClasses, "overflow-hidden")}>{imageContent}</div>
+            ) : (
+              <button
+                type="button"
+                data-preset-image-action={preset.id}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  handlePickPresetImage(preset.id);
+                }}
+                className={cn(
+                  imageClasses,
+                  "group/preset-picture transition-transform hover:scale-105 focus:outline-none focus:ring-2 focus:ring-[var(--marinara-chat-chrome-focus-ring)]",
+                )}
+                title={pictureLabel}
+                aria-label={pictureLabel}
+              >
+                <span className="absolute inset-0 flex items-center justify-center overflow-hidden rounded-xl">
+                  {imageContent}
+                  <span className="absolute inset-0 flex items-center justify-center bg-black/45 opacity-0 transition-opacity group-hover/preset-picture:opacity-100 group-focus-visible/preset-picture:opacity-100 [@media(pointer:coarse)]:opacity-100">
+                    <Camera size="0.875rem" />
+                  </span>
+                </span>
+                {isSelected && (
+                  <span
+                    data-preset-selected-indicator
+                    className="mari-panel-gradient-surface mari-panel-gradient--presets absolute -right-1 -top-1 z-10 flex h-4 w-4 items-center justify-center rounded-md shadow-sm"
+                  >
+                    <Check size="0.625rem" />
+                  </span>
+                )}
+              </button>
+            )}
             <div
-              className={cn(
-                "min-w-0 flex-1",
-                !selectionMode &&
-                  "pr-0 transition-[padding] max-md:pr-32 [@media(pointer:coarse)]:pr-32 [@media(pointer:fine)]:group-hover:pr-32",
-              )}
+              data-preset-open-action={preset.id}
+              className={cn("min-w-0 flex-1", !selectionMode && "pr-0 max-md:pr-36 [@media(pointer:coarse)]:pr-36")}
             >
               <div className="flex min-w-0 items-center gap-1.5">
                 <span className="min-w-0 flex-1 truncate text-sm font-medium leading-5" title={preset.name}>
@@ -934,7 +1046,7 @@ export function PresetsPanel() {
           </div>
 
           {!selectionMode && (
-            <div className="absolute right-2 top-1/2 -translate-y-1/2 flex shrink-0 items-center gap-0.5 rounded-lg bg-[var(--sidebar)] px-1 py-0.5 opacity-0 shadow-sm ring-1 ring-[var(--border)] transition-opacity group-hover:opacity-100 max-md:opacity-100">
+            <div className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 flex shrink-0 items-center gap-0.5 rounded-lg bg-[var(--sidebar)] px-1 py-0.5 opacity-0 shadow-sm ring-1 ring-[var(--border)] transition-opacity group-hover:opacity-100 [@media(pointer:fine)]:group-focus-within:opacity-100 max-md:opacity-100 [@media(pointer:coarse)]:opacity-100 group-hover:[&_button]:pointer-events-auto [@media(pointer:fine)]:group-focus-within:[&_button]:pointer-events-auto max-md:[&_button]:pointer-events-auto [@media(pointer:coarse)]:[&_button]:pointer-events-auto">
               <ChatResourceActionButton
                 payload={{ version: 1, kind: "preset", ids: [preset.id], label: preset.name }}
               />
@@ -1000,27 +1112,29 @@ export function PresetsPanel() {
               >
                 <Copy size="0.75rem" />
               </button>
-              <button
-                type="button"
-                onClick={async (event) => {
-                  event.stopPropagation();
-                  if (
-                    await showConfirmDialog({
-                      title: localizeUi("ui.panels.presetspanel.deletePreset_a513ba6"),
-                      message: localizeUi("ui.panels.agentspanel.deleteValue1", { value1: preset.name }),
-                      confirmLabel: localizeUi("lorebook.editor.batch.delete"),
-                      tone: "destructive",
-                    })
-                  ) {
-                    deletePreset.mutate(preset.id);
-                  }
-                }}
-                className="mari-chrome-control mari-chrome-control--small p-1.5"
-                title={localizeUi("lorebook.editor.batch.delete")}
-                aria-label={localizeUi("ui.panels.presetspanel.deletePreset")}
-              >
-                <Trash2 size="0.75rem" />
-              </button>
+              {!isStock && (
+                <button
+                  type="button"
+                  onClick={async (event) => {
+                    event.stopPropagation();
+                    if (
+                      await showConfirmDialog({
+                        title: localizeUi("ui.panels.presetspanel.deletePreset_a513ba6"),
+                        message: localizeUi("ui.panels.agentspanel.deleteValue1", { value1: preset.name }),
+                        confirmLabel: localizeUi("lorebook.editor.batch.delete"),
+                        tone: "destructive",
+                      })
+                    ) {
+                      deletePreset.mutate(preset.id);
+                    }
+                  }}
+                  className="mari-chrome-control mari-chrome-control--small p-1.5"
+                  title={localizeUi("lorebook.editor.batch.delete")}
+                  aria-label={localizeUi("ui.panels.presetspanel.deletePreset")}
+                >
+                  <Trash2 size="0.75rem" />
+                </button>
+              )}
             </div>
           )}
         </div>
@@ -1034,6 +1148,7 @@ export function PresetsPanel() {
       duplicatePreset,
       getDraggedPresetIds,
       getSectionCount,
+      handlePickPresetImage,
       openPresetDetail,
       selectedPresetIds,
       selectPreset,
@@ -1047,6 +1162,14 @@ export function PresetsPanel() {
 
   return (
     <div className="flex min-h-full flex-col gap-2 p-3">
+      <input
+        ref={presetImageInputRef}
+        type="file"
+        accept="image/*"
+        className="hidden"
+        onChange={handlePresetImageSelected}
+      />
+
       {/* Action buttons */}
       <div className="flex gap-2">
         <button
@@ -1181,7 +1304,7 @@ export function PresetsPanel() {
                     value2: folder.name,
                   })}
                   title={localizeUi("ui.panels.backgroundpicker.doubleClickDoubleTapOrPressF2ToRename")}
-                  className="group relative flex cursor-pointer items-center gap-1.5 rounded-lg px-2 py-1.5 transition-all hover:bg-[var(--sidebar-accent)]/40"
+                  className="group relative flex cursor-pointer items-center gap-1.5 rounded-lg px-2 py-1.5 transition-all hover:bg-[var(--sidebar-accent)]/40 max-md:pr-12 [@media(pointer:coarse)]:pr-12"
                   onClick={(event) =>
                     handleFolderRenameGesture(folder.id, event, {
                       onSingleClick: () => setExpandedFolderId(isExpanded ? null : folder.id),
@@ -1233,11 +1356,25 @@ export function PresetsPanel() {
                     )}
                   </div>
                   {(presetSearchActive ? folderItems.length : folder.itemIds.length) > 0 && (
-                    <span className="shrink-0 text-[0.5625rem] text-[var(--muted-foreground)]">
+                    <span
+                      data-folder-item-count="inline"
+                      className="shrink-0 text-[0.5625rem] text-[var(--muted-foreground)] max-md:hidden [@media(pointer:coarse)]:hidden"
+                    >
                       {presetSearchActive ? folderItems.length : folder.itemIds.length}
                     </span>
                   )}
-                  <div className="absolute right-2 top-1/2 flex -translate-y-1/2 shrink-0 items-center gap-0.5 rounded-lg bg-[var(--sidebar)] px-1 py-0.5 opacity-0 shadow-sm ring-1 ring-[var(--border)] transition-opacity group-hover:opacity-100 max-md:opacity-100">
+                  <div
+                    data-folder-actions
+                    className="pointer-events-none absolute right-2 top-1/2 flex -translate-y-1/2 shrink-0 items-center gap-0.5 rounded-lg bg-[var(--sidebar)] px-1 py-0.5 opacity-0 shadow-sm ring-1 ring-[var(--border)] transition-opacity group-hover:opacity-100 [@media(pointer:fine)]:group-focus-within:opacity-100 max-md:opacity-100 [@media(pointer:coarse)]:opacity-100 group-hover:[&_button]:pointer-events-auto [@media(pointer:fine)]:group-focus-within:[&_button]:pointer-events-auto max-md:[&_button]:pointer-events-auto [@media(pointer:coarse)]:[&_button]:pointer-events-auto"
+                  >
+                    {(presetSearchActive ? folderItems.length : folder.itemIds.length) > 0 && (
+                      <span
+                        data-folder-item-count="actions"
+                        className="hidden px-1 text-[0.5625rem] text-[var(--muted-foreground)] max-md:inline [@media(pointer:coarse)]:inline"
+                      >
+                        {presetSearchActive ? folderItems.length : folder.itemIds.length}
+                      </span>
+                    )}
                     <button
                       type="button"
                       onClick={(event) => {
@@ -1341,6 +1478,7 @@ export function PresetsPanel() {
         handleImportRegex={handleImportRegex}
         handleExportRegex={handleExportRegex}
         regexImportError={regexImportError}
+        regexImportWarning={regexImportWarning}
         regexImportSuccess={regexImportSuccess}
         sortedRegexScripts={sortedRegexScripts}
         draggedRegexId={draggedRegexId}
@@ -1407,6 +1545,7 @@ function RegexSection({
   handleImportRegex,
   handleExportRegex,
   regexImportError,
+  regexImportWarning,
   regexImportSuccess,
   sortedRegexScripts,
   draggedRegexId,
@@ -1423,6 +1562,7 @@ function RegexSection({
   handleImportRegex: (event: ChangeEvent<HTMLInputElement>) => void;
   handleExportRegex: () => void;
   regexImportError: string | null;
+  regexImportWarning: string | null;
   regexImportSuccess: string | null;
   sortedRegexScripts: RegexScriptRow[];
   draggedRegexId: string | null;
@@ -1504,6 +1644,7 @@ function RegexSection({
           {regexImportError}
         </div>
       )}
+      {regexImportWarning && <div className="mb-1 px-1 text-xs text-amber-500">{regexImportWarning}</div>}
       {regexImportSuccess && <div className="mb-1 px-1 text-xs text-green-500">{regexImportSuccess}</div>}
       {sortedRegexScripts.length === 0 ? (
         <p className="mari-chrome-text-muted px-1 py-2 text-[0.625rem]">
@@ -1777,17 +1918,17 @@ function FunctionsSection({
       {functionImportReviews.length > 0 && (
         <section
           aria-live="polite"
-          aria-label={localizeUi("ui.panels.functionssection.importReviewTitle")}
+          aria-label={localizeUi("ui.panels.functionssection.executableImportReviewTitle")}
           className="mb-2 rounded-xl border border-[var(--border)] bg-[var(--secondary)]/45 p-2.5"
         >
           <div className="flex items-start gap-2">
             <ShieldCheck aria-hidden="true" size="0.9375rem" className="mt-0.5 shrink-0 text-[var(--primary)]" />
             <div className="min-w-0">
               <h3 className="text-xs font-semibold text-[var(--foreground)]">
-                {localizeUi("ui.panels.functionssection.importReviewTitle")}
+                {localizeUi("ui.panels.functionssection.executableImportReviewTitle")}
               </h3>
               <p className="mt-0.5 text-[0.625rem] leading-relaxed text-[var(--muted-foreground)]">
-                {localizeUi("ui.panels.functionssection.importReviewDescription")}
+                {localizeUi("ui.panels.functionssection.executableImportReviewDescription")}
               </p>
             </div>
           </div>
@@ -1798,16 +1939,24 @@ function FunctionsSection({
                   <dt className="sr-only">{localizeUi("ui.panels.functionssection.functionName")}</dt>
                   <dd className="min-w-0 flex-1 truncate font-mono text-[0.6875rem] font-semibold">{review.name}</dd>
                   <span className="shrink-0 rounded bg-[var(--background)] px-1.5 py-0.5 text-[0.5625rem] text-[var(--muted-foreground)]">
-                    {localizeUi("ui.panels.functionssection.webhook")}
+                    {localizeUi(
+                      review.executionType === "webhook"
+                        ? "ui.panels.functionssection.webhook"
+                        : "ui.panels.functionssection.script",
+                    )}
                   </span>
                 </div>
                 <div className="grid grid-cols-[minmax(0,1fr)_auto] gap-x-2 gap-y-0.5 text-[0.625rem]">
-                  <dt className="text-[var(--muted-foreground)]">
-                    {localizeUi("ui.panels.functionssection.destinationOrigin")}
-                  </dt>
-                  <dd className="max-w-40 break-all text-right font-mono text-[var(--foreground)]">
-                    {review.destinationOrigin ?? localizeUi("ui.panels.functionssection.invalidWebhookOrigin")}
-                  </dd>
+                  {review.executionType === "webhook" && (
+                    <>
+                      <dt className="text-[var(--muted-foreground)]">
+                        {localizeUi("ui.panels.functionssection.destinationOrigin")}
+                      </dt>
+                      <dd className="max-w-40 break-all text-right font-mono text-[var(--foreground)]">
+                        {review.destinationOrigin ?? localizeUi("ui.panels.functionssection.invalidWebhookOrigin")}
+                      </dd>
+                    </>
+                  )}
                   <dt className="text-[var(--muted-foreground)]">
                     {localizeUi("ui.panels.functionssection.requestedEnabled")}
                   </dt>

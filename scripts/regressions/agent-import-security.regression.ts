@@ -7,7 +7,10 @@ import {
   normalizeAgentImportEntry,
 } from "../../packages/client/src/lib/agent-transfer.js";
 import { collectFolderPackageEntries } from "../../packages/client/src/lib/folder-package-transfer.js";
+import { resolveCustomAgentImportsEnabled } from "../../packages/server/src/services/agents/custom-agent-import-policy.service.js";
+import { customAgentCanEmitResult } from "../../packages/server/src/routes/generate/agent-result-capabilities.js";
 import {
+  type AgentResult,
   CUSTOM_AGENT_PERMISSIONS_EXPLICIT_SETTING,
   customAgentHasCapability,
   getCustomAgentResultCapability,
@@ -78,6 +81,41 @@ assert.equal(
   "legacy locally authored agents must retain automatic lorebook capability derivation",
 );
 assert.equal(getCustomAgentResultCapability("haptic_command"), "control_haptics");
+assert.equal(getCustomAgentResultCapability("character_card_create"), "create_characters");
+const characterCreateResult: AgentResult = {
+  agentId: "custom-card-maker",
+  agentType: "custom-card-maker",
+  type: "character_card_create",
+  data: { data: { name: "Recurring NPC" } },
+  tokensUsed: 0,
+  durationMs: 0,
+  success: true,
+  error: null,
+};
+assert.equal(
+  customAgentCanEmitResult(
+    characterCreateResult,
+    [{ id: "custom-card-maker", type: "custom-card-maker", settings: { customCapabilities: {} } } as never],
+    new Set(),
+  ),
+  false,
+  "character card creation results must be blocked without the explicit ability",
+);
+assert.equal(
+  customAgentCanEmitResult(
+    characterCreateResult,
+    [
+      {
+        id: "custom-card-maker",
+        type: "custom-card-maker",
+        settings: { customCapabilities: { create_characters: true } },
+      } as never,
+    ],
+    new Set(),
+  ),
+  true,
+  "character card creation results must be emitted after the user enables the ability",
+);
 assert.equal(
   isExternallyImportedAgent("custom-local", { customAgentImportSource: "folder" }),
   true,
@@ -88,6 +126,21 @@ assert.equal(
   false,
   "locally authored custom Agents must not be mistaken for imports",
 );
+assert.equal(
+  isExternallyImportedAgent("custom-import-helper-locally-authored", {}),
+  false,
+  "a local Agent named Import Helper must not be mistaken for a file import by slug alone",
+);
+assert.equal(
+  isExternallyImportedAgent("custom-import-helper-imported", { customAgentImportSource: "file" }),
+  true,
+  "explicit file-import provenance must remain authoritative",
+);
+
+assert.equal(resolveCustomAgentImportsEnabled(undefined), true, "upgrades with no saved policy must stay enabled");
+assert.equal(resolveCustomAgentImportsEnabled(null), true, "fresh storage reads must default to enabled");
+assert.equal(resolveCustomAgentImportsEnabled("true"), true);
+assert.equal(resolveCustomAgentImportsEnabled("false"), false, "an explicit user disable must remain authoritative");
 
 const builtInCollision = normalizeAgentImportEntry({
   type: "spotify",

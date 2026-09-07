@@ -16,9 +16,14 @@ import {
   isUpdatesRemoteApplyAllowed,
 } from "../config/runtime-config.js";
 import { getBuildBranch, getBuildCommit, getBuildLabel } from "../config/build-info.js";
+import { getFileStorageDir } from "../config/runtime-config.js";
 import { requirePrivilegedAccess } from "../middleware/privileged-gate.js";
 import { isLoopbackIp } from "../middleware/ip-allowlist.js";
-import { isGitUpdateApplyAllowed } from "../services/updates/update-apply-policy.js";
+import {
+  isGitUpdateApplyAllowed,
+  isUpdateChannelSwitch,
+  resolveDockerChannelImageTags,
+} from "../services/updates/update-apply-policy.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -54,7 +59,9 @@ const UPDATE_CHANNELS: Record<UpdateChannel, UpdateChannelInfo> = {
     warning: "Staging builds are pre-release tester builds. Back up your app data before applying them.",
   },
 };
-const DEFAULT_PNPM_VERSION = "10.33.2";
+const DEFAULT_PNPM_DESCRIPTOR =
+  "10.34.5+sha512.a4ee05f2f73658255bd6a89859c065a45c28a57daefae2c893a168ee2b73168c37b91e83e57ea67654ad03f03031746430e8bce38e362e042605fb8abc80192e";
+const DEFAULT_PNPM_VERSION = DEFAULT_PNPM_DESCRIPTOR.slice(0, DEFAULT_PNPM_DESCRIPTOR.indexOf("+"));
 const PNPM_NONINTERACTIVE_ARGS = ["--config.trustPolicy=off", "--config.confirmModulesPurge=false"];
 const PNPM_UPDATE_INSTALL_ARGS = ["install", "--force", "--frozen-lockfile"];
 // A forced reinstall is verbose; the execFile default (1 MiB) can abort an
@@ -67,10 +74,9 @@ const UPDATE_STEP_TIMEOUT_MULTIPLIER = process.platform === "android" ? 4 : 1;
 function updateStepTimeout(baseMs: number): number {
   return baseMs * UPDATE_STEP_TIMEOUT_MULTIPLIER;
 }
-const MANUAL_PNPM_COMMAND = `corepack pnpm@${DEFAULT_PNPM_VERSION}`;
+const MANUAL_PNPM_COMMAND = `corepack pnpm@${DEFAULT_PNPM_DESCRIPTOR}`;
 const DOCKER_IMAGE = "ghcr.io/pasta-devs/marinara-engine";
-const MANUAL_GIT_UPDATE_COMMAND =
-  `git fetch origin +refs/heads/main:refs/remotes/origin/main && (git merge --ff-only origin/main || git checkout --detach origin/main) && ${MANUAL_PNPM_COMMAND} --config.trustPolicy=off --config.confirmModulesPurge=false install --force --frozen-lockfile && ${MANUAL_PNPM_COMMAND} --filter @marinara-engine/shared build && ${MANUAL_PNPM_COMMAND} --filter @marinara-engine/server --filter @marinara-engine/client --parallel run build && ${MANUAL_PNPM_COMMAND} start`;
+const MANUAL_GIT_UPDATE_COMMAND = `git fetch origin +refs/heads/main:refs/remotes/origin/main && (git merge --ff-only origin/main || git checkout --detach origin/main) && ${MANUAL_PNPM_COMMAND} --config.trustPolicy=off --config.confirmModulesPurge=false install --force --frozen-lockfile && ${MANUAL_PNPM_COMMAND} --filter @marinara-engine/shared build && ${MANUAL_PNPM_COMMAND} --filter @marinara-engine/server --filter @marinara-engine/client --parallel run build && ${MANUAL_PNPM_COMMAND} start`;
 const DOCKER_UPDATE_COMMAND = "docker compose pull && docker compose up -d";
 const ANDROID_APK_NOTICE =
   "> [!IMPORTANT]\n" +
@@ -94,7 +100,13 @@ let updateApplyInProgress = false;
 type InstallType = "git" | "docker" | "standalone";
 type ServerPlatform = "windows" | "macos" | "linux" | "android-termux" | "unknown";
 type ClientPlatform = "ios" | "android" | "desktop" | "unknown";
-type ApplyUnavailableReason = "disabled" | "unsupported-install" | "container-install" | null;
+type ApplyUnavailableReason =
+  | "disabled"
+  | "unsupported-install"
+  | "container-install"
+  | "storage-format-incompatible"
+  | "storage-format-unverified"
+  | null;
 
 /** Detect whether this install is a git repo. */
 function isGitInstall(): boolean {
@@ -213,7 +225,10 @@ function getManualUpdateCommand(installType: InstallType, platform: ServerPlatfo
 
 function getManualUpdateHint(installType: InstallType, platform: ServerPlatform, channel = UPDATE_CHANNELS.stable) {
   if (installType === "docker") {
-    return "Pull the published container image and restart the container. Versioned tags are published from vX.Y.Z release tags.";
+    if (channel.id === "staging") {
+      return `Set the Compose image to ${DOCKER_IMAGE}:staging, then pull it and restart the container. Use a separate data volume for staging.`;
+    }
+    return `Set the Compose image to the stable tag shown below (or ${DOCKER_IMAGE}:latest), then pull it and restart the container.`;
   }
   if (installType === "git" && channel.id === "staging") {
     return "Staging is a tester branch. Make a profile backup first, then apply from the browser or run the command below from the repo checkout.";
@@ -274,7 +289,82 @@ async function cleanStaleSourceFiles(root: string): Promise<void> {
   }
 }
 
-async function checkoutOrCreateUpdateBranch(root: string, channel: UpdateChannelInfo, targetHead: string): Promise<void> {
+/**
+ * Downgrade guard (#4708). Kept in sync with checkTargetStorageFormat in
+ * scripts/protect-launcher-data.mjs (the launcher-side twin — the server
+ * cannot import that script); the launcher-format-guard regression pins the
+ * pairing. A CONFIRMED-absent storage-format.json on the target ref means the
+ * build predates the file, i.e. storage format 2; any other git failure
+ * (timeout, lock, bad ref) is `verified: false` — treating those as format 2
+ * would block a legitimate upgrade with a misleading downgrade message.
+ */
+async function checkTargetStorageFormat(
+  root: string,
+  targetRef: string,
+): Promise<{ compatible: boolean; verified: boolean; onDiskFormat: number | null; targetFormat: number | null }> {
+  // A crash can leave only manifest.json.bak — the on-disk format must not
+  // fall back to "nothing to protect" while a backup still declares it.
+  let onDiskFormat: number | null = null;
+  for (const name of ["manifest.json", "manifest.json.bak"]) {
+    try {
+      const manifest = JSON.parse(readFileSync(resolve(getFileStorageDir(), name), "utf8")) as {
+        version?: unknown;
+      };
+      if (typeof manifest?.version === "number") {
+        onDiskFormat = manifest.version;
+        break;
+      }
+    } catch {
+      /* try the backup */
+    }
+  }
+  if (onDiskFormat === null) return { compatible: true, verified: true, onDiskFormat: null, targetFormat: null };
+
+  // CONFIRMED-absent on the target ref -> that build predates the file -> 2.
+  // Any git failure (bad ref, timeout, unreadable object) is verified: false
+  // instead — misreading it as format 2 would report a false downgrade
+  // block. ls-tree distinguishes all three cases in one call: a bad ref
+  // throws, a verified ref lists the path when present and prints nothing
+  // when absent — git show's own error text cannot tell those apart.
+  let targetFormat: number | null = null;
+  let raw: string | null = null;
+  try {
+    const { stdout: listed } = await execFileAsync(
+      "git",
+      ["ls-tree", "--name-only", targetRef, "--", "storage-format.json"],
+      { cwd: root, timeout: 15_000 },
+    );
+    if (!listed.trim()) {
+      targetFormat = 2;
+    } else {
+      const { stdout } = await execFileAsync("git", ["show", `${targetRef}:storage-format.json`], {
+        cwd: root,
+        timeout: 15_000,
+      });
+      raw = stdout;
+    }
+  } catch (err) {
+    logger.warn(err, "[Update] Could not verify storage-format.json at %s", targetRef);
+    return { compatible: false, verified: false, onDiskFormat, targetFormat: null };
+  }
+  if (raw !== null) {
+    try {
+      const parsed = JSON.parse(raw) as { storageFormat?: unknown };
+      // A malformed committed file stays unverified rather than being misread.
+      if (typeof parsed?.storageFormat === "number") targetFormat = parsed.storageFormat;
+    } catch (err) {
+      logger.warn(err, "[Update] Malformed storage-format.json at %s", targetRef);
+    }
+  }
+  if (targetFormat === null) return { compatible: false, verified: false, onDiskFormat, targetFormat: null };
+  return { compatible: targetFormat >= onDiskFormat, verified: true, onDiskFormat, targetFormat };
+}
+
+async function checkoutOrCreateUpdateBranch(
+  root: string,
+  channel: UpdateChannelInfo,
+  targetHead: string,
+): Promise<void> {
   const branchRef = `refs/heads/${channel.branch}`;
   const branchExists = await gitCommandSucceeds(root, ["show-ref", "--verify", "--quiet", branchRef]);
   if (branchExists) {
@@ -321,7 +411,9 @@ async function createUpdateStash(root: string): Promise<UpdateStash | null> {
     return { oid, marker };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    throw new Error(`Git created update stash marker ${marker}, but its immutable recovery commit could not be found: ${message}`);
+    throw new Error(
+      `Git created update stash marker ${marker}, but its immutable recovery commit could not be found: ${message}`,
+    );
   }
 }
 
@@ -458,15 +550,20 @@ function buildRequestHeaders() {
   };
 }
 
-function getPinnedPnpmVersion(root: string): string {
+function getPinnedPnpmDescriptor(root: string): string {
   try {
     const pkg = JSON.parse(readFileSync(resolve(root, "package.json"), "utf-8")) as {
       packageManager?: string;
     };
-    return pkg.packageManager?.split("@")[1] || DEFAULT_PNPM_VERSION;
+    const descriptor = pkg.packageManager?.replace(/^pnpm@/u, "");
+    return descriptor || DEFAULT_PNPM_DESCRIPTOR;
   } catch {
-    return DEFAULT_PNPM_VERSION;
+    return DEFAULT_PNPM_DESCRIPTOR;
   }
+}
+
+function getPinnedPnpmVersion(root: string): string {
+  return getPinnedPnpmDescriptor(root).split("+")[0] || DEFAULT_PNPM_VERSION;
 }
 
 type PnpmRunner = {
@@ -494,17 +591,18 @@ function commandInvocation(command: string, args: string[]) {
 }
 
 async function resolvePinnedPnpmRunner(root: string): Promise<PnpmRunner> {
+  const pnpmDescriptor = getPinnedPnpmDescriptor(root);
   const pnpmVersion = getPinnedPnpmVersion(root);
 
   try {
-    const invocation = commandInvocation("corepack", [`pnpm@${pnpmVersion}`, "--version"]);
+    const invocation = commandInvocation("corepack", [`pnpm@${pnpmDescriptor}`, "--version"]);
     const { stdout } = await execFileAsync(invocation.command, invocation.args, {
       cwd: root,
       // First run downloads the pinned pnpm; slow devices need extra headroom.
       timeout: updateStepTimeout(20_000),
     });
     if (stdout.trim() === pnpmVersion) {
-      return { command: "corepack", prefixArgs: [`pnpm@${pnpmVersion}`] };
+      return { command: "corepack", prefixArgs: [`pnpm@${pnpmDescriptor}`] };
     }
   } catch {
     // Fall through to an already-installed pnpm. Some older Corepack builds
@@ -675,14 +773,12 @@ function serializeUpdateChannels() {
   }));
 }
 
-function buildReleasePayload(release: NonNullable<typeof cachedRelease>) {
+function buildReleasePayload(release: NonNullable<typeof cachedRelease>, channel = UPDATE_CHANNELS.stable) {
   const releaseTag = `v${release.latestVersion}`;
   return {
     ...release,
     releaseTag,
-    dockerImage: DOCKER_IMAGE,
-    dockerImageTag: `${DOCKER_IMAGE}:${release.latestVersion}`,
-    dockerLiteImageTag: `${DOCKER_IMAGE}:${release.latestVersion}-lite`,
+    ...resolveDockerChannelImageTags(DOCKER_IMAGE, release.latestVersion, channel.id),
   };
 }
 
@@ -752,7 +848,7 @@ export async function updatesRoutes(app: FastifyInstance) {
       (req.query as { channel?: unknown } | undefined)?.channel,
       currentBranch,
     );
-    const channelSwitch = gitInstall && currentChannel.id !== channel.id;
+    const channelSwitch = isUpdateChannelSwitch(installType, currentChannel.id, channel.id);
     const applyAvailability = getApplyAvailability(
       installType,
       serverPlatform,
@@ -772,81 +868,63 @@ export async function updatesRoutes(app: FastifyInstance) {
       }
     }
 
-    // Return cached release info if fresh
-    if (cachedRelease && now - cacheTimestamp < CACHE_TTL_MS) {
-      const versionUpdate = isNewerVersion(APP_VERSION, cachedRelease.latestVersion);
-      return {
-        currentVersion: APP_VERSION,
-        currentCommit,
-        currentBuild,
-        channel: channel.id,
-        channelLabel: channel.label,
-        currentBranch,
-        channels: serializeUpdateChannels(),
-        ...buildReleasePayload(cachedRelease),
-        updateAvailable:
-          channelSwitch || (channel.id === "stable" && versionUpdate) || (commitsBehind != null && commitsBehind > 0),
-        versionUpdate: channel.id === "stable" ? versionUpdate : false,
-        commitsBehind: commitsBehind ?? 0,
-        installType,
-        serverPlatform,
-        clientPlatform,
-        ...applyAvailability,
-        targetRef: channel.targetRef,
-        targetCommit: gitInstall ? await resolveGitRef(root, channel.targetRef) : null,
-      };
-    }
+    let release = cachedRelease && now - cacheTimestamp < CACHE_TTL_MS ? cachedRelease : null;
 
-    try {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 10_000);
+    if (!release) {
       try {
-        cachedRelease = await resolveLatestReleaseFromGitHub(controller.signal);
-      } finally {
-        clearTimeout(timeout);
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 10_000);
+        try {
+          release = await resolveLatestReleaseFromGitHub(controller.signal);
+        } finally {
+          clearTimeout(timeout);
+        }
+        cachedRelease = release;
+        cacheTimestamp = now;
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : String(err);
+        return reply.status(502).send({
+          error: `Failed to check for updates: ${message}`,
+          currentVersion: APP_VERSION,
+          currentCommit,
+          currentBuild,
+          channel: channel.id,
+          channelLabel: channel.label,
+          currentBranch,
+          channels: serializeUpdateChannels(),
+          updateAvailable: channelSwitch || (commitsBehind != null && commitsBehind > 0),
+          channelSwitch,
+          commitsBehind: commitsBehind ?? 0,
+          installType,
+          serverPlatform,
+          clientPlatform,
+          ...applyAvailability,
+        });
       }
-      cacheTimestamp = now;
-
-      const versionUpdate = isNewerVersion(APP_VERSION, cachedRelease.latestVersion);
-      return {
-        currentVersion: APP_VERSION,
-        currentCommit,
-        currentBuild,
-        channel: channel.id,
-        channelLabel: channel.label,
-        currentBranch,
-        channels: serializeUpdateChannels(),
-        ...buildReleasePayload(cachedRelease),
-        updateAvailable:
-          channelSwitch || (channel.id === "stable" && versionUpdate) || (commitsBehind != null && commitsBehind > 0),
-        versionUpdate: channel.id === "stable" ? versionUpdate : false,
-        commitsBehind: commitsBehind ?? 0,
-        installType,
-        serverPlatform,
-        clientPlatform,
-        ...applyAvailability,
-        targetRef: channel.targetRef,
-        targetCommit: gitInstall ? await resolveGitRef(root, channel.targetRef) : null,
-      };
-    } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : String(err);
-      return reply.status(502).send({
-        error: `Failed to check for updates: ${message}`,
-        currentVersion: APP_VERSION,
-        currentCommit,
-        currentBuild,
-        channel: channel.id,
-        channelLabel: channel.label,
-        currentBranch,
-        channels: serializeUpdateChannels(),
-        updateAvailable: channelSwitch || (commitsBehind != null && commitsBehind > 0),
-        commitsBehind: commitsBehind ?? 0,
-        installType,
-        serverPlatform,
-        clientPlatform,
-        ...applyAvailability,
-      });
     }
+
+    const versionUpdate = isNewerVersion(APP_VERSION, release.latestVersion);
+    return {
+      currentVersion: APP_VERSION,
+      currentCommit,
+      currentBuild,
+      channel: channel.id,
+      channelLabel: channel.label,
+      currentBranch,
+      channels: serializeUpdateChannels(),
+      ...buildReleasePayload(release, channel),
+      updateAvailable:
+        channelSwitch || (channel.id === "stable" && versionUpdate) || (commitsBehind != null && commitsBehind > 0),
+      channelSwitch,
+      versionUpdate: channel.id === "stable" ? versionUpdate : false,
+      commitsBehind: commitsBehind ?? 0,
+      installType,
+      serverPlatform,
+      clientPlatform,
+      ...applyAvailability,
+      targetRef: channel.targetRef,
+      targetCommit: gitInstall ? await resolveGitRef(root, channel.targetRef) : null,
+    };
   });
 
   // ── Apply update (git installs only) ──
@@ -945,6 +1023,30 @@ export async function updatesRoutes(app: FastifyInstance) {
         return reply.status(409).send({
           error: "Update target commit confirmation does not match the latest checked target",
           expectedTargetCommit: targetHead,
+        });
+      }
+
+      // #4708: refuse to move onto a build whose storage format predates the
+      // on-disk data — it would silently show empty chat history and could
+      // write a conflicting old-format file. No override here: manual
+      // downgrade steps live in docs/TROUBLESHOOTING.md.
+      const formatCheck = await checkTargetStorageFormat(root, targetHead);
+      if (!formatCheck.verified) {
+        return reply.status(409).send({
+          error:
+            "Could not verify the selected version's storage format (git could not read storage-format.json " +
+            "at the update target). This is not a downgrade block — try again, and check the server log if it persists.",
+          applyUnavailableReason: "storage-format-unverified" as ApplyUnavailableReason,
+        });
+      }
+      if (!formatCheck.compatible) {
+        return reply.status(409).send({
+          error:
+            `The selected version only understands storage format ${formatCheck.targetFormat}, but your data ` +
+            `is at format ${formatCheck.onDiskFormat}. Switching to it would hide your chat history. See ` +
+            `docs/TROUBLESHOOTING.md ("Chats show no messages after switching to an older version") for ` +
+            `manual downgrade steps.`,
+          applyUnavailableReason: "storage-format-incompatible" as ApplyUnavailableReason,
         });
       }
 
@@ -1073,8 +1175,9 @@ export async function updatesRoutes(app: FastifyInstance) {
       return result;
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
+      const pnpmDescriptor = getPinnedPnpmDescriptor(root);
       const pnpmVersion = getPinnedPnpmVersion(root);
-      const manualPnpmCommand = `corepack pnpm@${pnpmVersion}`;
+      const manualPnpmCommand = `corepack pnpm@${pnpmDescriptor}`;
       return reply.status(500).send({
         error: `Update failed: ${message}`,
         hint: `You can try running the update manually: ${getManualGitApplyCommand(channel, serverPlatform, manualPnpmCommand)}. If Corepack cannot launch pnpm ${pnpmVersion}, install the pinned version with npm install -g pnpm@${pnpmVersion} and rerun the command.`,

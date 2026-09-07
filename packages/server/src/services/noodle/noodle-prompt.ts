@@ -101,20 +101,13 @@ export const NOODLE_RECALLED_MEMORY_INSTRUCTION =
 
 type NoodleTimelineFeatureSettings = Pick<
   NoodleSettings,
-  "allowRandomUsers" | "enableImagePrompts" | "allowGalleryImageAttachments"
+  "allowRandomUsers" | "enableImagePrompts" | "allowGalleryImageAttachments" | "imageGenerationPrompt"
 >;
 
 type RandomSource = () => number;
 type NoodlePromptPost = Pick<
   NoodlePost,
-  | "id"
-  | "authorAccountId"
-  | "authorSnapshot"
-  | "content"
-  | "imageUrl"
-  | "imagePrompt"
-  | "metadata"
-  | "createdAt"
+  "id" | "authorAccountId" | "authorSnapshot" | "content" | "imageUrl" | "imagePrompt" | "metadata" | "createdAt"
 >;
 type NoodlePromptInteraction = Pick<
   NoodleInteraction,
@@ -355,10 +348,7 @@ export function sampleNoodlePastMemoriesWeighted<T>(
  */
 export function noodleLorebookTokenBudget(activeCharacterCount: number): number {
   const scaled = Math.max(activeCharacterCount, 0) * LIMITS.NOODLE_LOREBOOK_TOKEN_BUDGET_PER_ACCOUNT;
-  return Math.min(
-    LIMITS.NOODLE_LOREBOOK_TOKEN_BUDGET_MAX,
-    Math.max(LIMITS.NOODLE_LOREBOOK_TOKEN_BUDGET_FLOOR, scaled),
-  );
+  return Math.min(LIMITS.NOODLE_LOREBOOK_TOKEN_BUDGET_MAX, Math.max(LIMITS.NOODLE_LOREBOOK_TOKEN_BUDGET_FLOOR, scaled));
 }
 
 export function noodleTimelineFeatureInstructions(settings: NoodleTimelineFeatureSettings): string[] {
@@ -373,6 +363,11 @@ export function noodleTimelineFeatureInstructions(settings: NoodleTimelineFeatur
     ...(settings.enableImagePrompts
       ? [
           "- When image generation is enabled, imagePrompt must contain only the final concrete visual description for the attached image: either a character-focused image of the author/their scene/selfie, or an in-character meme they would plausibly post. Do not put the post JSON, field names, meta-commentary, instructions to another model, or the full post text inside imagePrompt.",
+          ...(settings.imageGenerationPrompt?.trim()
+            ? [
+                `- Apply these user image directions when writing imagePrompt. They are instructions to you, not text to copy into imagePrompt: ${settings.imageGenerationPrompt.trim()}`,
+              ]
+            : []),
         ]
       : []),
     ...(settings.allowGalleryImageAttachments

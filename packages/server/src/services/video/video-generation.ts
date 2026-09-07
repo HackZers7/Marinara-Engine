@@ -7,6 +7,10 @@ import { logger, logDebugOverride } from "../../lib/logger.js";
 import { assertInsideDir, safeFetch } from "../../utils/security.js";
 import { notifyGenerationFallback, type GenerationFallbackNotifier } from "../generation/fallback-notification.js";
 import { runMediaGenerationRequest } from "../image/image-generation-queue.js";
+import {
+  COMFYUI_MAX_REFERENCE_IMAGES,
+  numberedComfyReferencePlaceholder,
+} from "../image/comfyui-reference-placeholders.js";
 import { buildAtlasCloudVideoRequest, runAtlasCloudPrediction } from "../media/atlas-cloud.js";
 import { buildComfyUiLoraWorkflowReplacements, type ComfyUiLoraSetting } from "@marinara-engine/shared";
 
@@ -80,6 +84,7 @@ export interface VideoGenerationResult {
 const GAME_SCENE_VIDEOS_DIR = join(DATA_DIR, "game-scene-videos");
 const VIDEO_GEN_TIMEOUT = Number(process.env.VIDEO_GEN_TIMEOUT_MS ?? 1_800_000);
 const MAX_VIDEO_RESPONSE_BYTES = Number(process.env.VIDEO_GEN_MAX_RESPONSE_BYTES ?? 160 * 1024 * 1024);
+const MAX_VIDEO_JSON_RESPONSE_BYTES = Math.ceil((MAX_VIDEO_RESPONSE_BYTES * 4) / 3) + 1024 * 1024;
 const DEFAULT_GEMINI_OMNI_MODEL = "gemini-omni-flash-preview";
 const DEFAULT_GOOGLE_VEO_MODEL = "veo-3.1-generate-preview";
 const DEFAULT_XAI_VIDEO_MODEL = "grok-imagine-video-1.5";
@@ -102,6 +107,7 @@ function readPositiveIntervalEnv(name: string, fallbackMs: number) {
 const GOOGLE_VEO_POLL_INTERVAL_MS = readPositiveIntervalEnv("GOOGLE_VEO_VIDEO_POLL_INTERVAL_MS", 10_000);
 const XAI_POLL_INTERVAL_MS = readPositiveIntervalEnv("XAI_VIDEO_POLL_INTERVAL_MS", 5_000);
 const OPENROUTER_POLL_INTERVAL_MS = readPositiveIntervalEnv("OPENROUTER_VIDEO_POLL_INTERVAL_MS", 10_000);
+const NANOGPT_POLL_INTERVAL_MS = readPositiveIntervalEnv("NANOGPT_VIDEO_POLL_INTERVAL_MS", 5_000);
 const SEEDANCE_POLL_INTERVAL_MS = readPositiveIntervalEnv("SEEDANCE_VIDEO_POLL_INTERVAL_MS", 10_000);
 
 type GoogleVeoImageEncoding = "inlineData" | "bytesBase64Encoded";
@@ -139,7 +145,10 @@ async function generateVideoUnqueued(
   serviceHint: string,
   request: VideoGenerationRequest,
 ): Promise<VideoGenerationResult> {
-  const resolvedService = normalizeVideoService(serviceHint || source);
+  const resolvedService =
+    normalizeVideoService(source) === "swarmui" || normalizeVideoService(source) === "nanogpt"
+      ? normalizeVideoService(source)
+      : normalizeVideoService(serviceHint || source);
   const primaryRequest = { ...request, fallback: undefined };
   try {
     if (resolvedService === "gemini_omni") {
@@ -162,6 +171,11 @@ async function generateVideoUnqueued(
         generateOpenRouterVideo(baseUrl, apiKey, { ...primaryRequest, signal }),
       );
     }
+    if (resolvedService === "nanogpt") {
+      return await withVideoGenerationDeadline(request.signal, VIDEO_GEN_TIMEOUT, (signal) =>
+        generateNanoGptVideo(baseUrl, apiKey, { ...primaryRequest, signal }),
+      );
+    }
     if (resolvedService === "atlas") {
       return await withVideoGenerationDeadline(request.signal, VIDEO_GEN_TIMEOUT, (signal) =>
         generateAtlasCloudVideo(baseUrl, apiKey, { ...primaryRequest, signal }),
@@ -175,6 +189,11 @@ async function generateVideoUnqueued(
     if (resolvedService === "comfyui") {
       return await withVideoGenerationDeadline(request.signal, VIDEO_GEN_TIMEOUT, (signal) =>
         generateComfyUiVideo(baseUrl, { ...primaryRequest, signal }),
+      );
+    }
+    if (resolvedService === "swarmui") {
+      return await withVideoGenerationDeadline(request.signal, VIDEO_GEN_TIMEOUT, (signal) =>
+        generateSwarmUiVideo(baseUrl, apiKey, { ...primaryRequest, signal }),
       );
     }
     throw new Error(`Unsupported video generation service: ${resolvedService || serviceHint || source}`);
@@ -277,7 +296,7 @@ export async function removeSavedVideoFromDisk(filePath: string): Promise<void> 
   });
 }
 
-function normalizeVideoService(value: string): string {
+export function normalizeVideoService(value: string): string {
   const normalized = value.trim().toLowerCase();
   if (
     !normalized ||
@@ -298,6 +317,9 @@ function normalizeVideoService(value: string): string {
   if (normalized === "openrouter" || normalized === "open-router") {
     return "openrouter";
   }
+  if (normalized === "nanogpt" || normalized === "nano-gpt") {
+    return "nanogpt";
+  }
   if (normalized === "atlas" || normalized === "atlas-cloud" || normalized === "atlascloud") {
     return "atlas";
   }
@@ -306,6 +328,9 @@ function normalizeVideoService(value: string): string {
   }
   if (normalized === "comfyui" || normalized === "comfy-ui") {
     return "comfyui";
+  }
+  if (normalized === "swarmui" || normalized === "swarm-ui") {
+    return "swarmui";
   }
   return normalized;
 }
@@ -365,7 +390,13 @@ export function resolveComfyUiVideoWorkflowPlaceholders(
     VideoGenerationRequest,
     "prompt" | "model" | "durationSeconds" | "ltxDirectorPrompt" | "comfyLoras" | "fps"
   >,
-  runtime: { seed: number; width: number; height: number; referenceImageName?: string },
+  runtime: {
+    seed: number;
+    width: number;
+    height: number;
+    referenceImageName?: string;
+    referenceImageBase64?: string;
+  },
 ): unknown {
   const ltxDirectorPrompt = resolveLtxDirectorPromptInput(request);
   const fps = normalizeComfyUiVideoFps(request.fps);
@@ -384,7 +415,18 @@ export function resolveComfyUiVideoWorkflowPlaceholders(
   };
   Object.assign(replacements, buildComfyUiLoraWorkflowReplacements(request.comfyLoras));
   if (request.model?.trim()) replacements["%model%"] = request.model.trim();
-  if (runtime.referenceImageName) replacements["%reference_image_name%"] = runtime.referenceImageName;
+  if (runtime.referenceImageName) {
+    replacements["%reference_image_name%"] = runtime.referenceImageName;
+    for (let index = 0; index < COMFYUI_MAX_REFERENCE_IMAGES; index += 1) {
+      replacements[numberedComfyReferencePlaceholder("reference_image_name", index)] = runtime.referenceImageName;
+    }
+  }
+  if (runtime.referenceImageBase64) {
+    replacements["%reference_image%"] = runtime.referenceImageBase64;
+    for (let index = 0; index < COMFYUI_MAX_REFERENCE_IMAGES; index += 1) {
+      replacements[numberedComfyReferencePlaceholder("reference_image", index)] = runtime.referenceImageBase64;
+    }
+  }
   return replaceComfyUiVideoPlaceholders(workflow, replacements);
 }
 
@@ -461,6 +503,162 @@ function collectComfyUiVideoFiles(entry: ComfyUiHistoryEntry): ComfyUiOutputFile
   return files;
 }
 
+function swarmUiVideoHeaders(apiKey: string): Record<string, string> {
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  const token = apiKey.trim();
+  if (token) headers.Cookie = `swarm_token=${encodeURIComponent(token)}`;
+  return headers;
+}
+
+function swarmUiVideoApiError(value: unknown): string | null {
+  const record = asRecord(value);
+  const error = readString(record.error);
+  const errorId = readString(record.error_id);
+  return error || errorId;
+}
+
+async function createSwarmUiVideoSession(baseUrl: string, apiKey: string, signal?: AbortSignal): Promise<string> {
+  const response = await comfyUiVideoFetch(`${baseUrl}/API/GetNewSession`, {
+    method: "POST",
+    headers: swarmUiVideoHeaders(apiKey),
+    body: "{}",
+    signal,
+  });
+  const text = await response.text();
+  if (!response.ok) {
+    throw new Error(`SwarmUI session request failed (${response.status}): ${formatProviderError(text)}`);
+  }
+  let result: unknown;
+  try {
+    result = JSON.parse(text) as unknown;
+  } catch {
+    throw new Error("SwarmUI session request returned invalid JSON");
+  }
+  const apiError = swarmUiVideoApiError(result);
+  if (apiError) throw new Error(`SwarmUI API error: ${apiError}`);
+  const sessionId = readString(asRecord(result).session_id);
+  if (!sessionId) throw new Error("SwarmUI did not return a session_id");
+  return sessionId;
+}
+
+export function buildSwarmUiVideoGenerationBody(
+  request: VideoGenerationRequest,
+  sessionId: string,
+  seed = Math.floor(Math.random() * 2 ** 32),
+): Record<string, unknown> {
+  const workflowText = request.comfyWorkflow?.trim();
+  if (!workflowText) throw new Error("SwarmUI video generation requires an API-format workflow");
+  if (/%reference_image_name(?:_0[1-4])?%/.test(workflowText)) {
+    throw new Error(
+      "SwarmUI workflows must use %reference_image% placeholders; backend-local filenames cannot be distributed safely.",
+    );
+  }
+  let workflow: unknown;
+  try {
+    workflow = JSON.parse(workflowText) as unknown;
+  } catch {
+    throw new Error("Invalid SwarmUI video workflow JSON");
+  }
+
+  const landscape =
+    request.resolution === "480p"
+      ? { width: 832, height: 480 }
+      : request.resolution === "1080p"
+        ? { width: 1920, height: 1080 }
+        : { width: 1280, height: 720 };
+  const dimensions = request.aspectRatio === "9:16" ? { width: landscape.height, height: landscape.width } : landscape;
+  const resolvedWorkflow = resolveComfyUiVideoWorkflowPlaceholders(workflow, request, {
+    seed,
+    width: dimensions.width,
+    height: dimensions.height,
+    referenceImageBase64: request.referenceImage ? stripDataUrl(request.referenceImage.base64) : undefined,
+  });
+  return {
+    session_id: sessionId,
+    images: 1,
+    donotsave: true,
+    prompt: request.prompt,
+    width: dimensions.width,
+    height: dimensions.height,
+    seed,
+    ...(request.model?.trim() ? { model: request.model.trim() } : {}),
+    comfyworkflowraw: JSON.stringify(resolvedWorkflow),
+  };
+}
+
+export function parseSwarmUiVideoReference(value: unknown): string {
+  const apiError = swarmUiVideoApiError(value);
+  if (apiError) throw new Error(`SwarmUI API error: ${apiError}`);
+  const outputs = asRecord(value).images;
+  if (!Array.isArray(outputs)) throw new Error("SwarmUI did not return an images array");
+  const video = outputs.find(
+    (candidate): candidate is string =>
+      typeof candidate === "string" &&
+      (candidate.trim().toLowerCase().split(/[?#]/u, 1)[0]?.endsWith(".mp4") === true ||
+        candidate.trim().toLowerCase().startsWith("data:video/mp4")),
+  );
+  if (!video) throw new Error("SwarmUI completed without an MP4 video output");
+  return video.trim();
+}
+
+async function generateSwarmUiVideo(
+  baseUrl: string,
+  apiKey: string,
+  request: VideoGenerationRequest,
+): Promise<VideoGenerationResult> {
+  const base = baseUrl.replace(/\/+$/, "");
+  const sessionId = await createSwarmUiVideoSession(base, apiKey, request.signal);
+  const body = buildSwarmUiVideoGenerationBody(request, sessionId);
+  const debugBody: Record<string, unknown> = { ...body, session_id: "[session]" };
+  if (request.referenceImage && typeof debugBody.comfyworkflowraw === "string") {
+    debugBody.comfyworkflowraw = debugBody.comfyworkflowraw.replaceAll(
+      stripDataUrl(request.referenceImage.base64),
+      "[redacted reference image]",
+    );
+  }
+  logDebugOverride(
+    request.debugMode === true || isDebugAgentsEnabled(),
+    "[video-gen/swarmui] final request payload:\n%s",
+    JSON.stringify(debugBody, null, 2),
+  );
+
+  const response = await comfyUiVideoFetch(
+    `${base}/API/GenerateText2Image`,
+    {
+      method: "POST",
+      headers: swarmUiVideoHeaders(apiKey),
+      body: JSON.stringify(body),
+      signal: request.signal,
+    },
+    MAX_VIDEO_JSON_RESPONSE_BYTES,
+  );
+  const text = await response.text();
+  if (!response.ok) {
+    throw new Error(`SwarmUI video generation failed (${response.status}): ${formatProviderError(text)}`);
+  }
+  let result: unknown;
+  try {
+    result = JSON.parse(text) as unknown;
+  } catch {
+    throw new Error("SwarmUI video generation returned invalid JSON");
+  }
+  const videoReference = parseSwarmUiVideoReference(result);
+  let videoBuffer: Buffer;
+  if (videoReference.startsWith("data:video/mp4")) {
+    videoBuffer = Buffer.from(stripDataUrl(videoReference), "base64");
+  } else {
+    const videoResponse = await comfyUiVideoFetch(
+      new URL(videoReference, `${base}/`),
+      { headers: swarmUiVideoHeaders(apiKey), signal: request.signal },
+      MAX_VIDEO_RESPONSE_BYTES,
+    );
+    if (!videoResponse.ok) throw new Error(`SwarmUI video fetch failed (${videoResponse.status})`);
+    videoBuffer = Buffer.from(await videoResponse.arrayBuffer());
+  }
+  if (!isMp4Buffer(videoBuffer)) throw new Error("SwarmUI returned a non-MP4 video output");
+  return { base64: videoBuffer.toString("base64"), mimeType: "video/mp4", ext: "mp4" };
+}
+
 async function generateComfyUiVideo(baseUrl: string, request: VideoGenerationRequest): Promise<VideoGenerationResult> {
   const workflowText = request.comfyWorkflow?.trim();
   if (!workflowText) throw new Error("ComfyUI video generation requires an API-format workflow");
@@ -480,7 +678,16 @@ async function generateComfyUiVideo(baseUrl: string, request: VideoGenerationReq
         : { width: 1280, height: 720 };
   const dimensions = request.aspectRatio === "9:16" ? { width: landscape.height, height: landscape.width } : landscape;
   let referenceImageName: string | undefined;
-  if (request.referenceImage && workflowText.includes("%reference_image_name%")) {
+  const referenceImageNamePlaceholders = [
+    "%reference_image_name%",
+    ...Array.from({ length: COMFYUI_MAX_REFERENCE_IMAGES }, (_, index) =>
+      numberedComfyReferencePlaceholder("reference_image_name", index),
+    ),
+  ];
+  if (
+    request.referenceImage &&
+    referenceImageNamePlaceholders.some((placeholder) => workflowText.includes(placeholder))
+  ) {
     referenceImageName = await uploadComfyUiVideoReference(base, request.referenceImage, request.signal);
   }
   const resolvedWorkflow = resolveComfyUiVideoWorkflowPlaceholders(workflow, request, {
@@ -488,6 +695,7 @@ async function generateComfyUiVideo(baseUrl: string, request: VideoGenerationReq
     width: dimensions.width,
     height: dimensions.height,
     referenceImageName,
+    referenceImageBase64: request.referenceImage ? stripDataUrl(request.referenceImage.base64) : undefined,
   });
   if (["%global_prompt%", "%local_prompts%", "%segment_lengths%"].some((value) => workflowText.includes(value))) {
     const ltxDirectorPrompt = resolveLtxDirectorPromptInput(request);
@@ -529,9 +737,11 @@ async function generateComfyUiVideo(baseUrl: string, request: VideoGenerationReq
 
   while (true) {
     await delayWithSignal(1000, request.signal);
-    const historyResponse = await comfyUiVideoFetch(`${base}/history/${encodeURIComponent(promptId)}`, {
-      signal: request.signal,
-    });
+    const historyResponse = await comfyUiVideoFetch(
+      `${base}/history/${encodeURIComponent(promptId)}`,
+      { signal: request.signal },
+      MAX_VIDEO_JSON_RESPONSE_BYTES,
+    );
     if (!historyResponse.ok) continue;
     const history = (await historyResponse.json()) as Record<string, ComfyUiHistoryEntry>;
     const entry = history[promptId];
@@ -939,6 +1149,168 @@ async function generateOpenRouterVideo(
   }
 }
 
+export function parseNanoGptVideoModels(value: unknown): Array<{ id: string; name: string }> {
+  const root = asRecord(value);
+  const candidates = Array.isArray(value)
+    ? value
+    : Array.isArray(root.data)
+      ? root.data
+      : Array.isArray(root.models)
+        ? root.models
+        : [];
+  const seen = new Set<string>();
+  const models: Array<{ id: string; name: string }> = [];
+  for (const candidate of candidates) {
+    const record = asRecord(candidate);
+    const id = readString(record.id) ?? readString(record.model);
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    models.push({ id, name: readString(record.name) ?? readString(record.displayName) ?? id });
+  }
+  return models;
+}
+
+export async function fetchNanoGptVideoModels(
+  baseUrl: string,
+  apiKey: string,
+  signal?: AbortSignal,
+): Promise<Array<{ id: string; name: string }>> {
+  const url = new URL(buildNanoGptVideoUrl(baseUrl, "v1/video-models"));
+  url.searchParams.set("detailed", "true");
+  const headers: Record<string, string> = { Accept: "application/json" };
+  if (apiKey.trim()) headers["x-api-key"] = apiKey.trim();
+  const response = await safeFetch(url.toString(), {
+    method: "GET",
+    headers,
+    signal,
+    policy: {
+      allowLocal: false,
+      allowLoopback: false,
+      allowMdns: false,
+      allowedProtocols: ["https:"],
+    },
+    maxResponseBytes: 5 * 1024 * 1024,
+    decodeCompressedResponse: true,
+  });
+  const text = await response.text();
+  if (!response.ok) {
+    throw new Error(`NanoGPT video model discovery returned ${response.status}: ${formatProviderError(text)}`);
+  }
+  let json: unknown;
+  try {
+    json = JSON.parse(text) as unknown;
+  } catch {
+    throw new Error(`NanoGPT video model discovery returned non-JSON response: ${text.slice(0, 300)}`);
+  }
+  return parseNanoGptVideoModels(json);
+}
+
+async function generateNanoGptVideo(
+  baseUrl: string,
+  apiKey: string,
+  request: VideoGenerationRequest,
+): Promise<VideoGenerationResult> {
+  if (!apiKey.trim()) throw new Error("NanoGPT video generation requires a NanoGPT API key");
+  const model = request.model?.trim();
+  if (!model) throw new Error("NanoGPT video generation requires a selected video model");
+
+  const body: Record<string, unknown> = {
+    model,
+    prompt: request.prompt,
+    duration: `${Math.max(1, Math.trunc(request.durationSeconds))}s`,
+    aspect_ratio: request.aspectRatio,
+  };
+  if (request.resolution) body.resolution = request.resolution;
+  if (request.referenceImage) body.imageDataUrl = referenceImageToDataUri(request.referenceImage);
+  const debugBody = request.referenceImage ? { ...body, imageDataUrl: "[redacted reference image]" } : body;
+  logDebugOverride(
+    request.debugMode === true || isDebugAgentsEnabled(),
+    "[video-gen/nanogpt] final request payload:\n%s",
+    JSON.stringify(debugBody, null, 2),
+  );
+
+  const started = await safeFetch(buildNanoGptVideoUrl(baseUrl, "generate-video"), {
+    method: "POST",
+    headers: nanoGptHeaders(apiKey),
+    body: JSON.stringify(body),
+    signal: request.signal,
+    policy: {
+      allowLocal: false,
+      allowLoopback: false,
+      allowMdns: false,
+      allowedProtocols: ["https:"],
+    },
+    maxResponseBytes: 2 * 1024 * 1024,
+    decodeCompressedResponse: true,
+  });
+  const startText = await started.text();
+  if (!started.ok) {
+    throw new Error(`NanoGPT video generation returned ${started.status}: ${formatProviderError(startText)}`);
+  }
+  let startJson: unknown;
+  try {
+    startJson = JSON.parse(startText) as unknown;
+  } catch {
+    throw new Error(`NanoGPT video generation returned non-JSON response: ${startText.slice(0, 300)}`);
+  }
+  const startRecord = asRecord(startJson);
+  const startData = asRecord(startRecord.data);
+  const requestId =
+    readString(startRecord.runId) ??
+    readString(startRecord.id) ??
+    readString(startData.runId) ??
+    readString(startData.id);
+  if (!requestId) throw new Error("NanoGPT video generation response did not include a run id");
+
+  const pollUrl = new URL(buildNanoGptVideoUrl(baseUrl, "video/status"));
+  pollUrl.searchParams.set("requestId", requestId);
+  while (true) {
+    await delayWithSignal(NANOGPT_POLL_INTERVAL_MS, request.signal);
+    const polled = await safeFetch(pollUrl.toString(), {
+      method: "GET",
+      headers: nanoGptHeaders(apiKey),
+      signal: request.signal,
+      policy: {
+        allowLocal: false,
+        allowLoopback: false,
+        allowMdns: false,
+        allowedProtocols: ["https:"],
+      },
+      maxResponseBytes: 2 * 1024 * 1024,
+      decodeCompressedResponse: true,
+    });
+    const pollText = await polled.text();
+    if (!polled.ok) {
+      throw new Error(`NanoGPT video polling returned ${polled.status}: ${formatProviderError(pollText)}`);
+    }
+    let pollJson: unknown;
+    try {
+      pollJson = JSON.parse(pollText) as unknown;
+    } catch {
+      throw new Error(`NanoGPT video polling returned non-JSON response: ${pollText.slice(0, 300)}`);
+    }
+    const pollRecord = asRecord(pollJson);
+    const data = asRecord(pollRecord.data);
+    const status = (readString(data.status) ?? readString(pollRecord.status))?.toUpperCase();
+    if (status === "COMPLETED") {
+      const url = findVideoUri(data.output) ?? findVideoUri(pollRecord.output);
+      if (!url) throw new Error("NanoGPT completed without a downloadable video URL");
+      return downloadNanoGptVideo(url, request.signal);
+    }
+    if (status === "FAILED" || status === "CANCELED" || status === "CANCELLED") {
+      const reason =
+        readString(data.userFriendlyError) ??
+        readString(data.error) ??
+        readString(data.message) ??
+        readString(pollRecord.error);
+      throw new Error(`NanoGPT video generation ${status.toLowerCase()}${reason ? `: ${reason}` : ""}`);
+    }
+    if (status && status !== "IN_QUEUE" && status !== "IN_PROGRESS" && status !== "PENDING") {
+      logger.debug("[video-gen/nanogpt] continuing after unknown status: %s", status);
+    }
+  }
+}
+
 async function generateSeedanceVideo(
   baseUrl: string,
   apiKey: string,
@@ -1190,6 +1562,26 @@ function buildOpenRouterContentUrl(baseUrl: string, jobId: string): string {
   return url.toString();
 }
 
+export function buildNanoGptVideoUrl(baseUrl: string, path: string): string {
+  const fallback = "https://nano-gpt.com/api";
+  const raw = (baseUrl || fallback).trim().replace(/\/+$/, "") || fallback;
+  try {
+    const url = new URL(raw);
+    const hostname = url.hostname.toLowerCase().replace(/\.$/, "");
+    if (url.protocol !== "https:" || (hostname !== "nano-gpt.com" && !hostname.endsWith(".nano-gpt.com"))) {
+      throw new Error("NanoGPT video connections must use an official nano-gpt.com HTTPS endpoint");
+    }
+    const root = url.pathname.replace(/\/+$/, "").replace(/\/v1$/i, "");
+    url.pathname = `${root}/${path.replace(/^\/+/, "")}`;
+    url.search = "";
+    url.hash = "";
+    return url.toString();
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith("NanoGPT video connections")) throw error;
+    throw new Error(`Invalid NanoGPT base URL: ${baseUrl}`);
+  }
+}
+
 function buildSeedanceUrl(baseUrl: string, path: string): string {
   const fallback = "https://api.seedance2.ai";
   const configured = baseUrl.trim();
@@ -1299,6 +1691,29 @@ async function downloadOpenRouterVideo(
   return { base64: buffer.toString("base64"), mimeType: "video/mp4", ext: "mp4" };
 }
 
+async function downloadNanoGptVideo(url: string, signal: AbortSignal | undefined): Promise<VideoGenerationResult> {
+  const res = await safeFetch(url, {
+    method: "GET",
+    headers: { Accept: "video/mp4,video/*;q=0.9,*/*;q=0.1" },
+    signal,
+    policy: {
+      allowLocal: false,
+      allowLoopback: false,
+      allowMdns: false,
+      allowedProtocols: ["https:"],
+    },
+    maxResponseBytes: MAX_VIDEO_RESPONSE_BYTES,
+    decodeCompressedResponse: true,
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`Failed to download NanoGPT video (${res.status}): ${formatProviderError(text)}`);
+  }
+  const buffer = Buffer.from(await res.arrayBuffer());
+  if (!isMp4Buffer(buffer)) throw new Error("NanoGPT returned a non-MP4 video payload");
+  return { base64: buffer.toString("base64"), mimeType: "video/mp4", ext: "mp4" };
+}
+
 async function downloadSeedanceVideo(
   url: string,
   baseUrl: string,
@@ -1372,6 +1787,14 @@ function openRouterHeaders(apiKey: string): Record<string, string> {
     "Content-Type": "application/json",
     Accept: "application/json",
     Authorization: `Bearer ${apiKey}`,
+  };
+}
+
+function nanoGptHeaders(apiKey: string): Record<string, string> {
+  return {
+    "Content-Type": "application/json",
+    Accept: "application/json",
+    "x-api-key": apiKey,
   };
 }
 

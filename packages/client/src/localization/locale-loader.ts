@@ -14,10 +14,15 @@ const INTENTIONALLY_EMPTY_TRANSLATION_KEYS = new Set([
   "ui.noodle.stageprofileview.s",
 ]);
 
-const localeAssets = import.meta.glob<string>("./locales/*.json", {
-  import: "default",
-  query: "?url",
-});
+const localeAssets: Record<string, LocaleAssetLoader> = import.meta.env
+  ? import.meta.glob<string>("./locales/*.json", {
+      import: "default",
+      query: "?url",
+    })
+  : {
+      [`./locales/${DEFAULT_APP_LANGUAGE}.json`]: async () =>
+        `${new URL(/* @vite-ignore */ ".", import.meta.url).href}locales/${DEFAULT_APP_LANGUAGE}.json`,
+    };
 const localeLoaders = new Map<string, LocaleAssetLoader>();
 
 function canonicalizeLocale(value: string): string | null {
@@ -66,7 +71,11 @@ export const APP_LANGUAGE_OPTIONS: readonly LocaleDescriptor[] = Object.freeze(
     .sort((left, right) => {
       if (left.id === DEFAULT_APP_LANGUAGE) return -1;
       if (right.id === DEFAULT_APP_LANGUAGE) return 1;
-      return left.label.localeCompare(right.label, left.id);
+      // Order by language code, not label: comparing native-script labels with
+      // a per-item collation locale is non-transitive across scripts and
+      // scrambled the dropdown. Code order also matches the Documentation
+      // Language selector, so the two pickers agree.
+      return left.id.localeCompare(right.id, "en");
     }),
 );
 

@@ -3,7 +3,10 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runInNewContext } from "node:vm";
-import { createPersonalExtensionSchema } from "../../packages/shared/src/schemas/personal-extension.schema.js";
+import {
+  createPersonalExtensionSchema,
+  updatePersonalExtensionSchema,
+} from "../../packages/shared/src/schemas/personal-extension.schema.js";
 import type { DB } from "../../packages/server/src/db/connection.js";
 import { createFileNativeDB } from "../../packages/server/src/db/file-backed-store.js";
 import { appSettings, installedExtensions } from "../../packages/server/src/db/schema/index.js";
@@ -26,6 +29,17 @@ const clientContributionSource = readSource("../../packages/client/src/lib/perso
 const clientContributionPanelSource = readSource(
   "../../packages/client/src/components/panels/PersonalExtensionPanel.tsx",
 );
+const clientContributionSlotSource = readSource(
+  "../../packages/client/src/components/extensions/PersonalExtensionContributionSlot.tsx",
+);
+const clientContributionIconSource = readSource(
+  "../../packages/client/src/components/extensions/PersonalExtensionContributionIcon.tsx",
+);
+const clientContributionMenuSource = readSource(
+  "../../packages/client/src/components/layout/PersonalExtensionContributionsMenu.tsx",
+);
+const rightPanelSource = readSource("../../packages/client/src/components/layout/RightPanel.tsx");
+const chatSidebarSource = readSource("../../packages/client/src/components/layout/ChatSidebar.tsx");
 const clientSettingsSource = readSource(
   "../../packages/client/src/components/panels/settings/PersonalExtensionsSettings.tsx",
 );
@@ -91,12 +105,39 @@ assert.match(clientInjectorSource, /canReadPersona \? context\.personaId : null/
 assert.doesNotMatch(clientContextSource, /\bmessages?\b|\bfetch\b/iu);
 assert.match(clientInjectorSource, /extensionFetch\(active\.extension\.id,\s*"context"/u);
 assert.match(clientContributionSource, /PERSONAL_EXTENSION_UI_LIMITS/u);
+assert.match(clientContributionSource, /PERSONAL_EXTENSION_CONTRIBUTION_SURFACES/u);
+assert.match(clientContributionSource, /PERSONAL_EXTENSION_CONTRIBUTION_POSITIONS/u);
+assert.match(clientContributionSlotSource, /contribution\.surface === surface/u);
+assert.match(clientContributionSlotSource, /activatePersonalExtensionContribution\(contribution\.key\)/u);
+assert.match(clientContributionIconSource, /lucide-react\/dynamic/u);
+assert.match(clientContributionIconSource, /CONTRIBUTION_ICON_NAMES\.has\(name\)/u);
+assert.match(clientContributionMenuSource, /menuContributionCount = menuItems\.length \+ panels\.length/u);
+assert.doesNotMatch(
+  clientContributionMenuSource,
+  /const buttons = contributions\.filter\(\(contribution\) => contribution\.kind === "button"\);/u,
+);
+for (const [panel, surface] of [
+  ["bot-browser", "bots"],
+  ["characters", "characters"],
+  ["personas", "personas"],
+  ["lorebooks", "lorebooks"],
+  ["presets", "presets"],
+  ["connections", "connections"],
+  ["agents", "agents"],
+  ["settings", "settings"],
+]) {
+  assert.match(rightPanelSource, new RegExp(`(?:"${panel}"|${panel}): "${surface}"`, "u"));
+}
+for (const position of ["header", "before-content", "after-content"]) {
+  assert.match(chatSidebarSource, new RegExp(`surface="chats"[\\s\\S]{0,80}position="${position}"`, "u"));
+  assert.match(rightPanelSource, new RegExp(`position="${position}"`, "u"));
+}
 assert.doesNotMatch(clientContributionPanelSource, /dangerouslySetInnerHTML|innerHTML/u);
 assert.match(clientContributionPanelSource, /aria-label=\{element\.label \? undefined :/u);
 assert.match(clientContributionPanelSource, /\[activePanelKey, defaultsKey\]/u);
 assert.doesNotMatch(clientContributionPanelSource, /\[activePanelKey, defaultsKey, elements\]/u);
-assert.match(clientHooksSource, /refetchInterval:\s*2_000/u);
-assert.match(clientHooksSource, /refetchIntervalInBackground:\s*true/u);
+assert.doesNotMatch(clientHooksSource, /refetchInterval/u);
+assert.match(clientHooksSource, /staleTime:\s*30_000/u);
 assert.match(routeSource, /worker-src blob:/u);
 assert.match(routeSource, /connect-src 'none'/u);
 assert.match(routeSource, /new Worker\(workerUrl\)/u);
@@ -138,6 +179,19 @@ const manifestWithEnabled = createPersonalExtensionSchema.parse({
 });
 assert.equal("enabled" in manifestWithEnabled, false);
 
+const sourceOverOneMiB = `/*${"x".repeat(1024 * 1024)}*/`;
+assert.equal(
+  createPersonalExtensionSchema.parse({ name: "Large browser draft", runtime: "client", js: sourceOverOneMiB }).js,
+  sourceOverOneMiB,
+);
+assert.equal(
+  createPersonalExtensionSchema.parse({ name: "Large server draft", runtime: "server", serverJs: sourceOverOneMiB })
+    .serverJs,
+  sourceOverOneMiB,
+);
+assert.equal(updatePersonalExtensionSchema.parse({ js: sourceOverOneMiB }).js, sourceOverOneMiB);
+assert.equal(updatePersonalExtensionSchema.parse({ serverJs: sourceOverOneMiB }).serverJs, sourceOverOneMiB);
+
 const storageDir = mkdtempSync(join(tmpdir(), "marinara-personal-extension-security-"));
 const previousFileStorageDir = process.env.FILE_STORAGE_DIR;
 const previousExternalGate = process.env.ENABLE_EXTERNAL_EXTENSIONS;
@@ -178,6 +232,20 @@ try {
   assert.equal(migratedRows[0]!.source, "legacy");
 
   const storage = createPersonalExtensionsStorage(db);
+  const largeDraft = await storage.create({
+    name: "Large source draft",
+    runtime: "client",
+    js: sourceOverOneMiB,
+  });
+  assert.ok(largeDraft);
+  assert.equal(largeDraft.js, sourceOverOneMiB);
+  const largeServerUpdate = await storage.update(largeDraft.id, {
+    runtime: "server",
+    serverJs: sourceOverOneMiB,
+  });
+  assert.equal(largeServerUpdate?.serverJs, sourceOverOneMiB);
+  assert.equal(largeServerUpdate?.revisions[0]?.js, sourceOverOneMiB);
+
   const externalDraft = await storage.create(
     {
       name: "Dropped external extension",
@@ -316,6 +384,7 @@ try {
         name: "Sandbox capability proof",
         runtime: "server",
         serverJs: `
+          ${sourceOverOneMiB}
           const escapedProcess = globalThis.constructor.constructor("return process")();
           const fs = escapedProcess.getBuiltinModule("node:fs");
           const childProcess = escapedProcess.getBuiltinModule("node:child_process");
@@ -480,7 +549,57 @@ try {
   assert.match(worker, /"ui-contribution-register"/u, "Worker must register declarative host contributions");
   assert.match(worker, /"ui-contribution-activate"/u, "Worker must receive host contribution activation");
   assert.match(worker, /"ui-contribution-event"/u, "Worker must receive host-rendered control events");
+  assert.match(worker, /contributionSurfaces/u, "Worker must validate safe contribution surfaces");
+  assert.match(worker, /contributionPositions/u, "Worker must validate safe contribution positions");
   assert.doesNotMatch(worker, /\bdocument\b/u, "Worker source must never touch the DOM");
+
+  const surfaceMessages: Array<{ type?: string; contribution?: Record<string, unknown> }> = [];
+  let dispatchSurfaceMessage: ((event: { data: unknown }) => void) | undefined;
+  const surfaceWorker = browserWorkerSource({
+    ...uiExtension,
+    id: "surface-demo",
+    name: "Surface Demo",
+    capabilities: [],
+    js: `
+      marinara.ui.registerContribution({
+        id: "preset-helper",
+        kind: "button",
+        label: "Preset helper",
+        icon: "list-sparkles",
+        surface: "presets",
+        position: "before-content",
+      });
+    `,
+  });
+  runInNewContext(surfaceWorker, {
+    self: {
+      postMessage: (message: { type?: string; contribution?: Record<string, unknown> }) =>
+        surfaceMessages.push(message),
+      setTimeout,
+      clearTimeout,
+      setInterval: () => 0,
+      clearInterval: () => undefined,
+      addEventListener: (type: string, listener: (event: { data: unknown }) => void) => {
+        if (type === "message") dispatchSurfaceMessage = listener;
+      },
+      close: () => undefined,
+    },
+  });
+  assert.ok(dispatchSurfaceMessage, "Surface worker must register its host message listener");
+  dispatchSurfaceMessage({ data: { type: "context-update", context: { chatId: null, characterIds: [] } } });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const surfaceContribution = surfaceMessages.find(
+    (message) => message.type === "ui-contribution-register",
+  )?.contribution;
+  assert.deepEqual(JSON.parse(JSON.stringify(surfaceContribution)), {
+    id: "preset-helper",
+    kind: "button",
+    label: "Preset helper",
+    icon: "list-sparkles",
+    surface: "presets",
+    position: "before-content",
+  });
+  dispatchSurfaceMessage({ data: { type: "stop" } });
 
   const lifecycleMessages: Array<{ type?: string; level?: string; args?: unknown[] }> = [];
   let dispatchLifecycleMessage: ((event: { data: unknown }) => void) | undefined;
@@ -712,8 +831,11 @@ try {
 }
 
 {
-  const { normalizePersonalExtensionImportEntry, personalExtensionEntriesFromJson } =
-    await import("../../packages/client/src/lib/personal-extension-import.js");
+  const {
+    normalizePersonalExtensionImportEntry,
+    personalExtensionEntriesFromJson,
+    personalExtensionEntryFromSourceFile,
+  } = await import("../../packages/client/src/lib/personal-extension-import.js");
   const [legacyEntry] = personalExtensionEntriesFromJson(
     {
       kind: "marinara.extension",
@@ -737,6 +859,17 @@ try {
   assert.ok(explicitSandboxEntry);
   const explicitSandboxDraft = normalizePersonalExtensionImportEntry(explicitSandboxEntry, "Safe");
   assert.deepEqual(explicitSandboxDraft?.capabilities, []);
+
+  for (const [fileName, runtime, sourceField] of [
+    ["large-browser.js", "client", "js"],
+    ["large-server.server.js", "server", "serverJs"],
+  ] as const) {
+    const entry = personalExtensionEntryFromSourceFile(fileName, sourceOverOneMiB);
+    assert.ok(entry);
+    const draft = normalizePersonalExtensionImportEntry(entry, fileName);
+    assert.equal(draft?.runtime, runtime);
+    assert.equal(draft?.[sourceField], sourceOverOneMiB);
+  }
 }
 
 {
@@ -825,12 +958,27 @@ try {
     }),
     null,
   );
-  assert.equal(
+  assert.deepEqual(
     normalizePersonalExtensionContribution({
       id: "unknown-icon",
       kind: "button",
-      label: "Invalid",
+      label: "Fallback icon",
       icon: "remote-image-url",
+    }),
+    {
+      id: "unknown-icon",
+      kind: "button",
+      label: "Fallback icon",
+      icon: "remote-image-url",
+      surface: "top-bar",
+    },
+  );
+  assert.equal(
+    normalizePersonalExtensionContribution({
+      id: "unsafe-icon",
+      kind: "button",
+      label: "Invalid",
+      icon: "https://example.invalid/icon.svg",
     }),
     null,
   );

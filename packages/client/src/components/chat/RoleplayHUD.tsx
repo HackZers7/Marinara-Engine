@@ -9,7 +9,7 @@ import { createPortal } from "react-dom";
 import {
   MapPin,
   Users,
-  Package,
+  Backpack,
   Scroll,
   Sparkles,
   Swords,
@@ -27,8 +27,15 @@ import { WorldClockIcon, WorldThermometerIcon } from "../ui/WorldStateInstrument
 import { useGameStateStore } from "../../stores/game-state.store";
 import { useAgentStore, EMPTY_AGENT_TYPES, EMPTY_AGENT_FAILURES } from "../../stores/agent.store";
 import { useAgentConfigs, useCustomAgentRuns, type AgentConfigRow } from "../../hooks/use-agents";
+import { useUpdateMessageExtra } from "../../hooks/use-chats";
 import { discardPendingGameStatePatch, useGameStatePatcher } from "../../hooks/use-game-state-patcher";
 import { useUIStore } from "../../stores/ui.store";
+import { useReducedAmbientEffects } from "../../hooks/use-reduced-ambient-effects";
+import {
+  partitionTrackerCapabilityPackages,
+  useInstalledCapabilityPackages,
+} from "../../hooks/use-capability-packages";
+import { CapabilityElement } from "../capabilities/CapabilityElement";
 import {
   classifyWorldWeather,
   getLocationPinColor,
@@ -37,9 +44,10 @@ import {
   getWorldTimeDisplay,
   type WorldWeatherFamily,
 } from "../../lib/world-state-helpers";
-import { TrackerLockProvider } from "../../features/tracker-panel/components/TrackerLockContext";
+import { TrackerLockProvider, useTrackerLockContext } from "../../features/tracker-panel/components/TrackerLockContext";
+import { buildInventoryTrackerEditPatch } from "../../features/tracker-panel/lib/inventory-tracker-edit";
 import { useTrackerFieldLockUpdater } from "../../features/tracker-panel/hooks/use-tracker-field-lock-updater";
-import { ROLEPLAY_POPOVER_SCROLL_AREA, ROLEPLAY_POPOVER_SHELL } from "./roleplay-popover-styles";
+import { NEUTRAL_PANEL_SCROLL_AREA, NEUTRAL_PANEL_SHELL } from "../ui/neutral-surface-styles";
 import {
   CHAT_TOOLBAR_ICON_GAP_CLASS,
   CHAT_TOOLBAR_MOBILE_OVERFLOW_HEIGHT_CLASS,
@@ -49,7 +57,8 @@ import type {
   GameState,
   PresentCharacter,
   CharacterStat,
-  InventoryItem,
+  InventoryTrackerGroup,
+  InventoryTrackerRow,
   QuestProgress,
   CustomTrackerField,
   WorldCustomField,
@@ -57,17 +66,14 @@ import type {
   TrackerHiddenFields,
 } from "@marinara-engine/shared";
 import {
-  inventoryItemTrackerLockPrefix,
   normalizeTrackerFieldLocksForState,
   normalizeTrackerHiddenFields,
-  removeTrackerFieldLockPrefix,
   toggleTrackerFieldLock,
 } from "@marinara-engine/shared";
 import type { TrackerTemperatureUnit } from "../../stores/ui.store";
 import { useTranslation as useUiTranslation } from "react-i18next";
 
 const ACTIONS_DROPDOWN_WIDTH_PX = 288;
-const EMPTY_INVENTORY: InventoryItem[] = [];
 const EMPTY_AGENT_TYPE_SET = new Set<string>();
 
 interface RoleplayHUDProps {
@@ -97,8 +103,8 @@ const PersonaStatsPanel = lazy(async () =>
 const CharactersPanel = lazy(async () =>
   import("./RoleplayHUDPanels").then((module) => ({ default: module.CharactersPanel })),
 );
-const InventoryPanel = lazy(async () =>
-  import("./RoleplayHUDPanels").then((module) => ({ default: module.InventoryPanel })),
+const RoleplayInventoryTrackerPanel = lazy(async () =>
+  import("./RoleplayHUDPanels").then((module) => ({ default: module.RoleplayInventoryTrackerPanel })),
 );
 const QuestsPanel = lazy(async () => import("./RoleplayHUDPanels").then((module) => ({ default: module.QuestsPanel })));
 const CustomTrackerPanel = lazy(async () =>
@@ -125,10 +131,23 @@ export function RoleplayHUD({
   const gameState = useGameStateStore((s) => s.current);
   const gameStateRefreshing = useGameStateStore((s) => s.isRefreshing);
   const setGameState = useGameStateStore((s) => s.setGameState);
-  const { patchField, patchPlayerStats } = useGameStatePatcher(chatId, "roleplay-hud");
+  const { patchField, patchPlayerStats, patchPlayerStatsMany } = useGameStatePatcher(chatId, "roleplay-hud");
 
   const { data: agentConfigs } = useAgentConfigs();
   const enabledAgentTypes = enabledAgentTypesProp ?? EMPTY_AGENT_TYPE_SET;
+  const { data: installedCapabilities = [] } = useInstalledCapabilityPackages();
+  const roleplayTrackerPackages = installedCapabilities.filter(
+    (item) =>
+      item.status === "active" &&
+      enabledAgentTypes.has(item.id) &&
+      Boolean(item.manifest.entrypoints.client) &&
+      item.manifest.contributions?.slots?.includes("roleplay-tracker"),
+  );
+  const {
+    memoryNag: memoryNagTrackerPackages,
+    beholder: beholderTrackerPackages,
+    other: otherRoleplayTrackerPackages,
+  } = partitionTrackerCapabilityPackages(roleplayTrackerPackages);
 
   const thoughtBubbles = useAgentStore((s) => s.thoughtBubbles);
   const isAgentProcessing = useAgentStore((s) => s.processingChatIds.includes(chatId));
@@ -141,6 +160,7 @@ export function RoleplayHUD({
   const dismissThoughtBubble = useAgentStore((s) => s.dismissThoughtBubble);
   const clearThoughtBubbles = useAgentStore((s) => s.clearThoughtBubbles);
   const resetAgentStore = useAgentStore((s) => s.reset);
+  const updateMessageExtra = useUpdateMessageExtra(chatId);
   const trackerPanelEnabled = useUIStore((s) => s.trackerPanelEnabled);
   const trackerPanelOpen = useUIStore((s) => s.trackerPanelOpen);
   const trackerPanelHideHudWidgets = useUIStore((s) => s.trackerPanelHideHudWidgets);
@@ -185,6 +205,9 @@ export function RoleplayHUD({
         attributes: null,
         skills: {},
         inventory: [],
+        inventoryTrackerCurrencies: [],
+        inventoryTrackerEquipped: [],
+        inventoryTrackerInventory: [],
         activeQuests: [],
         status: "",
       },
@@ -209,8 +232,18 @@ export function RoleplayHUD({
     api.patch(`/chats/${chatId}/game-state`, { ...cleared, manual: true, clearOverrides: true }).catch(() => {});
     // Clear committed agent runs & memory from DB + reset client state
     api.delete(`/agents/runs/${chatId}`).catch(() => {});
+    const latestAssistantMessage = [...(injectionSourceMessages ?? [])]
+      .reverse()
+      .find((message) => message.role === "assistant");
+    if (latestAssistantMessage) {
+      updateMessageExtra.mutate({ messageId: latestAssistantMessage.id, extra: { cyoaChoices: [] } });
+    }
     resetAgentStore();
-  }, [chatId, setGameState, resetAgentStore]);
+  }, [chatId, injectionSourceMessages, resetAgentStore, setGameState, updateMessageExtra]);
+  const stopAgents = useCallback(async () => {
+    const result = await api.post<{ aborted: boolean }>("/generate/abort", { chatId, agentsOnly: true });
+    if (!result.aborted) throw new Error("No active agent run was found");
+  }, [chatId]);
 
   const date = gameState?.date ?? null;
   const time = gameState?.time ?? null;
@@ -222,9 +255,14 @@ export function RoleplayHUD({
   const personaStatBars = gameState?.personaStats ?? [];
   const playerStats = gameState?.playerStats ?? null;
   const personaStatus = playerStats?.status ?? "";
-  const inventory = playerStats?.inventory ?? EMPTY_INVENTORY;
   const activeQuests = playerStats?.activeQuests ?? [];
   const customTrackerFields = playerStats?.customTrackerFields ?? [];
+  const inventoryTrackerCurrencies = playerStats?.inventoryTrackerCurrencies ?? [];
+  const inventoryTrackerEquipped = playerStats?.inventoryTrackerEquipped ?? [];
+  const inventoryTrackerInventory = playerStats?.inventoryTrackerInventory ?? [];
+  // Editing one group can rewrite two, so this must land as a single patch.
+  const editInventoryTracker = (group: InventoryTrackerGroup, rows: InventoryTrackerRow[]) =>
+    patchPlayerStatsMany((current) => buildInventoryTrackerEditPatch(current, group, rows));
   const fieldLocks = gameState ? normalizeTrackerFieldLocksForState(gameState.fieldLocks, gameState) : null;
   const hiddenTrackerFields = gameState ? normalizeTrackerHiddenFields(gameState.hiddenTrackerFields) : null;
   const updateFieldLocks = useTrackerFieldLockUpdater({ chatId, fieldLocks, patchField });
@@ -239,19 +277,6 @@ export function RoleplayHUD({
     },
     [chatId, hiddenTrackerFields, patchField],
   );
-  const updateInventoryItems = useCallback(
-    (items: InventoryItem[]) => patchPlayerStats("inventory", items),
-    [patchPlayerStats],
-  );
-  const removeInventoryItem = useCallback(
-    (index: number) => {
-      updateInventoryItems(inventory.filter((_, itemIndex) => itemIndex !== index));
-      updateFieldLocks((locks) =>
-        removeTrackerFieldLockPrefix(locks, inventoryItemTrackerLockPrefix(inventory[index]!, index)),
-      );
-    },
-    [inventory, updateFieldLocks, updateInventoryItems],
-  );
   const toggleFieldLock = useCallback(
     (key: string) => {
       updateFieldLocks((locks) => toggleTrackerFieldLock(locks, key));
@@ -264,6 +289,9 @@ export function RoleplayHUD({
     enabledAgentTypes.has("character-tracker") ||
     enabledAgentTypes.has("quest") ||
     enabledAgentTypes.has("custom-tracker");
+  const hasInventoryTracker = enabledAgentTypes.has("inventory-tracker");
+  const hasMobilePlayerTrackerSections =
+    hasPlayerTrackerSections || hasInventoryTracker || memoryNagTrackerPackages.length > 0;
 
   // If mobileCompact, widgets are even narrower and action buttons are not cut off
 
@@ -277,17 +305,21 @@ export function RoleplayHUD({
       onUpdateFieldLocks={updateFieldLocks}
       onUpdateHiddenFields={updateHiddenTrackerFields}
     >
-      <div
-        className={cn(
-          "rpg-hud",
-          "flex items-center",
-          CHAT_TOOLBAR_ICON_GAP_CLASS,
-          mobileCompact && "min-w-0",
-        )}
-      >
+      <div className={cn("rpg-hud", "flex items-center", CHAT_TOOLBAR_ICON_GAP_CLASS, mobileCompact && "min-w-0")}>
         {trackerPanelEnabled && !trackerPanelOpen && (
           <TrackerPanelToggleButton onToggle={() => toggleTrackerPanel(chatId)} />
         )}
+
+        {beholderTrackerPackages.map((item) => (
+          <RoleplayTrackerCapability
+            key={`${item.id}-beholder-launcher`}
+            packageId={item.id}
+            chatId={chatId}
+            compact={mobileCompact}
+            onRerunSingleTracker={onRerunSingleTracker}
+            isTrackerRetryBusy={isTrackerBusy}
+          />
+        ))}
 
         {/* Actions (Agents + Clear) */}
         <ActionsGroup
@@ -305,6 +337,7 @@ export function RoleplayHUD({
           clearGameState={clearGameState}
           onRetriggerTrackers={onRetriggerTrackers}
           onRetryFailedAgents={onRetryFailedAgents}
+          onStopAgents={stopAgents}
           failedAgentTypes={failedAgentTypes}
           failedAgentFailures={failedAgentFailures}
           showInjectionsTab={showInjectionsTab}
@@ -339,11 +372,14 @@ export function RoleplayHUD({
               />
             )}
 
-            {hasPlayerTrackerSections && (
+            {hasMobilePlayerTrackerSections && (
               <CombinedPlayerWidget
                 showPersona={hasPersonaStatsTracker}
                 showCharacters={enabledAgentTypes.has("character-tracker")}
                 showQuests={enabledAgentTypes.has("quest")}
+                showInventory={hasInventoryTracker}
+                memoryNagPackageIds={memoryNagTrackerPackages.map((item) => item.id)}
+                chatId={chatId}
                 showCustomTracker={enabledAgentTypes.has("custom-tracker")}
                 personaStats={personaStatBars}
                 onUpdatePersonaStats={(bars) => patchField("personaStats", bars)}
@@ -351,17 +387,31 @@ export function RoleplayHUD({
                 onUpdatePersonaStatus={(status) => patchPlayerStats("status", status)}
                 characters={presentCharacters}
                 onUpdateCharacters={(chars) => patchField("presentCharacters", chars)}
-                inventory={inventory}
-                onUpdateInventory={updateInventoryItems}
-                onRemoveInventoryItem={removeInventoryItem}
                 quests={activeQuests}
                 onUpdateQuests={(q) => patchPlayerStats("activeQuests", q)}
+                inventoryCurrencies={inventoryTrackerCurrencies}
+                inventoryEquipped={inventoryTrackerEquipped}
+                inventory={inventoryTrackerInventory}
+                onUpdateInventoryCurrencies={(rows) => editInventoryTracker("currencies", rows)}
+                onUpdateInventoryEquipped={(rows) => editInventoryTracker("equipped", rows)}
+                onUpdateInventory={(rows) => editInventoryTracker("inventory", rows)}
                 customTrackerFields={customTrackerFields}
                 onUpdateCustomTracker={(fields) => patchPlayerStats("customTrackerFields", fields)}
                 onRerunSingleTracker={onRerunSingleTracker}
                 isTrackerRetryBusy={isTrackerBusy}
               />
             )}
+
+            {otherRoleplayTrackerPackages.map((item) => (
+              <RoleplayTrackerCapability
+                key={`${item.id}-roleplay-tracker-mobile`}
+                packageId={item.id}
+                chatId={chatId}
+                compact
+                onRerunSingleTracker={onRerunSingleTracker}
+                isTrackerRetryBusy={isTrackerBusy}
+              />
+            ))}
 
             {/* Manual tracker trigger button (mobile) */}
             {manualTrackers && onRetriggerTrackers && (
@@ -427,14 +477,6 @@ export function RoleplayHUD({
               />
             )}
 
-            {hasPersonaStatsTracker && (
-              <InventoryWidget
-                items={inventory}
-                onUpdate={updateInventoryItems}
-                onRemoveItem={removeInventoryItem}
-              />
-            )}
-
             {enabledAgentTypes.has("quest") && (
               <QuestsWidget
                 quests={activeQuests}
@@ -443,6 +485,29 @@ export function RoleplayHUD({
                 isTrackerRetryBusy={isTrackerBusy}
               />
             )}
+
+            {hasInventoryTracker && (
+              <InventoryTrackerWidget
+                currencies={inventoryTrackerCurrencies}
+                equipped={inventoryTrackerEquipped}
+                inventory={inventoryTrackerInventory}
+                onUpdateCurrencies={(rows) => editInventoryTracker("currencies", rows)}
+                onUpdateEquipped={(rows) => editInventoryTracker("equipped", rows)}
+                onUpdateInventory={(rows) => editInventoryTracker("inventory", rows)}
+                onRerunSingleTracker={onRerunSingleTracker}
+                isTrackerRetryBusy={isTrackerBusy}
+              />
+            )}
+
+            {memoryNagTrackerPackages.map((item) => (
+              <RoleplayTrackerCapability
+                key={`${item.id}-roleplay-tracker`}
+                packageId={item.id}
+                chatId={chatId}
+                onRerunSingleTracker={onRerunSingleTracker}
+                isTrackerRetryBusy={isTrackerBusy}
+              />
+            ))}
 
             {enabledAgentTypes.has("custom-tracker") && (
               <CustomTrackerWidget
@@ -453,6 +518,16 @@ export function RoleplayHUD({
               />
             )}
 
+            {otherRoleplayTrackerPackages.map((item) => (
+              <RoleplayTrackerCapability
+                key={`${item.id}-roleplay-tracker`}
+                packageId={item.id}
+                chatId={chatId}
+                onRerunSingleTracker={onRerunSingleTracker}
+                isTrackerRetryBusy={isTrackerBusy}
+              />
+            ))}
+
             {/* Manual tracker trigger button (desktop) */}
             {manualTrackers && onRetriggerTrackers && (
               <button
@@ -462,7 +537,11 @@ export function RoleplayHUD({
                 }}
                 disabled={isTrackerBusy}
                 className={cn(WIDGET, isTrackerBusy && "text-[var(--marinara-chat-chrome-button-text-active)]")}
-                title={isTrackerBusy ?localizeUi("ui.chat.roleplayhud.trackersRunning") :localizeUi("ui.chat.roleplayhud.runTrackers")}
+                title={
+                  isTrackerBusy
+                    ? localizeUi("ui.chat.roleplayhud.trackersRunning")
+                    : localizeUi("ui.chat.roleplayhud.runTrackers")
+                }
               >
                 <RefreshCw size="0.875rem" className={cn(isTrackerBusy && "animate-spin")} />
               </button>
@@ -482,6 +561,44 @@ export function RoleplayHUD({
 const HUD_ICON_BUTTON = getChatToolbarButtonClass({ compact: true });
 const MOBILE_HUD_BTN = cn(HUD_ICON_BUTTON, CHAT_TOOLBAR_MOBILE_OVERFLOW_HEIGHT_CLASS, "cursor-pointer select-none");
 
+function RoleplayTrackerCapability({
+  packageId,
+  chatId,
+  compact = false,
+  onRerunSingleTracker,
+  isTrackerRetryBusy,
+}: {
+  packageId: string;
+  chatId: string;
+  compact?: boolean;
+  onRerunSingleTracker?: (agentType: string) => void;
+  isTrackerRetryBusy?: boolean;
+}) {
+  const { lockMode, onSetLockMode } = useTrackerLockContext();
+  return (
+    <span className="contents [&_button>svg]:!text-inherit">
+      <CapabilityElement
+        packageId={packageId}
+        view="toolbar"
+        capabilityProps={{
+          chatId,
+          chatMode: "roleplay",
+          mobileCompact: compact,
+          onRerunTracker: onRerunSingleTracker ? () => onRerunSingleTracker(packageId) : undefined,
+          trackerRetryBusy: isTrackerRetryBusy,
+          lockMode,
+          onToggleLockMode: onSetLockMode ? () => onSetLockMode(!lockMode) : undefined,
+          toolbarButtonClass: getChatToolbarButtonClass({
+            compact,
+            className: compact ? CHAT_TOOLBAR_MOBILE_OVERFLOW_HEIGHT_CLASS : undefined,
+          }),
+        }}
+        className="contents"
+      />
+    </span>
+  );
+}
+
 function DeferredHUDPanelFallback({ label }: { label: string }) {
   return <div className="px-3 py-4 text-center text-[0.625rem] text-[var(--muted-foreground)]/60">{label}</div>;
 }
@@ -490,7 +607,9 @@ function DeferredActionsFallback({ isAgentProcessing }: { isAgentProcessing: boo
   const { t: localizeUi } = useUiTranslation();
   return (
     <div className="px-3 py-4 text-center text-[0.625rem] text-[var(--muted-foreground)]/60">
-      {isAgentProcessing ?localizeUi("ui.chat.deferredactionsfallback.loadingAgentActivity") :localizeUi("ui.chat.deferredactionsfallback.loadingActions")}
+      {isAgentProcessing
+        ? localizeUi("ui.chat.deferredactionsfallback.loadingAgentActivity")
+        : localizeUi("ui.chat.deferredactionsfallback.loadingActions")}
     </div>
   );
 }
@@ -530,6 +649,7 @@ interface ActionsGroupProps {
   clearGameState: () => void;
   onRetriggerTrackers?: () => void;
   onRetryFailedAgents?: () => void;
+  onStopAgents?: () => Promise<void>;
   failedAgentTypes: string[];
   failedAgentFailures: AgentFailure[];
   showInjectionsTab?: boolean;
@@ -550,13 +670,14 @@ function ActionsGroup({
   clearGameState,
   onRetriggerTrackers,
   onRetryFailedAgents,
+  onStopAgents,
   failedAgentTypes,
   failedAgentFailures,
   showInjectionsTab,
 }: ActionsGroupProps) {
   const btnRef = useRef<HTMLButtonElement>(null);
   const dropdownRef = useRef<HTMLDivElement>(null);
-  const [pos, setPos] = useState<{ top: number; left: number } | null>(null);
+  const [pos, setPos] = useState<{ top: number; left: number; centered: boolean } | null>(null);
   const echoMessages = useAgentStore((s) => s.echoMessages);
   const { data: customAgentRuns = [], isLoading: customAgentRunsLoading } = useCustomAgentRuns(chatId, agentsOpen);
 
@@ -569,8 +690,11 @@ function ActionsGroup({
     const aboveTop = rect.top - dropdownHeight - 4;
     const preferredTop = belowTop + dropdownHeight > window.innerHeight - 8 ? aboveTop : belowTop;
     const top = Math.max(8, Math.min(preferredTop, window.innerHeight - dropdownHeight - 8));
-    const left = Math.max(8, Math.min(rect.left, window.innerWidth - dropdownWidth - 8));
-    return { top, left };
+    const centered = window.innerWidth < 768;
+    const left = centered
+      ? Math.round(window.innerWidth / 2)
+      : Math.max(8, Math.min(rect.left, window.innerWidth - dropdownWidth - 8));
+    return { top, left, centered };
   }, []);
 
   // Position with fixed layout to avoid overflow clipping
@@ -631,11 +755,11 @@ function ActionsGroup({
       <div
         ref={dropdownRef}
         className={cn(
-          ROLEPLAY_POPOVER_SHELL,
-          ROLEPLAY_POPOVER_SCROLL_AREA,
+          NEUTRAL_PANEL_SHELL,
+          NEUTRAL_PANEL_SCROLL_AREA,
           "fixed z-[9999] max-h-80 w-72 max-w-[calc(100vw-1rem)] overflow-y-auto",
         )}
-        style={{ top: pos.top, left: pos.left }}
+        style={{ top: pos.top, left: pos.left, transform: pos.centered ? "translateX(-50%)" : undefined }}
       >
         <Suspense fallback={<DeferredActionsFallback isAgentProcessing={isAgentProcessing} />}>
           <RoleplayHUDActionsMenu
@@ -653,6 +777,7 @@ function ActionsGroup({
             clearGameState={clearGameState}
             onRetriggerTrackers={onRetriggerTrackers}
             onRetryFailedAgents={onRetryFailedAgents}
+            onStopAgents={onStopAgents}
             failedAgentTypes={failedAgentTypes}
             failedAgentFailures={failedAgentFailures}
             onClose={() => setAgentsOpen(false)}
@@ -711,13 +836,16 @@ function ActionsGroup({
 
 // ═══════════════════════════════════════════════
 // Combined Player Widget — merges Persona, Chars,
-// Inventory, and Quests into a single expandable panel
+// Quests, and custom fields into a single expandable panel
 // ═══════════════════════════════════════════════
 
 function CombinedPlayerWidget({
   showPersona,
   showCharacters,
   showQuests,
+  showInventory,
+  memoryNagPackageIds,
+  chatId,
   showCustomTracker,
   personaStats,
   onUpdatePersonaStats,
@@ -725,11 +853,14 @@ function CombinedPlayerWidget({
   onUpdatePersonaStatus,
   characters,
   onUpdateCharacters,
-  inventory,
-  onUpdateInventory,
-  onRemoveInventoryItem,
   quests,
   onUpdateQuests,
+  inventoryCurrencies,
+  inventoryEquipped,
+  inventory,
+  onUpdateInventoryCurrencies,
+  onUpdateInventoryEquipped,
+  onUpdateInventory,
   customTrackerFields,
   onUpdateCustomTracker,
   onRerunSingleTracker,
@@ -738,6 +869,9 @@ function CombinedPlayerWidget({
   showPersona: boolean;
   showCharacters: boolean;
   showQuests: boolean;
+  showInventory: boolean;
+  memoryNagPackageIds: string[];
+  chatId: string;
   showCustomTracker: boolean;
   personaStats: CharacterStat[];
   onUpdatePersonaStats: (bars: CharacterStat[]) => void;
@@ -745,11 +879,14 @@ function CombinedPlayerWidget({
   onUpdatePersonaStatus: (status: string) => void;
   characters: PresentCharacter[];
   onUpdateCharacters: (chars: PresentCharacter[]) => void;
-  inventory: InventoryItem[];
-  onUpdateInventory: (items: InventoryItem[]) => void;
-  onRemoveInventoryItem?: (index: number) => void;
   quests: QuestProgress[];
   onUpdateQuests: (quests: QuestProgress[]) => void;
+  inventoryCurrencies: InventoryTrackerRow[];
+  inventoryEquipped: InventoryTrackerRow[];
+  inventory: InventoryTrackerRow[];
+  onUpdateInventoryCurrencies: (rows: InventoryTrackerRow[]) => void;
+  onUpdateInventoryEquipped: (rows: InventoryTrackerRow[]) => void;
+  onUpdateInventory: (rows: InventoryTrackerRow[]) => void;
   customTrackerFields: CustomTrackerField[];
   onUpdateCustomTracker: (fields: CustomTrackerField[]) => void;
   onRerunSingleTracker?: (agentType: string) => void;
@@ -761,7 +898,12 @@ function CombinedPlayerWidget({
 
   return (
     <div className="relative">
-      <button ref={buttonRef} onClick={() => setOpen(!open)} className={WIDGET} title={localizeUi("ui.chat.combinedplayerwidget.playerTracker")}>
+      <button
+        ref={buttonRef}
+        onClick={() => setOpen(!open)}
+        className={WIDGET}
+        title={localizeUi("ui.chat.combinedplayerwidget.playerTracker")}
+      >
         <div className="flex h-4 items-center justify-center shrink-0">
           <Swords size="0.875rem" className="max-md:h-4 max-md:w-4" />
         </div>
@@ -774,11 +916,16 @@ function CombinedPlayerWidget({
         anchorRef={buttonRef}
         className="w-80 max-h-[min(75vh,32rem)]"
       >
-        <Suspense fallback={<DeferredHUDPanelFallback label={localizeUi("ui.chat.combinedplayerwidget.loadingTrackers")} />}>
+        <Suspense
+          fallback={<DeferredHUDPanelFallback label={localizeUi("ui.chat.combinedplayerwidget.loadingTrackers")} />}
+        >
           <CombinedPlayerPanel
             showPersona={showPersona}
             showCharacters={showCharacters}
             showQuests={showQuests}
+            showInventory={showInventory}
+            memoryNagPackageIds={memoryNagPackageIds}
+            chatId={chatId}
             showCustomTracker={showCustomTracker}
             personaStats={personaStats}
             onUpdatePersonaStats={onUpdatePersonaStats}
@@ -786,11 +933,14 @@ function CombinedPlayerWidget({
             onUpdatePersonaStatus={onUpdatePersonaStatus}
             characters={characters}
             onUpdateCharacters={onUpdateCharacters}
-            inventory={inventory}
-            onUpdateInventory={onUpdateInventory}
-            onRemoveInventoryItem={onRemoveInventoryItem}
             quests={quests}
             onUpdateQuests={onUpdateQuests}
+            inventoryCurrencies={inventoryCurrencies}
+            inventoryEquipped={inventoryEquipped}
+            inventory={inventory}
+            onUpdateInventoryCurrencies={onUpdateInventoryCurrencies}
+            onUpdateInventoryEquipped={onUpdateInventoryEquipped}
+            onUpdateInventory={onUpdateInventory}
             customTrackerFields={customTrackerFields}
             onUpdateCustomTracker={onUpdateCustomTracker}
             onClose={() => setOpen(false)}
@@ -884,8 +1034,8 @@ function WidgetPopover({
       ref={ref}
       style={pos ? { position: "fixed", top: pos.top, left: pos.left } : { position: "fixed", top: -9999, left: -9999 }}
       className={cn(
-        ROLEPLAY_POPOVER_SHELL,
-        ROLEPLAY_POPOVER_SCROLL_AREA,
+        NEUTRAL_PANEL_SHELL,
+        NEUTRAL_PANEL_SCROLL_AREA,
         "z-[9999] min-h-24 min-w-60 max-w-[calc(100vw-1rem)] resize overflow-auto",
         className,
         "!max-h-[calc(100vh-1rem)]",
@@ -918,23 +1068,13 @@ function CharactersWidget({
 
   return (
     <div className="relative">
-      <button ref={buttonRef} onClick={() => setOpen(!open)} className={WIDGET} title={localizeUi("ui.chat.characterswidget.presentCharacters")}>
-        {characters.length > 0 ? (
-          <div className="flex items-center -space-x-0.5">
-            {characters.slice(0, 3).map((c, i) => (
-              <span key={i} className="text-xs max-md:text-[0.5625rem] leading-none">
-                {c.emoji || "👤"}
-              </span>
-            ))}
-            {characters.length > 3 && (
-              <span className="text-[0.4375rem] text-[var(--muted-foreground)]/60 ml-0.5">
-                +{characters.length - 3}
-              </span>
-            )}
-          </div>
-        ) : (
-          <Users size="0.875rem" className="transition-colors max-md:h-3.5 max-md:w-3.5" />
-        )}
+      <button
+        ref={buttonRef}
+        onClick={() => setOpen(!open)}
+        className={WIDGET}
+        title={localizeUi("ui.chat.characterswidget.presentCharacters")}
+      >
+        <Users size="0.875rem" className="transition-colors max-md:h-3.5 max-md:w-3.5" />
       </button>
 
       <WidgetPopover
@@ -943,7 +1083,9 @@ function CharactersWidget({
         anchorRef={buttonRef}
         className="w-72 max-h-80 overflow-y-auto"
       >
-        <Suspense fallback={<DeferredHUDPanelFallback label={localizeUi("ui.chat.characterswidget.loadingCharacters")} />}>
+        <Suspense
+          fallback={<DeferredHUDPanelFallback label={localizeUi("ui.chat.characterswidget.loadingCharacters")} />}
+        >
           <CharactersPanel
             characters={characters}
             onUpdate={onUpdate}
@@ -980,7 +1122,12 @@ function PersonaStatsWidget({
 
   return (
     <div className="relative">
-      <button ref={buttonRef} onClick={() => setOpen(!open)} className={WIDGET} title={localizeUi("ui.chat.personastatswidget.personaStats")}>
+      <button
+        ref={buttonRef}
+        onClick={() => setOpen(!open)}
+        className={WIDGET}
+        title={localizeUi("ui.chat.personastatswidget.personaStats")}
+      >
         {bars.length > 0 ? (
           <div className="flex w-6 max-md:w-8 flex-col justify-center gap-0.5 max-md:gap-px shrink-0">
             {bars.map((bar) => {
@@ -1013,7 +1160,9 @@ function PersonaStatsWidget({
         anchorRef={buttonRef}
         className="w-60 max-h-80 overflow-y-auto"
       >
-        <Suspense fallback={<DeferredHUDPanelFallback label={localizeUi("ui.chat.personastatswidget.loadingPersonaStats")} />}>
+        <Suspense
+          fallback={<DeferredHUDPanelFallback label={localizeUi("ui.chat.personastatswidget.loadingPersonaStats")} />}
+        >
           <PersonaStatsPanel
             bars={bars}
             onUpdate={onUpdate}
@@ -1042,6 +1191,7 @@ function CustomTrackerWidget({
   isTrackerRetryBusy?: boolean;
 }) {
   const { t: localizeUi } = useUiTranslation();
+  const reduceAmbientEffects = useReducedAmbientEffects();
   const [open, setOpen] = useState(false);
   const buttonRef = useRef<HTMLButtonElement>(null);
   const [cycleIdx, setCycleIdx] = useState(0);
@@ -1049,13 +1199,13 @@ function CustomTrackerWidget({
 
   // Cycle through fields every 3 seconds
   useEffect(() => {
-    if (fields.length <= 1) return;
+    if (reduceAmbientEffects || fields.length <= 1) return;
     const timer = setInterval(() => {
       setCycleIdx((prev) => (prev + 1) % fields.length);
       setAnimKey((k) => k + 1);
     }, 3000);
     return () => clearInterval(timer);
-  }, [fields.length]);
+  }, [fields.length, reduceAmbientEffects]);
 
   useEffect(() => {
     if (cycleIdx >= fields.length) setCycleIdx(0);
@@ -1072,11 +1222,19 @@ function CustomTrackerWidget({
 
   return (
     <div className="relative">
-      <button ref={buttonRef} onClick={() => setOpen(!open)} className={WIDGET} title={localizeUi("ui.chat.customtrackerwidget.customTracker")}>
+      <button
+        ref={buttonRef}
+        onClick={() => setOpen(!open)}
+        className={WIDGET}
+        title={localizeUi("ui.chat.customtrackerwidget.customTracker")}
+      >
         {fields.length > 0 && currentField ? (
           <span
             key={animKey}
-            className="w-full px-0.5 text-center font-semibold leading-[1.2] animate-[inventory-cycle_0.4s_ease-out]"
+            className={cn(
+              "w-full px-0.5 text-center font-semibold leading-[1.2]",
+              !reduceAmbientEffects && "animate-[inventory-cycle_0.4s_ease-out]",
+            )}
             style={{ fontSize: `${previewFontSize}px` }}
           >
             {previewLabel}
@@ -1092,7 +1250,9 @@ function CustomTrackerWidget({
         anchorRef={buttonRef}
         className="w-72 max-h-80 overflow-y-auto"
       >
-        <Suspense fallback={<DeferredHUDPanelFallback label={localizeUi("ui.chat.customtrackerwidget.loadingCustomTracker")} />}>
+        <Suspense
+          fallback={<DeferredHUDPanelFallback label={localizeUi("ui.chat.customtrackerwidget.loadingCustomTracker")} />}
+        >
           <CustomTrackerPanel
             fields={fields}
             onUpdate={onUpdate}
@@ -1105,74 +1265,60 @@ function CustomTrackerWidget({
   );
 }
 
-// ── Inventory Widget ─────────────────────────
-
-function InventoryWidget({
-  items,
-  onUpdate,
-  onRemoveItem,
+function InventoryTrackerWidget({
+  currencies,
+  equipped,
+  inventory,
+  onUpdateCurrencies,
+  onUpdateEquipped,
+  onUpdateInventory,
+  onRerunSingleTracker,
+  isTrackerRetryBusy,
 }: {
-  items: InventoryItem[];
-  onUpdate: (items: InventoryItem[]) => void;
-  onRemoveItem?: (index: number) => void;
+  currencies: InventoryTrackerRow[];
+  equipped: InventoryTrackerRow[];
+  inventory: InventoryTrackerRow[];
+  onUpdateCurrencies: (rows: InventoryTrackerRow[]) => void;
+  onUpdateEquipped: (rows: InventoryTrackerRow[]) => void;
+  onUpdateInventory: (rows: InventoryTrackerRow[]) => void;
+  onRerunSingleTracker?: (agentType: string) => void;
+  isTrackerRetryBusy?: boolean;
 }) {
   const { t: localizeUi } = useUiTranslation();
   const [open, setOpen] = useState(false);
   const buttonRef = useRef<HTMLButtonElement>(null);
-  const [cycleIdx, setCycleIdx] = useState(0);
-  const [animKey, setAnimKey] = useState(0);
-
-  // Cycle through items every 3 seconds
-  useEffect(() => {
-    if (items.length <= 1) return;
-    const timer = setInterval(() => {
-      setCycleIdx((prev) => (prev + 1) % items.length);
-      setAnimKey((k) => k + 1);
-    }, 3000);
-    return () => clearInterval(timer);
-  }, [items.length]);
-
-  // Reset index if items shrink
-  useEffect(() => {
-    if (cycleIdx >= items.length) setCycleIdx(0);
-  }, [items.length, cycleIdx]);
-
-  const currentItem = items[cycleIdx];
-
-  // Auto-shrink font so the longest word fits on one line within ~36px usable width
-  const itemLabel = currentItem
-    ? currentItem.quantity > 1
-      ? `${currentItem.name} ×${currentItem.quantity}`
-      : currentItem.name
-    : "";
-  const longestWord = itemLabel.split(/\s+/).reduce((max, w) => Math.max(max, w.length), 0);
-  // ~0.6em per char at a given font size; widget inner ≈ 36px → fontSize ≤ 60/longestWord
-  const itemFontSize = Math.max(3.5, Math.min(6, 60 / Math.max(longestWord, 1)));
-
+  const total = currencies.length + equipped.length + inventory.length;
   return (
     <div className="relative">
-      <button ref={buttonRef} onClick={() => setOpen(!open)} className={WIDGET} title={localizeUi("ui.chat.inventorywidget.inventory")}>
-        {items.length > 0 && currentItem ? (
-          <span
-            key={animKey}
-            className="w-full px-0.5 text-center font-semibold leading-[1.2] animate-[inventory-cycle_0.4s_ease-out]"
-            style={{ fontSize: `${itemFontSize}px` }}
-          >
-            {itemLabel}
-          </span>
+      <button
+        ref={buttonRef}
+        onClick={() => setOpen(!open)}
+        className={WIDGET}
+        title={localizeUi("ui.chat.inventoryTracker.title")}
+      >
+        {total > 0 ? (
+          <span className="text-[0.625rem] font-semibold tabular-nums">{total}</span>
         ) : (
-          <Package size="0.875rem" className="max-md:h-3 max-md:w-3" />
+          <Backpack size="0.875rem" className="max-md:h-3 max-md:w-3" />
         )}
       </button>
-
       <WidgetPopover
         open={open}
         onClose={() => setOpen(false)}
         anchorRef={buttonRef}
-        className="w-64 max-h-80 overflow-y-auto"
+        className="w-[min(34rem,calc(100vw-1rem))] max-h-80 overflow-y-auto"
       >
-        <Suspense fallback={<DeferredHUDPanelFallback label={localizeUi("ui.chat.inventorywidget.loadingInventory")} />}>
-          <InventoryPanel items={items} onUpdate={onUpdate} onRemoveItem={onRemoveItem} />
+        <Suspense fallback={<DeferredHUDPanelFallback label={localizeUi("ui.chat.inventoryTracker.loading")} />}>
+          <RoleplayInventoryTrackerPanel
+            currencies={currencies}
+            equipped={equipped}
+            inventory={inventory}
+            onUpdateCurrencies={onUpdateCurrencies}
+            onUpdateEquipped={onUpdateEquipped}
+            onUpdateInventory={onUpdateInventory}
+            onRerunSingleTracker={onRerunSingleTracker}
+            isTrackerRetryBusy={isTrackerRetryBusy}
+          />
         </Suspense>
       </WidgetPopover>
     </div>
@@ -1203,7 +1349,12 @@ function QuestsWidget({
 
   return (
     <div className="relative">
-      <button ref={buttonRef} onClick={() => setOpen(!open)} className={WIDGET} title={localizeUi("ui.chat.questswidget.activeQuests")}>
+      <button
+        ref={buttonRef}
+        onClick={() => setOpen(!open)}
+        className={WIDGET}
+        title={localizeUi("ui.chat.questswidget.activeQuests")}
+      >
         {currentObjective ? (
           <span className="widget-scroll-text w-full px-0.5 text-center text-[0.375rem] font-semibold leading-[1.15] max-md:text-[0.5rem]">
             <span className="inline-flex animate-[widget-scroll_8s_linear_infinite] whitespace-nowrap">
@@ -1294,15 +1445,14 @@ function CombinedWorldWidget({
   const dateDisplay = getWorldDateDisplay(date);
   const timeDisplay = getWorldTimeDisplay(time);
   const timeColor =
-    timeDisplay.kind === "empty"
-      ? "text-[var(--muted-foreground)]/70"
-      : HUD_TIME_COLORS[timeDisplay.timeOfDay];
+    timeDisplay.kind === "empty" ? "text-[var(--muted-foreground)]/70" : HUD_TIME_COLORS[timeDisplay.timeOfDay];
   const weatherColor =
-    weatherFamily === "atmosphere" && !weather
-      ? "text-[var(--muted-foreground)]/70"
-      : weatherStyle.color;
+    weatherFamily === "atmosphere" && !weather ? "text-[var(--muted-foreground)]/70" : weatherStyle.color;
   const temperatureDisplay = getTemperatureGaugeDisplay(temperature, trackerTemperatureUnit);
   const tempColor = temperatureDisplay.color;
+  const hasWorldState =
+    [location, date, time, weather, temperature].some((value) => value.trim().length > 0) ||
+    worldCustomFields.some((field) => field.name.trim().length > 0 || field.value.trim().length > 0);
 
   return (
     <div className="relative">
@@ -1316,57 +1466,60 @@ function CombinedWorldWidget({
             className: CHAT_TOOLBAR_MOBILE_OVERFLOW_HEIGHT_CLASS,
           }),
           "cursor-pointer select-none",
-          "w-auto min-w-8 gap-1 px-2",
+          hasWorldState ? "w-auto min-w-8 gap-1 px-2" : "group flex-col gap-0 overflow-hidden",
         )}
         title={localizeUi("ui.panels.appearancesettings.worldState")}
       >
-        {/* Location pin */}
-        <MapPin size="0.9375rem" className={cn("shrink-0 drop-shadow-sm", pinColor)} />
+        {!hasWorldState ? (
+          <MapPin size="0.875rem" className="shrink-0 max-md:h-3.5 max-md:w-3.5" />
+        ) : (
+          <>
+            {/* Location pin */}
+            <MapPin size="0.9375rem" className="shrink-0 drop-shadow-sm" />
 
-        {/* Mini calendar with day number */}
-        <WorldCalendarIcon
-          day={dateDisplay.day}
-          className={cn("h-4 w-4 shrink-0 drop-shadow-sm", dateDisplay.iconColor)}
-        />
+            {/* Mini calendar with day number */}
+            <WorldCalendarIcon
+              day={dateDisplay.day}
+              className={cn("h-4 w-4 shrink-0 drop-shadow-sm", dateDisplay.iconColor)}
+            />
 
-        <WorldClockIcon
-          display={timeDisplay}
-          variant="monochrome"
-          className={cn("h-4 w-4 shrink-0 drop-shadow-sm", timeColor)}
-        />
+            <WorldClockIcon
+              display={timeDisplay}
+              variant="monochrome"
+              className={cn("h-4 w-4 shrink-0 drop-shadow-sm", timeColor)}
+            />
 
-        {/* Weather emoji */}
-        <span
-          className={cn(
-            "text-sm leading-none shrink-0 drop-shadow-sm [text-shadow:0_0_8px_currentColor]",
-            weatherColor,
-          )}
-        >
-          {weatherEmoji}
-        </span>
+            {/* Weather emoji */}
+            <span
+              className={cn(
+                "text-sm leading-none shrink-0 drop-shadow-sm [text-shadow:0_0_8px_currentColor]",
+                weatherColor,
+              )}
+            >
+              {weatherEmoji}
+            </span>
 
-        <WorldThermometerIcon
-          display={temperatureDisplay}
-          variant="solid-bulb"
-          className="h-4 w-[0.625rem] shrink-0"
-        />
-        {temperatureDisplay.isPure && (
-          <span
-            className="shrink-0 text-[0.5rem] font-bold leading-none md:text-[0.5625rem]"
-            style={{ color: tempColor }}
-          >
-            {temperatureDisplay.label}
-          </span>
+            <WorldThermometerIcon
+              display={temperatureDisplay}
+              variant="solid-bulb"
+              className="h-4 w-[0.625rem] shrink-0"
+            />
+            {temperatureDisplay.isPure && (
+              <span
+                className="shrink-0 text-[0.5rem] font-bold leading-none md:text-[0.5625rem]"
+                style={{ color: tempColor }}
+              >
+                {temperatureDisplay.label}
+              </span>
+            )}
+          </>
         )}
       </button>
 
-      <WidgetPopover
-        open={open}
-        onClose={() => setOpen(false)}
-        anchorRef={buttonRef}
-        className="w-64"
-      >
-        <Suspense fallback={<DeferredHUDPanelFallback label={localizeUi("ui.chat.combinedworldwidget.loadingWorldState")} />}>
+      <WidgetPopover open={open} onClose={() => setOpen(false)} anchorRef={buttonRef} className="w-64">
+        <Suspense
+          fallback={<DeferredHUDPanelFallback label={localizeUi("ui.chat.combinedworldwidget.loadingWorldState")} />}
+        >
           <CombinedWorldPanel
             location={location}
             date={date}

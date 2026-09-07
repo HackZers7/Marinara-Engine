@@ -22,7 +22,8 @@ import {
 } from "./agent-executor.js";
 import { randomUUID } from "node:crypto";
 import { logger } from "../../lib/logger.js";
-import { settleAgentJobsWithConcurrencyLimit } from "./agent-concurrency.js";
+import { createAgentConcurrencyLimiter, settleAgentJobsWithConcurrencyLimit } from "./agent-concurrency.js";
+import { getCustomLorebookReadBehindMessages } from "../../routes/generate/lorebook-keeper-utils.js";
 export { settleAgentJobsWithConcurrencyLimit } from "./agent-concurrency.js";
 
 /** A fully resolved agent ready for execution. */
@@ -33,6 +34,8 @@ export interface ResolvedAgent extends AgentExecConfig {
   maxParallelJobs?: number;
   /** Optional tool context for agents that need function calling (e.g., Spotify). */
   toolContext?: AgentToolContext;
+  /** Request-local context identity used to keep incompatible agent batches separate. */
+  batchContextKey?: string;
 }
 
 export interface AgentInjection {
@@ -40,6 +43,16 @@ export interface AgentInjection {
   agentName?: string;
   text: string;
 }
+
+export type AgentContextResolver = (
+  agent: AgentExecConfig,
+  context: AgentContext,
+) => AgentContext | Promise<AgentContext>;
+
+export type AgentPhaseContextPreparer = (
+  agents: AgentExecConfig[],
+  context: AgentContext,
+) => AgentContext | Promise<AgentContext>;
 
 /** Callback fired whenever an agent produces a result. */
 export type AgentResultCallback = (result: AgentResult) => void;
@@ -77,16 +90,14 @@ export function normalizeAgentMaxParallelJobs(value: unknown): number {
 }
 
 /**
- * Group agents by shared provider+model so they can be batched.
- * We use the provider reference + model string as the key.
+ * Group agents by shared provider, model, and compatible request context so they can be batched.
  */
 function groupByProviderModel(agents: ResolvedAgent[]): AgentGroup[] {
   const groups = new Map<string, AgentGroup>();
 
   for (const agent of agents) {
-    // Use a composite key: object reference hash + model
-    // Two agents share a group if they have the same provider instance and model
-    const key = `${providerKey(agent.provider)}::${agent.model}::${postProcessingDataKey(agent)}`;
+    // Two agents share a group only when their provider, model, and resolved context are compatible.
+    const key = `${providerKey(agent.provider)}::${agent.model}::${agentBatchDataKey(agent)}`;
     let group = groups.get(key);
     if (!group) {
       group = {
@@ -136,12 +147,16 @@ function providerKey(provider: BaseLLMProvider): number {
   return id;
 }
 
-function postProcessingDataKey(agent: ResolvedAgent): string {
-  if (agent.phase !== "post_processing") return "default";
+function agentBatchDataKey(agent: ResolvedAgent): string {
+  const batchContextKey = agent.batchContextKey ?? "default-context";
+  if (agent.phase !== "post_processing") return batchContextKey;
+  const readBehind = getCustomLorebookReadBehindMessages(agent.settings);
   return [
     getAgentBatchLane(agent),
     agent.settings.includePreGenInjections === true ? "pre-gen" : "no-pre-gen",
     agent.settings.includeParallelResults === true ? "parallel" : "no-parallel",
+    `read-behind-${readBehind}`,
+    batchContextKey,
   ].join(":");
 }
 
@@ -178,14 +193,17 @@ function buildAgentContext(agent: ResolvedAgent, context: AgentContext): AgentCo
 async function executeGroup(
   group: AgentGroup,
   context: AgentContext,
+  runWithConnectionLimit: <R>(job: () => Promise<R>) => Promise<R>,
   onResult?: AgentResultCallback,
   onStart?: AgentStartCallback,
   plannedBatchIds?: Map<string, string>,
+  resolveAgentContext?: AgentContextResolver,
 ): Promise<AgentResult[]> {
-  const groupContext = buildAgentContext(group.agents[0]!, context);
-  // Separate tool-using agents (can't be batched) from regular agents.
-  // Spotify post-processing is intentionally batched as JSON intent first; playback
-  // is applied after parsing the grouped response so it cannot fire early mid-agent.
+  const groupContext = resolveAgentContext
+    ? await resolveAgentContext(group.agents[0]!, buildAgentContext(group.agents[0]!, context))
+    : buildAgentContext(group.agents[0]!, context);
+  // Separate tool-using agents (can't be batched) from regular agents. Spotify always
+  // returns one JSON intent; deterministic host-side playback runs after parsing.
   const toolAgents = group.agents.filter((a) => shouldUseToolsDuringAgentExecution(a));
   const batchAgents = group.agents.filter((a) => !shouldUseToolsDuringAgentExecution(a));
 
@@ -227,8 +245,7 @@ async function executeGroup(
   // Prefer the id the client already knows about (from the pre-flight plan)
   // over minting a new one, so the widget can render the batch cluster the
   // instant the queue arrives and doesn't have to re-cluster on agent_start.
-  const preplannedBatchId =
-    trulyBatched.length >= 2 ? plannedBatchIds?.get(trulyBatched[0]!.id) ?? null : null;
+  const preplannedBatchId = trulyBatched.length >= 2 ? (plannedBatchIds?.get(trulyBatched[0]!.id) ?? null) : null;
   const sharedBatchId = preplannedBatchId ?? (trulyBatched.length >= 2 ? randomUUID() : null);
 
   const batchResultsPromise =
@@ -246,6 +263,8 @@ async function executeGroup(
             groupContext,
             group.provider,
             group.model,
+            resolveAgentContext,
+            runWithConnectionLimit,
             (config) => {
               const agent = isolatedFromBatch.find((candidate) => candidate.id === config.id);
               if (agent) safeOnStart(agent, null);
@@ -271,10 +290,17 @@ async function executeGroup(
       // flips to "running" in sync with the real LLM request. Tool agents
       // always fire their own request, so batchId is null.
       safeOnStart(agent, null);
-      return executeAgent(agent, buildAgentContext(agent, context), agent.provider, agent.model, agent.toolContext).then((result) => {
-        safeOnResult(result);
-        return result;
-      });
+      const agentContext = resolveAgentContext
+        ? resolveAgentContext(agent, buildAgentContext(agent, context))
+        : Promise.resolve(buildAgentContext(agent, context));
+      return Promise.resolve(agentContext)
+        .then((resolved) =>
+          runWithConnectionLimit(() => executeAgent(agent, resolved, agent.provider, agent.model, agent.toolContext)),
+        )
+        .then((result) => {
+          safeOnResult(result);
+          return result;
+        });
     },
   ).then((settled) =>
     settled.map((entry, index) => {
@@ -303,7 +329,7 @@ async function executeGroup(
 
 export function shouldUseToolsDuringAgentExecution(agent: ResolvedAgent): boolean {
   if (!agent.toolContext?.tools.length) return false;
-  return !(agent.phase === "post_processing" && agent.type === "spotify");
+  return agent.type !== "spotify";
 }
 
 /**
@@ -316,11 +342,20 @@ async function executePhase(
   onResult?: AgentResultCallback,
   onStart?: AgentStartCallback,
   plannedBatchIds?: Map<string, string>,
+  resolveAgentContext?: AgentContextResolver,
 ): Promise<AgentResult[]> {
   const phaseAgents = agents.filter((a) => a.phase === phase);
   if (phaseAgents.length === 0) return [];
 
   const groups = groupByProviderModel(phaseAgents).flatMap(splitGroupForParallelJobs);
+  const connectionLimits = new Map<number, number>();
+  for (const group of groups) {
+    const key = providerKey(group.provider);
+    connectionLimits.set(key, Math.min(connectionLimits.get(key) ?? group.maxParallelJobs, group.maxParallelJobs));
+  }
+  const connectionLimiters = new Map(
+    Array.from(connectionLimits, ([key, limit]) => [key, createAgentConcurrencyLimiter(limit)]),
+  );
 
   logger.debug(
     '[agent-pipeline] Phase "%s": %d agents → %d job group(s) %j',
@@ -339,10 +374,16 @@ async function executePhase(
     );
   }
 
-  const settled = await settleAgentJobsWithConcurrencyLimit(
-    groups,
-    AGENT_PHASE_MAX_CONCURRENT_GROUPS,
-    (group) => executeGroup(group, context, onResult, onStart, plannedBatchIds),
+  const settled = await settleAgentJobsWithConcurrencyLimit(groups, AGENT_PHASE_MAX_CONCURRENT_GROUPS, (group) =>
+    executeGroup(
+      group,
+      context,
+      connectionLimiters.get(providerKey(group.provider))!,
+      onResult,
+      onStart,
+      plannedBatchIds,
+      resolveAgentContext,
+    ),
   );
 
   const results: AgentResult[] = [];
@@ -406,9 +447,18 @@ export async function runPreGenerationAgents(
   agentTypeFilter?: (agentType: string) => boolean,
   onStart?: AgentStartCallback,
   plannedBatchIds?: Map<string, string>,
+  resolveAgentContext?: AgentContextResolver,
 ): Promise<AgentInjection[]> {
   const filtered = agentTypeFilter ? agents.filter((a) => agentTypeFilter(a.type)) : agents;
-  const results = await executePhase(filtered, "pre_generation", context, onResult, onStart, plannedBatchIds);
+  const results = await executePhase(
+    filtered,
+    "pre_generation",
+    context,
+    onResult,
+    onStart,
+    plannedBatchIds,
+    resolveAgentContext,
+  );
 
   const injections: AgentInjection[] = [];
   for (const result of results) {
@@ -449,8 +499,9 @@ export async function runPostProcessingAgents(
   onResult?: AgentResultCallback,
   onStart?: AgentStartCallback,
   plannedBatchIds?: Map<string, string>,
+  resolveAgentContext?: AgentContextResolver,
 ): Promise<AgentResult[]> {
-  return executePhase(agents, "post_processing", context, onResult, onStart, plannedBatchIds);
+  return executePhase(agents, "post_processing", context, onResult, onStart, plannedBatchIds, resolveAgentContext);
 }
 
 /**
@@ -462,8 +513,9 @@ export async function runParallelAgents(
   onResult?: AgentResultCallback,
   onStart?: AgentStartCallback,
   plannedBatchIds?: Map<string, string>,
+  resolveAgentContext?: AgentContextResolver,
 ): Promise<AgentResult[]> {
-  return executePhase(agents, "parallel", context, onResult, onStart, plannedBatchIds);
+  return executePhase(agents, "parallel", context, onResult, onStart, plannedBatchIds, resolveAgentContext);
 }
 
 // ──────────────────────────────────────────────
@@ -492,6 +544,8 @@ export function createAgentPipeline(
   onResult?: AgentResultCallback,
   onStart?: AgentStartCallback,
   plannedBatchIds?: Map<string, string>,
+  resolveAgentContext?: AgentContextResolver,
+  preparePostContext?: AgentPhaseContextPreparer,
 ) {
   const allResults: AgentResult[] = [];
   const preGenerationInjections: AgentInjection[] = [];
@@ -515,6 +569,7 @@ export function createAgentPipeline(
         agentTypeFilter,
         onStart,
         plannedBatchIds,
+        resolveAgentContext,
       );
       preGenerationInjections.push(...injections);
       return injections;
@@ -526,7 +581,14 @@ export function createAgentPipeline(
      * base context without mainResponse (since it doesn't exist yet).
      */
     async runParallel(): Promise<AgentResult[]> {
-      const results = await runParallelAgents(agents, baseContext, wrappedOnResult, onStart, plannedBatchIds);
+      const results = await runParallelAgents(
+        agents,
+        baseContext,
+        wrappedOnResult,
+        onStart,
+        plannedBatchIds,
+        resolveAgentContext,
+      );
       parallelPhaseResults.push(...results);
       return results;
     },
@@ -546,7 +608,20 @@ export function createAgentPipeline(
         parallelResults: options.parallelResults ?? parallelPhaseResults,
       };
 
-      return runPostProcessingAgents(agents, fullContext, wrappedOnResult, onStart, plannedBatchIds);
+      const preparedContext = preparePostContext
+        ? await preparePostContext(
+            agents.filter((agent) => agent.phase === "post_processing"),
+            fullContext,
+          )
+        : fullContext;
+      return runPostProcessingAgents(
+        agents,
+        preparedContext,
+        wrappedOnResult,
+        onStart,
+        plannedBatchIds,
+        resolveAgentContext,
+      );
     },
 
     /** All results collected so far. */
@@ -598,10 +673,7 @@ export interface PlanAgentBatchesOptions {
  * vs isolated" split and the "batch of one degrades to solo" rule. Tool
  * agents always fire their own request → batchId = null.
  */
-export function planAgentBatches(
-  agents: ResolvedAgent[],
-  options: PlanAgentBatchesOptions = {},
-): PlannedAgentWidget[] {
+export function planAgentBatches(agents: ResolvedAgent[], options: PlanAgentBatchesOptions = {}): PlannedAgentWidget[] {
   const widgetsById = new Map<string, PlannedAgentWidget>();
   for (const agent of agents) {
     widgetsById.set(agent.id, {

@@ -5,7 +5,7 @@ import {
   useCharacters,
   usePersonas,
   useUpdateCharacter,
-  useUpdatePersona,
+  useUpdatePersonaTrackerCard,
 } from "../../../hooks/use-characters";
 import { useChat } from "../../../hooks/use-chats";
 import { useChatStore } from "../../../stores/chat.store";
@@ -121,7 +121,7 @@ export function TrackerCardColorSettings() {
   const { currentGameState, gameStateLoadStatus, retryGameState } = useTrackerGameState(activeChatId);
   const { data: personasData } = usePersonas(!!activeChatId);
   const { data: charactersData } = useCharacters(!!activeChatId);
-  const updatePersona = useUpdatePersona();
+  const updatePersonaTrackerCard = useUpdatePersonaTrackerCard();
   const updateCharacter = useUpdateCharacter();
   const [selectedTargetKey, setSelectedTargetKey] = useState("");
   const [draftConfig, setDraftConfig] = useState<TrackerCardColorConfig | null>(null);
@@ -296,7 +296,7 @@ export function TrackerCardColorSettings() {
   const persistTargetConfig = useCallback(
     async (target: TrackerCardColorTarget, config: TrackerCardColorConfig) => {
       if (target.kind === "persona") {
-        const updatedPersona = await updatePersona.mutateAsync({
+        const updatedPersona = await updatePersonaTrackerCard.mutateAsync({
           id: target.id,
           trackerCardPaint: config,
         });
@@ -312,7 +312,7 @@ export function TrackerCardColorSettings() {
       const extensions = getCharacterExtensions(updatedCharacterData);
       return parseTrackerCardColorConfig(extensions.trackerCardColors);
     },
-    [updateCharacter, updatePersona],
+    [updateCharacter, updatePersonaTrackerCard],
   );
 
   const handleChange = (nextConfig: TrackerCardColorConfig) => {
@@ -391,7 +391,9 @@ export function TrackerCardColorSettings() {
     <div className="mt-2 flex flex-col gap-1.5 rounded-lg bg-[var(--background)]/36 p-1.5 ring-1 ring-[var(--border)]">
       <div className="flex min-h-5 items-center justify-between gap-2 px-0.5">
         <span className="inline-flex min-w-0 items-center gap-1 text-[0.625rem] font-medium text-[var(--foreground)]">
-          <Palette size="0.6875rem" className="text-[var(--primary)]" />{localizeUi("ui.panels.trackercardcolorsettings.cardColors")}</span>
+          <Palette size="0.6875rem" className="text-[var(--primary)]" />
+          {localizeUi("ui.panels.trackercardcolorsettings.cardColors")}
+        </span>
         {saveMessage && (
           <span
             className={cn(
@@ -416,7 +418,9 @@ export function TrackerCardColorSettings() {
       </div>
 
       {!activeChatId ? (
-        <p className="rounded-md bg-[var(--secondary)]/42 px-2 py-2 text-[0.625rem] leading-relaxed text-[var(--muted-foreground)]">{localizeUi("ui.panels.trackercardcolorsettings.selectAChatToEditTrackerCardColors")}</p>
+        <p className="rounded-md bg-[var(--secondary)]/42 px-2 py-2 text-[0.625rem] leading-relaxed text-[var(--muted-foreground)]">
+          {localizeUi("ui.panels.trackercardcolorsettings.selectAChatToEditTrackerCardColors")}
+        </p>
       ) : gameStateLoadStatus === "error" ? (
         <div className="flex flex-wrap items-center justify-center gap-2 rounded-md bg-[var(--secondary)]/42 px-2 py-2 text-[0.625rem] leading-relaxed text-[var(--muted-foreground)]">
           <span>{localizeUi("ui.chat.agentsuitemodal.couldNotLoadTrackerData")}</span>
@@ -429,18 +433,28 @@ export function TrackerCardColorSettings() {
           </button>
         </div>
       ) : gameStateLoadStatus === "loading" ? (
-        <p className="mari-chrome-text-muted rounded-md bg-[var(--secondary)]/42 px-2 py-2 text-[0.625rem] leading-relaxed">{localizeUi("ui.panels.trackercardcolorsettings.loadingCurrentTrackerCards")}</p>
+        <p className="mari-chrome-text-muted rounded-md bg-[var(--secondary)]/42 px-2 py-2 text-[0.625rem] leading-relaxed">
+          {localizeUi("ui.panels.trackercardcolorsettings.loadingCurrentTrackerCards")}
+        </p>
       ) : targets.length === 0 ? (
-        <p className="rounded-md bg-[var(--secondary)]/42 px-2 py-2 text-[0.625rem] leading-relaxed text-[var(--muted-foreground)]">{localizeUi("ui.panels.trackercardcolorsettings.noActivePersonaOrPresentCharacterIdsAreAvailable")}</p>
+        <p className="rounded-md bg-[var(--secondary)]/42 px-2 py-2 text-[0.625rem] leading-relaxed text-[var(--muted-foreground)]">
+          {localizeUi("ui.panels.trackercardcolorsettings.noActivePersonaOrPresentCharacterIdsAreAvailable")}
+        </p>
       ) : (
         <>
           <label className="grid gap-1">
-            <span className="px-0.5 text-[0.625rem] text-[var(--muted-foreground)]">{localizeUi("ui.panels.imagestyleprofileseditor.editing")}</span>
+            <span className="px-0.5 text-[0.625rem] text-[var(--muted-foreground)]">
+              {localizeUi("ui.panels.imagestyleprofileseditor.editing")}
+            </span>
             <select
               value={selectedTargetKey}
               onChange={(event) => setSelectedTargetKey(event.target.value)}
               disabled={saveState === "saving" || hasUnsavedChanges}
-              title={hasUnsavedChanges ?localizeUi("ui.panels.trackercardcolorsettings.saveOrRevertBeforeChoosingAnotherCard") : undefined}
+              title={
+                hasUnsavedChanges
+                  ? localizeUi("ui.panels.trackercardcolorsettings.saveOrRevertBeforeChoosingAnotherCard")
+                  : undefined
+              }
               className="min-w-0 rounded-md border border-[var(--border)] bg-[var(--secondary)] px-2 py-1.5 text-[0.6875rem] text-[var(--foreground)] outline-none transition-shadow focus:ring-1 focus:ring-[var(--primary)] disabled:cursor-not-allowed disabled:opacity-65"
             >
               {targets.map((target) => (

@@ -101,7 +101,8 @@ function logAgentDebugToBrowserConsole(entry: AgentDebugEntry) {
   const round = call.round != null ? ` round ${call.round}` : "";
   const usage = usageParts.length > 0 ? ` | ${usageParts.join(", ")} tokens` : "";
   const duration = call.durationMs != null ? ` | ${call.durationMs}ms` : "";
-  const label = `[Marinara Agent Debug] ${call.stage}${round}: ${call.agentName} (${call.agentType}) | ${call.model}${usage}${duration}`;
+  const elapsed = call.elapsedMs != null ? ` | ${call.elapsedMs}ms total` : "";
+  const label = `[Marinara Agent Debug] ${call.stage}${round}: ${call.agentName} (${call.agentType}) | ${call.model}${usage}${duration}${elapsed}`;
 
   console.groupCollapsed(label);
   console.debug("Event", call);
@@ -127,6 +128,11 @@ interface AgentState {
   isProcessing: boolean;
   /** Chat IDs with agent work currently in flight. Keeps active-chat UI from flashing for background runs. */
   processingChatIds: string[];
+  /** Legacy callers that do not identify an individual agent run. */
+  legacyProcessingChatIds: string[];
+  legacyGlobalProcessing: boolean;
+  /** Generation-scoped runs, kept separate so overlapping Roleplay swipes cannot clear each other. */
+  processingRunIdsByChat: Record<string, string[]>;
   /** Agent types that failed even after auto-retry — manual retry available */
   failedAgentTypes: string[];
   /** Chat ID the failed-agent list belongs to. Null means legacy/global failures. */
@@ -181,6 +187,7 @@ interface AgentState {
   // Actions
   setActiveAgents: (agents: string[]) => void;
   setProcessing: (processing: boolean, chatId?: string | null) => void;
+  setProcessingRun: (runId: string, processing: boolean, chatId: string) => void;
   addResult: (agentId: string, result: AgentResult) => void;
   addDebugEntry: (entry: Omit<AgentDebugEntry, "timestamp"> & { timestamp?: number }) => void;
   setFailedAgentTypes: (types: string[], chatId?: string | null) => void;
@@ -245,6 +252,8 @@ interface AgentState {
   /** Mark every queued/running entry as failed — used when generation aborts. */
   settleAgentTrackQueueAsFailed: (chatId: string) => void;
   clearAgentTrackQueue: () => void;
+  /** Clear chat-runtime Agent state while retaining Professor Mari's chat-scoped continuation UI. */
+  resetForChatChange: () => void;
   reset: () => void;
 }
 
@@ -254,6 +263,9 @@ type AgentDataState = Pick<
   | "lastResults"
   | "isProcessing"
   | "processingChatIds"
+  | "legacyProcessingChatIds"
+  | "legacyGlobalProcessing"
+  | "processingRunIdsByChat"
   | "failedAgentTypes"
   | "failedAgentChatId"
   | "failedAgentFailures"
@@ -286,6 +298,9 @@ function createInitialAgentDataState(): AgentDataState {
     lastResults: new Map(),
     isProcessing: false,
     processingChatIds: [],
+    legacyProcessingChatIds: [],
+    legacyGlobalProcessing: false,
+    processingRunIdsByChat: {},
     failedAgentTypes: [],
     failedAgentChatId: null,
     failedAgentFailures: [],
@@ -320,21 +335,47 @@ export const useAgentStore = create<AgentState>((set, get) => ({
   setProcessing: (processing, chatId = null) =>
     set((s) => {
       if (!chatId) {
+        const processingChatIds = Array.from(
+          new Set([...s.legacyProcessingChatIds, ...Object.keys(s.processingRunIdsByChat)]),
+        );
         return {
-          isProcessing: processing,
-          processingChatIds: processing ? s.processingChatIds : [],
+          legacyGlobalProcessing: processing,
+          isProcessing: processing || processingChatIds.length > 0,
+          processingChatIds,
         };
       }
 
-      const processingChatIds = processing
-        ? s.processingChatIds.includes(chatId)
-          ? s.processingChatIds
-          : [...s.processingChatIds, chatId]
-        : s.processingChatIds.filter((id) => id !== chatId);
+      const legacyProcessingChatIds = processing
+        ? s.legacyProcessingChatIds.includes(chatId)
+          ? s.legacyProcessingChatIds
+          : [...s.legacyProcessingChatIds, chatId]
+        : s.legacyProcessingChatIds.filter((id) => id !== chatId);
+      const processingChatIds = Array.from(
+        new Set([...legacyProcessingChatIds, ...Object.keys(s.processingRunIdsByChat)]),
+      );
 
       return {
+        legacyProcessingChatIds,
         processingChatIds,
-        isProcessing: processingChatIds.length > 0,
+        isProcessing: s.legacyGlobalProcessing || processingChatIds.length > 0,
+      };
+    }),
+  setProcessingRun: (runId, processing, chatId) =>
+    set((s) => {
+      const processingRunIdsByChat = { ...s.processingRunIdsByChat };
+      const runIds = new Set(processingRunIdsByChat[chatId] ?? []);
+      if (processing) runIds.add(runId);
+      else runIds.delete(runId);
+      if (runIds.size > 0) processingRunIdsByChat[chatId] = [...runIds];
+      else delete processingRunIdsByChat[chatId];
+
+      const processingChatIds = Array.from(
+        new Set([...s.legacyProcessingChatIds, ...Object.keys(processingRunIdsByChat)]),
+      );
+      return {
+        processingRunIdsByChat,
+        processingChatIds,
+        isProcessing: s.legacyGlobalProcessing || processingChatIds.length > 0,
       };
     }),
 
@@ -564,9 +605,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       if (!hasQueued) return {};
       return {
         agentTrackQueue: s.agentTrackQueue.map((entry) =>
-          matches(entry.phase) && entry.status === "queued"
-            ? { ...entry, status: "running" as const }
-            : entry,
+          matches(entry.phase) && entry.status === "queued" ? { ...entry, status: "running" as const } : entry,
         ),
       };
     }),
@@ -596,20 +635,26 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       // Ignore stale calls from an unrelated chat's generation cleanup — the
       // active queue may already belong to another chat by then.
       if (s.agentTrackChatId !== chatId) return {};
-      const hasUnfinished = s.agentTrackQueue.some(
-        (e) => e.status === "queued" || e.status === "running",
-      );
+      const hasUnfinished = s.agentTrackQueue.some((e) => e.status === "queued" || e.status === "running");
       if (!hasUnfinished) return {};
       return {
         agentTrackQueue: s.agentTrackQueue.map((entry) =>
-          entry.status === "queued" || entry.status === "running"
-            ? { ...entry, status: "failed" as const }
-            : entry,
+          entry.status === "queued" || entry.status === "running" ? { ...entry, status: "failed" as const } : entry,
         ),
       };
     }),
 
   clearAgentTrackQueue: () => set({ agentTrackQueue: [], agentTrackChatId: null }),
 
+  resetForChatChange: () =>
+    set((state) => ({
+      ...createInitialAgentDataState(),
+      mariChips: state.mariChips,
+      mariChipsChatId: state.mariChipsChatId,
+      mariPlan: state.mariPlan,
+      mariPlanChatId: state.mariPlanChatId,
+      mariPlanCursor: state.mariPlanCursor,
+      mariPlanAnswers: state.mariPlanAnswers,
+    })),
   reset: () => set(createInitialAgentDataState()),
 }));

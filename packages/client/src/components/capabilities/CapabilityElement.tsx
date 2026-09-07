@@ -12,7 +12,18 @@ type CapabilityElementNode = HTMLElement & {
 
 interface CapabilityElementProps {
   packageId: string;
-  view: "surface" | "setup" | "setup-apply" | "settings" | "toolbar" | "detail" | "workspace" | "runtime" | "world-map";
+  view:
+    | "surface"
+    | "setup"
+    | "setup-apply"
+    | "settings"
+    | "toolbar"
+    | "detail"
+    | "workspace"
+    | "runtime"
+    | "world-map"
+    | "browser"
+    | "tracker";
   capabilityProps?: Record<string, unknown>;
   className?: string;
   onHostError?: (message: string) => void;
@@ -76,6 +87,26 @@ function CapabilityLoadingState({
         data-capability-client-state="loading"
         data-capability-package-id={packageId}
       />
+    );
+  }
+  if (view === "browser") {
+    return (
+      <div
+        className={cn(
+          className === "contents" ? undefined : className,
+          "flex min-h-64 items-center justify-center px-5",
+        )}
+        style={style}
+        data-capability-client-state="loading"
+        data-capability-package-id={packageId}
+      >
+        <div className="w-full max-w-sm space-y-3" role="status" aria-live="polite">
+          <span className="sr-only">{statusCopy}</span>
+          <div className="h-4 w-36 animate-pulse rounded bg-[var(--muted)]" />
+          <div className="h-3 w-full animate-pulse rounded bg-[var(--muted)]/70" />
+          <div className="h-3 w-3/4 animate-pulse rounded bg-[var(--muted)]/70" />
+        </div>
+      </div>
     );
   }
   if (view === "workspace" || view === "setup") {
@@ -244,6 +275,13 @@ function CapabilityFailureState({
       </div>
     );
   }
+  if (view === "browser") {
+    return (
+      <div className="flex min-h-64 items-center px-5">
+        <div className="mx-auto w-full max-w-lg">{failure}</div>
+      </div>
+    );
+  }
   if (view !== "workspace" && view !== "setup") return failure;
   return (
     <div
@@ -336,6 +374,13 @@ function CapabilityRefreshState({
       </div>
     );
   }
+  if (view === "browser") {
+    return (
+      <div className="flex min-h-64 items-center px-5">
+        <div className="mx-auto w-full max-w-lg">{notice}</div>
+      </div>
+    );
+  }
   if (view !== "workspace" && view !== "setup") return notice;
   return (
     <div
@@ -367,12 +412,17 @@ export function CapabilityElement({
   const localizedCapabilityProps = useMemo(
     () => ({
       ...(capabilityProps ?? {}),
+      // Package identity, so a bundle can build version-pinned asset URLs
+      // (`/api/capability-packages/<id>/assets/<path>?v=<version>` → immutable
+      // caching) without re-fetching /installed or scraping import.meta.url.
+      packageId,
+      packageVersion: clientModule.version ?? null,
       localization: {
         locale,
         direction,
       } satisfies CapabilityLocalizationContext,
     }),
-    [capabilityProps, direction, locale],
+    [capabilityProps, clientModule.version, direction, locale, packageId],
   );
 
   useEffect(() => {

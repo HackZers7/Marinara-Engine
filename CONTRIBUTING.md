@@ -97,22 +97,33 @@ Baseline validation:
 pnpm check
 ```
 
-This runs the Impeccable project-context guard, workspace lint/type checks, and the production build.
+This runs the Impeccable project-context guard, localization checks, Prettier verification, workspace lint/type checks, and the production build.
+
+Run the individual formatting and lint checks while iterating:
+
+```bash
+pnpm format:check
+pnpm lint
+```
+
+Use `pnpm format` to apply Prettier to the maintained TypeScript and TSX source scope.
 
 Useful follow-up checks:
 
 ```bash
 pnpm version:check
+pnpm regression
 pnpm regression:prompt
-pnpm smoke:ui
+pnpm regression:ui
 ```
 
 Regression guards:
 
+- `pnpm regression` (or `pnpm regression:node`) builds the shared package once, discovers the complete Node regression set from the filesystem, and runs it serially. Pull requests and staging pushes run this complete lane on a hosted runner.
 - `pnpm regression:prompt` runs fast deterministic checks for prompt assembly, lorebook keyword matching, macros, summaries, and mode-specific generation gates.
-- `pnpm smoke:ui` runs the Playwright browser smoke suite against isolated temporary app data.
-  Each run clears `.tmp/playwright-data` and starts separate desktop and mobile app servers so their mutable fixtures cannot overlap. Stop any process already using the configured Playwright ports before running it; existing fixture state is disposable and the smoke suite does not reuse a running development server.
-- `pnpm regression` runs both lanes.
+- `pnpm regression:ui` runs the Playwright browser suite across desktop Chromium, Android-sized Chromium, and iPhone-sized WebKit; `pnpm smoke:ui` remains a compatibility alias for the same full UI lane. Pull requests and staging pushes run the same projects independently on hosted runners.
+  Each run clears `.tmp/playwright-data` and starts separate desktop and mobile app servers so their mutable fixtures cannot overlap. Stop any process already using the configured Playwright ports before running it; existing fixture state is disposable and the suite does not reuse a running development server.
+- `pnpm test` checks the Windows installer layout, then runs the Node regression lane. It does not run the UI lane; invoke `pnpm regression:ui` explicitly for browser validation.
 
 These checks are intentionally small and do not replace manual verification. When you change behavior, include the manual verification you performed and add or update a regression guard for the bug class when practical.
 
@@ -192,6 +203,7 @@ The overlay is not a substitute for this guide. When instructions conflict, foll
 - Update documentation in the same PR when behavior changes affect installation, updates, release flow, launchers, or platform-specific behavior.
 - Include screenshots or short recordings for UI changes.
 - Call out manual validation clearly, especially for launcher, installer, or Android wrapper changes.
+- Add a concise user-focused entry under the appropriate `CHANGELOG.md` `[Unreleased]` heading for every bug fix, behavior change, or new feature. Purely mechanical changes with no product or contributor-workflow impact may omit one.
 - Avoid version drift. If your PR intentionally bumps a release, update every version-bearing file in one pass.
 
 ## Documentation Rules
@@ -220,6 +232,7 @@ The overlay is not a substitute for this guide. When instructions conflict, foll
   - Japanese: natural Japanese (polite です・ます prose with noun-phrase 体言止め headings and no "あなた" floods — Japanese drops subjects; product names stay in LATIN SCRIPT, never katakanized — "Marinara Engineでは", never "マリナーラ"; katakana loanwords use the modern trailing-ー spelling — "サーバー"/"ユーザー"/"フォルダー", never "サーバ"/"ユーザ"/"フォルダ" — with community-standard terms such as "ロアブック"; ALL Latin letters and digits stay half-width ASCII (full-width "７８６０" never matches a search for `7860`); no ideographic space U+3000, no non-breaking spaces, no space between Japanese and Latin/bold/code spans, text NFC-normalized; 「」 for Japanese quoting while quoted English UI strings stay byte-exact to the app; mode names Conversation/Roleplay/Game Mode stay English).
   - Korean: natural Korean (the 합니다체 register standard in Korean software with ~하세요 imperatives and noun-phrase headings; never "당신"; product names stay in LATIN SCRIPT — never transcribed — with phonetically correct particle attachment, "Marinara Engine은", "HUD와"; ONE transcription and ONE spacing per term — "메시지" never "메세지", "콘텐츠" never "컨텐츠", "캐릭터 카드" always spaced that way — because either split fragments the substring search; UI-label glosses match the app's shipped Korean UI strings in `ko.json` where they exist; ALL Latin letters and digits half-width ASCII; no ideographic space U+3000, no non-breaking spaces, straight ASCII quotes only (never 낫표 「」), text NFC-normalized — macOS-decomposed Hangul jamo would silently break search; mode names Conversation/Roleplay/Game Mode stay English).
   - Simplified Chinese (`zh-hans`): natural Simplified Chinese ("你" address, never "您"; SIMPLIFIED CHARACTERS ONLY — a stray traditional form like "個" or "說" silently breaks search for readers typing simplified; the Chinese SillyTavern community's established terms — "世界书" for lorebook, "角色卡", "提示词" for prompt, "立绘" for sprites, "智能体" for agent; product names stay in LATIN SCRIPT; full-width CJK punctuation ，。（） in prose but ALL Latin letters and digits half-width ASCII — full-width "７８６０" never matches a search for `7860`; glosses in half-width parens tight after a bold/Latin label and full-width （） inside pure Chinese prose; curly “” for Chinese-prose quoting while quoted English UI strings stay byte-exact; no ideographic space U+3000, no NBSP, text NFC-normalized; mode names Conversation/Roleplay/Game Mode stay English).
+  - Hindi: natural modern technical Hindi (the Google/Microsoft Hindi register — Devanagari loanwords like "फ़ाइल"/"सर्वर"/"प्रॉम्प्ट", never शुद्ध purisms like "संगणक"; "आप" address with "करें"-style imperatives, never "तू"/"तुम"; ONE transliteration per term with a fixed nukta policy — nukta kept on ज़/फ़ only, so "फ़ाइल" but "खास", because "फ़ाइल" and "फाइल" are different byte strings that split the substring search; international digits 0-9 only — Devanagari "०७८६०" never matches a search for `7860`; the danda "।" ends Hindi sentences (verbatim English strings keep their own punctuation); product names stay in LATIN SCRIPT with postpositions as separate words — "Marinara Engine में"; straight ASCII quotes; text NFC-normalized with no ZWJ/ZWNJ; mode names Conversation/Roleplay/Game Mode stay English).
 - After editing a pack, run `node scripts/docs-i18n/build-manifest.mjs <pack-dir>` to refresh hashes, then `node scripts/docs-i18n/validate-pack.mjs <pack-dir>` from the Engine repo root, before committing to `docs-i18n`.
 
 ## Localization
@@ -257,11 +270,12 @@ Android policy:
 
 - `versionName` must match the app version.
 - `versionCode` must increase monotonically for every shipped APK.
+- Stable and tagged release APKs require the repository maintainers' configured `ANDROID_SIGNING_*` keystore credentials. These are CI build inputs, never information requested from APK downloaders. The manual pre-alpha workflow may publish a debug-signed APK only as a draft, test-only artifact.
 
 Release-related behavior already in the repo:
 
 - Docker publishing is triggered by `v*` tags.
-- Tagged releases are published from `CHANGELOG.md` by the GitHub release workflow, with a named versioned source ZIP and a temporary Android APK notice prepended so release-page downloaders know the APK still requires Termux.
+- Tagged releases are published from `CHANGELOG.md` by the GitHub release workflow, with a named versioned source ZIP and a temporary Android APK notice prepended so release-page downloaders know the APK still requires Termux. Android releases attach both the versioned APK and the stable `marinara-engine-android.apk` alias used by the one-click latest-download link.
 - The server update check reads the newest GitHub `v*` tag and uses matching release metadata when it exists.
 - Git-based installs can apply updates automatically; Docker installs are prompted with the pull command instead.
 - Pull request CI runs `pnpm check`, `pnpm version:check`, and the tracked-installer guard.
@@ -272,14 +286,14 @@ Standard release flow:
 1. Bump the canonical version in root `package.json`.
 2. Run `pnpm version:sync -- --android-version-code <next-code>` to sync all derived version fields.
 3. Run `pnpm credits:check`; if it reports stale contributor credits, run `pnpm credits:sync` and include the Credits modal update in the release PR.
-4. Update `CHANGELOG.md`.
+4. Update `CHANGELOG.md`; when publishing a stable release, update README's current-stable-release link to the matching tag.
 5. Merge the release-ready `staging` change to `main`.
 6. Create and push the tag `vX.Y.Z` from the `main` commit that contains that exact version bump.
 7. Let the release workflows publish or update the GitHub Release, named source ZIP, Windows installer, Android WebView shell APK, and GHCR container images (`X.Y.Z`, `X.Y`, `X`, `latest`, plus `X.Y.Z-lite` / `lite`) from the matching changelog entry.
 
 Release helpers now in the repo:
 
-- `pnpm version:sync -- --android-version-code <next-code>` updates the derived version files and README release references from the root `package.json` version.
+- `pnpm version:sync -- --android-version-code <next-code>` updates the derived version files from the root `package.json` version. README's current-stable-release link changes only when that release is published.
 - `pnpm version:check` fails when those derived files drift out of sync.
 - `pnpm credits:check` compares the in-app Credits modal with the GitHub contributors list, and `pnpm credits:sync` refreshes it.
 - `pnpm guard:installer-artifacts` fails when tracked installer binaries appear under `win/installer/*.exe`.

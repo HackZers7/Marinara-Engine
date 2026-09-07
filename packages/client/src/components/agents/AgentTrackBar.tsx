@@ -43,8 +43,6 @@ const PHASE_ORDER: Record<string, number> = {
   translation: 3,
 };
 
-
-
 // ──────────────────────────────────────────────
 // Single agent widget
 // ──────────────────────────────────────────────
@@ -193,8 +191,7 @@ export function AgentTrackBar({ chatId }: { chatId: string }) {
     // the row is anchored by the minimum `order` among its members, so a
     // batch keeps the slot its first-declared member would have occupied.
     const groupAnchor = new Map<string, number>();
-    const keyOf = (entry: AgentTrackEntry) =>
-      entry.batchId ? `batch:${entry.batchId}` : `solo:${entry.order}`;
+    const keyOf = (entry: AgentTrackEntry) => (entry.batchId ? `batch:${entry.batchId}` : `solo:${entry.order}`);
     for (const entry of agentTrackQueue) {
       const key = keyOf(entry);
       const existing = groupAnchor.get(key);
@@ -236,7 +233,9 @@ export function AgentTrackBar({ chatId }: { chatId: string }) {
     }
     // Batches of one degrade to solo — a single agent in "its own batch"
     // shouldn't render a container.
-    return out.map((c) => (c.kind === "batch" && c.entries.length === 1 ? { kind: "solo", entry: c.entries[0]! } as const : c));
+    return out.map((c) =>
+      c.kind === "batch" && c.entries.length === 1 ? ({ kind: "solo", entry: c.entries[0]! } as const) : c,
+    );
   }, [sorted]);
 
   const completed = sorted.filter((e) => e.status === "completed" || e.status === "failed").length;
@@ -277,19 +276,9 @@ export function AgentTrackBar({ chatId }: { chatId: string }) {
                 {clusters.map((cluster) => {
                   if (cluster.kind === "solo") {
                     const e = cluster.entry;
-                    return (
-                      <AgentTrackWidget
-                        key={`${e.phase}-${e.agentType}-${e.order}`}
-                        entry={e}
-                      />
-                    );
+                    return <AgentTrackWidget key={`${e.phase}-${e.agentType}-${e.order}`} entry={e} />;
                   }
-                  return (
-                    <AgentTrackBatchCluster
-                      key={`batch-${cluster.batchId}`}
-                      entries={cluster.entries}
-                    />
-                  );
+                  return <AgentTrackBatchCluster key={`batch-${cluster.batchId}`} entries={cluster.entries} />;
                 })}
               </AnimatePresence>
             </div>

@@ -3,6 +3,7 @@ import { Bell, BellRing, Loader2, Play, Trash2, Upload, Volume2 } from "lucide-r
 import { useTranslation, useTranslation as useUiTranslation } from "react-i18next";
 import { toast } from "sonner";
 import { useUIStore } from "../../../stores/ui.store";
+import { ANDROID_BRIDGE_READY_EVENT } from "../../../lib/android-bridge";
 import {
   getLocalNotificationPermission,
   getNativeNotificationPermission,
@@ -122,7 +123,7 @@ export function ConversationSoundSetting() {
   const generationMobileNotifications = useUIStore((s) => s.generationMobileNotifications);
   const setGenerationMobileNotifications = useUIStore((s) => s.setGenerationMobileNotifications);
   const [browserPermission, setBrowserPermission] = useState<LocalNotificationPermission>("default");
-  const nativeNotificationsAvailable = hasNativeNotificationBridge();
+  const [nativeNotificationsAvailable, setNativeNotificationsAvailable] = useState(hasNativeNotificationBridge);
   const [nativePermission, setNativePermission] = useState<NativeNotificationPermission>(() =>
     getNativeNotificationPermission(),
   );
@@ -143,6 +144,16 @@ export function ConversationSoundSetting() {
     return () => {
       cancelled = true;
     };
+  }, []);
+
+  useEffect(() => {
+    const refreshBridge = () => {
+      setNativeNotificationsAvailable(hasNativeNotificationBridge());
+      setNativePermission(getNativeNotificationPermission());
+    };
+    window.addEventListener(ANDROID_BRIDGE_READY_EVENT, refreshBridge);
+    refreshBridge();
+    return () => window.removeEventListener(ANDROID_BRIDGE_READY_EVENT, refreshBridge);
   }, []);
 
   useEffect(() => {
@@ -176,12 +187,16 @@ export function ConversationSoundSetting() {
       setPreference(false);
       toast.error(
         permission === "insecure"
-          ?localizeUi("ui.panels.conversationsoundsetting.browserNotificationsRequireHttpsOrLocalhostOpenMarinaraThrough")
+          ? localizeUi(
+              "ui.panels.conversationsoundsetting.browserNotificationsRequireHttpsOrLocalhostOpenMarinaraThrough",
+            )
           : permission === "unsupported"
-            ?localizeUi("ui.panels.conversationsoundsetting.browserNotificationsAreNotAvailableInThisEnvironment")
+            ? localizeUi("ui.panels.conversationsoundsetting.browserNotificationsAreNotAvailableInThisEnvironment")
             : permission === "denied"
-              ?localizeUi("ui.panels.conversationsoundsetting.browserNotificationsAreBlockedResetThisSiteSNotification")
-              :localizeUi("ui.panels.conversationsoundsetting.browserNotificationPermissionWasNotGranted"),
+              ? localizeUi(
+                  "ui.panels.conversationsoundsetting.browserNotificationsAreBlockedResetThisSiteSNotification",
+                )
+              : localizeUi("ui.panels.conversationsoundsetting.browserNotificationPermissionWasNotGranted"),
       );
     });
   };
@@ -206,8 +221,8 @@ export function ConversationSoundSetting() {
         setPreference(false);
         toast.error(
           permission === "unsupported"
-            ?localizeUi("ui.panels.conversationsoundsetting.mobileNotificationsRequireTheMarinaraAndroidApp")
-            :localizeUi("ui.panels.conversationsoundsetting.androidNotificationPermissionWasNotGranted"),
+            ? localizeUi("ui.panels.conversationsoundsetting.mobileNotificationsRequireTheMarinaraAndroidApp")
+            : localizeUi("ui.panels.conversationsoundsetting.androidNotificationPermissionWasNotGranted"),
         );
       })
       .catch(() => {
@@ -295,8 +310,8 @@ export function ConversationSoundSetting() {
         disabled={!nativeNotificationsAvailable}
         help={
           nativeNotificationsAvailable
-            ?localizeUi("ui.panels.conversationsoundsetting.usesNativeAndroidNotificationsFromTheInstalledMarinaraApp")
-            :localizeUi("ui.panels.conversationsoundsetting.availableInTheUpdatedMarinaraAndroidApkBrowserAnd")
+            ? localizeUi("ui.panels.conversationsoundsetting.usesNativeAndroidNotificationsFromTheInstalledMarinaraApp")
+            : localizeUi("ui.panels.conversationsoundsetting.availableInTheUpdatedMarinaraAndroidApkBrowserAnd")
         }
       />
       <div className="mt-1 flex items-center gap-1.5">
@@ -335,8 +350,8 @@ export function ConversationSoundSetting() {
         disabled={!nativeNotificationsAvailable}
         help={
           nativeNotificationsAvailable
-            ?localizeUi("ui.panels.conversationsoundsetting.usesNativeAndroidNotificationsFromTheInstalledMarinaraApp")
-            :localizeUi("ui.panels.conversationsoundsetting.availableInTheUpdatedMarinaraAndroidApkBrowserAnd")
+            ? localizeUi("ui.panels.conversationsoundsetting.usesNativeAndroidNotificationsFromTheInstalledMarinaraApp")
+            : localizeUi("ui.panels.conversationsoundsetting.availableInTheUpdatedMarinaraAndroidApkBrowserAnd")
         }
       />
     </div>
@@ -590,6 +605,28 @@ export function SettingsCheckbox({
 
 type SettingsSwitchAccessibleLabel = { label: ReactNode; ariaLabel?: never } | { label?: undefined; ariaLabel: string };
 
+export function SettingsSwitchTrack({ checked, className }: { checked: boolean; className?: string }) {
+  return (
+    <span
+      aria-hidden="true"
+      data-settings-switch-track
+      className={cn(
+        "inline-flex h-5 w-9 shrink-0 items-center rounded-full p-0.5 transition-colors",
+        checked ? "bg-[var(--primary)]/70 mari-accent-animated" : "bg-[var(--border)]",
+        className,
+      )}
+    >
+      <span
+        data-settings-switch-thumb
+        className={cn(
+          "pointer-events-none block h-4 w-4 shrink-0 rounded-full bg-[var(--background)] shadow-sm ring-1 ring-[var(--border)] transition-transform",
+          checked && "translate-x-4",
+        )}
+      />
+    </span>
+  );
+}
+
 type SettingsSwitchProps = SettingsSwitchAccessibleLabel & {
   checked: boolean;
   onChange: (v: boolean) => void;
@@ -630,7 +667,11 @@ export function SettingsSwitch({
   const localizedDescription = localizeStringNode(description, localize);
   const localizedTitle = title ? localize(title) : undefined;
   const switchControl = (
-    <span className="relative inline-flex h-5 w-9 shrink-0">
+    <label
+      htmlFor={inputId}
+      title={localizedTitle}
+      className={cn("relative inline-flex h-5 w-9 shrink-0", disabled ? "cursor-not-allowed" : "cursor-pointer")}
+    >
       <input
         id={inputId}
         type="checkbox"
@@ -640,25 +681,11 @@ export function SettingsSwitch({
         onChange={(e) => onChange(e.target.checked)}
         className="peer sr-only"
       />
-      <label
-        htmlFor={inputId}
-        title={localizedTitle}
-        className={cn(
-          "relative inline-flex h-5 w-9 shrink-0 rounded-full transition-colors peer-focus-visible:ring-2 peer-focus-visible:ring-[var(--ring)]",
-          checked ? "bg-[var(--primary)]/70" : "bg-[var(--border)]",
-          checked && "mari-accent-animated",
-          disabled ? "cursor-not-allowed" : "cursor-pointer",
-          switchClassName,
-        )}
-      >
-        <span
-          className={cn(
-            "pointer-events-none absolute left-0.5 top-0.5 h-4 w-4 rounded-full bg-[var(--background)] shadow-sm ring-1 ring-[var(--border)] transition-transform",
-            checked && "translate-x-4",
-          )}
-        />
-      </label>
-    </span>
+      <SettingsSwitchTrack
+        checked={checked}
+        className={cn("peer-focus-visible:ring-2 peer-focus-visible:ring-[var(--ring)]", switchClassName)}
+      />
+    </label>
   );
   const switchCluster = (
     <span className="inline-flex shrink-0 items-center gap-1.5">

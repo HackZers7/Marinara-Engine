@@ -6,6 +6,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import { toast } from "sonner";
 import {
   ChevronRight,
+  ChevronDown,
   Plug,
   BookOpen,
   Check,
@@ -24,7 +25,7 @@ import {
   Dices,
   FolderOpen,
 } from "lucide-react";
-import { cn, getAvatarCropStyle, type AvatarCrop } from "../../lib/utils";
+import { cn, getAvatarCropStyle } from "../../lib/utils";
 import { useConnections } from "../../hooks/use-connections";
 import { usePresets, usePresetFull, useDefaultPreset } from "../../hooks/use-presets";
 import { useCharacterGroups, useCharacters, usePersonas } from "../../hooks/use-characters";
@@ -66,8 +67,10 @@ import {
   type ChatPreset,
   type CharacterGroup,
   type ConversationCommandKey,
+  type AvatarCrop,
   type Lorebook,
   type Message,
+  type Persona,
 } from "@marinara-engine/shared";
 import { useQueryClient } from "@tanstack/react-query";
 import {
@@ -199,18 +202,6 @@ interface ChatSetupWizardProps {
   onFinish: () => void;
 }
 
-interface PersonaDisplayInfo {
-  id?: string;
-  name: string;
-  avatarPath?: string | null;
-  comment?: string | null;
-}
-
-type PersonaSetupOption = PersonaDisplayInfo & {
-  id: string;
-  avatarPath: string | null;
-};
-
 type ConnectionSetupOption = {
   id: string;
   name: string;
@@ -256,7 +247,7 @@ type AgentAddPreview = {
 
 const WIZARD_PANEL_CLASS = cn(
   NEUTRAL_PANEL_SHELL,
-  "pointer-events-auto flex max-h-[calc(100dvh-1.5rem)] w-full max-w-lg flex-col overflow-hidden sm:max-h-[min(90dvh,44rem)]",
+  "mari-chat-setup-wizard pointer-events-auto flex max-h-[calc(100dvh-1.5rem)] w-full max-w-lg flex-col overflow-hidden sm:max-h-[min(90dvh,44rem)]",
 );
 
 const WIZARD_FIELD_LABEL = "text-[0.6875rem] font-medium uppercase tracking-wider text-[var(--muted-foreground)]";
@@ -271,6 +262,123 @@ const WIZARD_PRIMARY_BUTTON_CLASS =
 const WIZARD_SECONDARY_BUTTON_CLASS =
   "flex items-center justify-center gap-1.5 rounded-lg border border-[var(--border)] bg-[var(--secondary)] px-3 py-1.5 text-xs font-medium text-[var(--foreground)] transition-all hover:bg-[var(--accent)] disabled:cursor-not-allowed disabled:opacity-50";
 const CHARACTER_PICKER_PAGE_SIZE = 50;
+
+type WizardSelectOption = {
+  value: string;
+  label: string;
+};
+
+function WizardSelect({
+  id,
+  value,
+  options,
+  ariaLabel,
+  onChange,
+}: {
+  id?: string;
+  value: string;
+  options: WizardSelectOption[];
+  ariaLabel: string;
+  onChange: (value: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const listboxId = useId();
+  const selectedOption = options.find((option) => option.value === value) ?? options[0];
+
+  const focusSelectedOption = () => {
+    window.requestAnimationFrame(() => {
+      const optionButtons = rootRef.current?.querySelectorAll<HTMLButtonElement>('[role="option"]');
+      const selectedIndex = Math.max(
+        0,
+        options.findIndex((option) => option.value === value),
+      );
+      optionButtons?.[selectedIndex]?.focus();
+    });
+  };
+
+  return (
+    <div
+      ref={rootRef}
+      className="relative"
+      onBlur={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget)) setOpen(false);
+      }}
+      onKeyDown={(event) => {
+        if (event.key === "Escape" && open) {
+          event.preventDefault();
+          setOpen(false);
+          triggerRef.current?.focus();
+        }
+      }}
+    >
+      <button
+        ref={triggerRef}
+        id={id}
+        type="button"
+        role="combobox"
+        aria-label={ariaLabel}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        aria-controls={open ? listboxId : undefined}
+        onClick={() => setOpen((current) => !current)}
+        onKeyDown={(event) => {
+          if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+          event.preventDefault();
+          if (!open) setOpen(true);
+          focusSelectedOption();
+        }}
+        className={cn(WIZARD_INPUT_CLASS, "flex items-center justify-between gap-2 pr-3 text-left")}
+      >
+        <span className="min-w-0 flex-1 truncate">{selectedOption?.label}</span>
+        <ChevronDown
+          size="0.75rem"
+          className={cn("shrink-0 text-[var(--muted-foreground)] transition-transform", open && "rotate-180")}
+        />
+      </button>
+      {open && (
+        <div
+          id={listboxId}
+          role="listbox"
+          aria-label={ariaLabel}
+          className="mt-1 max-h-48 overflow-y-auto rounded-lg border border-[var(--border)] bg-[var(--secondary)] p-1 shadow-xl"
+        >
+          {options.map((option, index) => {
+            const selected = option.value === value;
+            return (
+              <button
+                key={option.value}
+                type="button"
+                role="option"
+                aria-selected={selected}
+                onClick={() => {
+                  onChange(option.value);
+                  setOpen(false);
+                  triggerRef.current?.focus();
+                }}
+                onKeyDown={(event) => {
+                  if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+                  event.preventDefault();
+                  const nextIndex =
+                    event.key === "ArrowDown" ? Math.min(options.length - 1, index + 1) : Math.max(0, index - 1);
+                  rootRef.current?.querySelectorAll<HTMLButtonElement>('[role="option"]')[nextIndex]?.focus();
+                }}
+                className={cn(
+                  "flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-xs text-[var(--foreground)] hover:bg-[var(--accent)]",
+                  selected && "bg-[var(--primary)]/10 text-[var(--primary)]",
+                )}
+              >
+                <span className="min-w-0 flex-1 truncate">{option.label}</span>
+                {selected && <Check size="0.75rem" className="shrink-0" />}
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
 
 function readChatMetadata(chat: Chat): Record<string, unknown> {
   const raw = (chat as unknown as { metadata?: string | Record<string, unknown> }).metadata;
@@ -451,53 +559,43 @@ function SetupWizardShell({
   );
 }
 
-function getPersonaTitle(persona: PersonaDisplayInfo): string | null {
-  const title = persona.comment?.trim();
+function getPersonaTitle(persona: Persona): string | null {
+  const title = persona.comment.trim();
   return title ? title : null;
 }
 
-function formatPersonaLabel(persona: PersonaDisplayInfo): string {
+function formatPersonaLabel(persona: Persona): string {
   const title = getPersonaTitle(persona);
   return title ? `${persona.name} - ${title}` : persona.name;
 }
 
-function getCharacterAvatarCrop(character: { data: unknown }): AvatarCrop | null {
-  try {
-    const parsed = typeof character.data === "string" ? JSON.parse(character.data) : character.data;
-    return (parsed as { extensions?: { avatarCrop?: AvatarCrop | null } } | null)?.extensions?.avatarCrop ?? null;
-  } catch {
-    return null;
-  }
-}
-
-function CharacterAvatarImage({
-  character,
+function CroppedAvatarImage({
   src,
   alt,
   className,
+  crop,
 }: {
-  character: { data: unknown };
   src: string;
   alt: string;
   className: string;
+  crop: AvatarCrop | null;
 }) {
   return (
     <span className={cn("relative block shrink-0 overflow-hidden", className)}>
-      <img
-        src={src}
-        alt={alt}
-        loading="lazy"
-        className="h-full w-full object-cover"
-        style={getAvatarCropStyle(getCharacterAvatarCrop(character))}
-      />
+      <img src={src} alt={alt} loading="lazy" className="h-full w-full object-cover" style={getAvatarCropStyle(crop)} />
     </span>
   );
 }
 
-function PersonaAvatar({ persona }: { persona: PersonaDisplayInfo | null }) {
+function PersonaAvatar({ persona }: { persona: Persona | null }) {
   if (persona?.avatarPath) {
     return (
-      <img src={persona.avatarPath} alt={persona.name} loading="lazy" className="h-7 w-7 rounded-full object-cover" />
+      <CroppedAvatarImage
+        src={persona.avatarPath}
+        alt={persona.name}
+        className="h-7 w-7 rounded-full"
+        crop={persona.avatarCrop ?? null}
+      />
     );
   }
 
@@ -514,7 +612,7 @@ function PersonaPicker({
   onChange,
   searchable = true,
 }: {
-  personas: PersonaSetupOption[];
+  personas: Persona[];
   value: string | null;
   onChange: (personaId: string | null) => void;
   searchable?: boolean;
@@ -624,9 +722,9 @@ function SetupGenerationParametersPanel({
       <button
         type="button"
         onClick={() => onEnabledChange(!enabled)}
-        className="flex w-full items-center justify-between gap-3 text-left"
+        className="flex min-w-0 w-full items-center justify-between gap-3 text-left"
       >
-        <div>
+        <div className="min-w-0 flex-1">
           <span className="block text-xs font-medium text-[var(--foreground)]">
             {localizeUi("ui.chat.setupgenerationparameterspanel.customizeParameters")}
           </span>
@@ -636,7 +734,7 @@ function SetupGenerationParametersPanel({
         </div>
         <div
           className={cn(
-            "h-5 w-9 rounded-full p-0.5 transition-colors",
+            "h-5 w-9 shrink-0 rounded-full p-0.5 transition-colors",
             enabled ? "bg-[var(--primary)]" : "bg-[var(--muted-foreground)]/50",
           )}
         >
@@ -750,16 +848,7 @@ function ConversationQuickSetup({ chat, onFinish }: ChatSetupWizardProps) {
       (allCharacters ?? []) as Array<{ id: string; data: string; comment?: string | null; avatarPath: string | null }>,
     [allCharacters],
   );
-  const personas = useMemo(
-    () =>
-      (allPersonas ?? []) as Array<{
-        id: string;
-        name: string;
-        avatarPath: string | null;
-        comment?: string | null;
-      }>,
-    [allPersonas],
-  );
+  const personas = useMemo(() => allPersonas ?? [], [allPersonas]);
   const promptPresetOptions = useMemo(
     () =>
       (presets ?? []) as Array<{
@@ -1156,19 +1245,16 @@ function ConversationQuickSetup({ chat, onFinish }: ChatSetupWizardProps) {
 
       <div className="space-y-1.5">
         <label className={WIZARD_FIELD_LABEL}>{localizeUi("ui.chat.conversationquicksetup.connection")}</label>
-        <select
+        <WizardSelect
           value={selectedConnectionId}
-          onChange={(event) => setConnection(event.target.value || null)}
-          className={WIZARD_INPUT_CLASS}
-        >
-          <option value="">{localizeUi("ui.game.gamesurfacecomponent.none")}</option>
-          <option value="random">{localizeUi("ui.game.gamesurfacecomponent.random")}</option>
-          {connectionOptions.map((connection) => (
-            <option key={connection.id} value={connection.id}>
-              {connection.name}
-            </option>
-          ))}
-        </select>
+          ariaLabel={localizeUi("ui.chat.conversationquicksetup.connection")}
+          options={[
+            { value: "", label: localizeUi("ui.game.gamesurfacecomponent.none") },
+            { value: "random", label: localizeUi("ui.game.gamesurfacecomponent.random") },
+            ...connectionOptions.map((connection) => ({ value: connection.id, label: connection.name })),
+          ]}
+          onChange={(nextValue) => setConnection(nextValue || null)}
+        />
         {connectionOptions.length === 0 && (
           <button
             onClick={() => {
@@ -1196,18 +1282,15 @@ function ConversationQuickSetup({ chat, onFinish }: ChatSetupWizardProps) {
     <div className="space-y-3">
       <div className="space-y-2">
         <label className={WIZARD_FIELD_LABEL}>{localizeUi("ui.chat.conversationquicksetup.conversationPrompt")}</label>
-        <select
+        <WizardSelect
           value={selectedPromptPresetId ?? ""}
-          onChange={(event) => setPreset(event.target.value || null)}
-          className={WIZARD_INPUT_CLASS}
-        >
-          <option value="">{localizeUi("ui.game.gamesurfacecomponent.none")}</option>
-          {promptPresetOptions.map((preset) => (
-            <option key={preset.id} value={preset.id}>
-              {preset.name}
-            </option>
-          ))}
-        </select>
+          ariaLabel={localizeUi("ui.chatSettings.conversationpromptsection.promptPreset")}
+          options={[
+            { value: "", label: localizeUi("ui.game.gamesurfacecomponent.none") },
+            ...promptPresetOptions.map((preset) => ({ value: preset.id, label: preset.name })),
+          ]}
+          onChange={(nextValue) => setPreset(nextValue || null)}
+        />
         <p className="text-[0.625rem] leading-relaxed text-[var(--muted-foreground)]">
           {localizeUi("ui.chat.conversationquicksetup.thisSelectsTheConversationModePromptStoredInThe")}
         </p>
@@ -1328,11 +1411,11 @@ function ConversationQuickSetup({ chat, onFinish }: ChatSetupWizardProps) {
                   }
                 >
                   {character.avatarPath ? (
-                    <CharacterAvatarImage
-                      character={character}
+                    <CroppedAvatarImage
                       src={character.avatarPath}
                       alt={name}
                       className="h-5 w-5 rounded-md"
+                      crop={getCharacterInfo(character).avatarCrop ?? null}
                     />
                   ) : (
                     <div className="flex h-5 w-5 items-center justify-center rounded-md bg-[var(--accent)] text-[0.5rem] font-bold">
@@ -1419,11 +1502,11 @@ function ConversationQuickSetup({ chat, onFinish }: ChatSetupWizardProps) {
                   className="flex w-full items-center gap-2.5 px-3 py-2 text-left transition-all hover:bg-[var(--accent)]"
                 >
                   {character.avatarPath ? (
-                    <CharacterAvatarImage
-                      character={character}
+                    <CroppedAvatarImage
                       src={character.avatarPath}
                       alt={info.name}
                       className="h-7 w-7 rounded-md"
+                      crop={info.avatarCrop ?? null}
                     />
                   ) : (
                     <div className="flex h-7 w-7 items-center justify-center rounded-md bg-[var(--accent)] text-[0.5625rem] font-bold">
@@ -1749,16 +1832,7 @@ function RoleplaySetupWizard({ chat, onFinish }: ChatSetupWizardProps) {
   const chatPresetList = useMemo(() => (chatPresetsData ?? []) as ChatPreset[], [chatPresetsData]);
   const applyChatPreset = useApplyChatPreset();
 
-  const personas = useMemo(
-    () =>
-      (allPersonas ?? []) as Array<{
-        id: string;
-        name: string;
-        avatarPath: string | null;
-        comment?: string | null;
-      }>,
-    [allPersonas],
-  );
+  const personas = useMemo(() => allPersonas ?? [], [allPersonas]);
   const characters = useMemo(
     () =>
       (allCharacters ?? []) as Array<{ id: string; data: string; comment?: string | null; avatarPath: string | null }>,
@@ -2354,20 +2428,17 @@ function RoleplaySetupWizard({ chat, onFinish }: ChatSetupWizardProps) {
           <label htmlFor={roleplayConnectionSelectId} className={WIZARD_FIELD_LABEL}>
             {localizeUi("ui.chat.conversationquicksetup.connection")}
           </label>
-          <select
+          <WizardSelect
             id={roleplayConnectionSelectId}
             value={chat.connectionId ?? ""}
-            onChange={(e) => setConnection(e.target.value || null)}
-            className={WIZARD_INPUT_CLASS}
-          >
-            <option value="">{localizeUi("ui.game.gamesurfacecomponent.none")}</option>
-            <option value="random">{localizeUi("ui.game.gamesurfacecomponent.random")}</option>
-            {connectionOptions.map((c) => (
-              <option key={c.id} value={c.id}>
-                {c.name}
-              </option>
-            ))}
-          </select>
+            ariaLabel={localizeUi("ui.chat.conversationquicksetup.connection")}
+            options={[
+              { value: "", label: localizeUi("ui.game.gamesurfacecomponent.none") },
+              { value: "random", label: localizeUi("ui.game.gamesurfacecomponent.random") },
+              ...connectionOptions.map((connection) => ({ value: connection.id, label: connection.name })),
+            ]}
+            onChange={(nextValue) => setConnection(nextValue || null)}
+          />
         </div>
         {connectionOptions.length === 0 && (
           <button
@@ -2394,18 +2465,18 @@ function RoleplaySetupWizard({ chat, onFinish }: ChatSetupWizardProps) {
 
   function renderPreset() {
     return (
-      <select
+      <WizardSelect
         value={chat.promptPresetId ?? ""}
-        onChange={(e) => setPreset(e.target.value || null)}
-        className={WIZARD_INPUT_CLASS}
-      >
-        <option value="">{localizeUi("ui.game.gamesurfacecomponent.none")}</option>
-        {((presets ?? []) as Array<{ id: string; name: string; isDefault?: boolean | string }>).map((p) => (
-          <option key={p.id} value={p.id}>
-            {p.name}
-          </option>
-        ))}
-      </select>
+        ariaLabel={localizeUi("chat.toolbar.preset")}
+        options={[
+          { value: "", label: localizeUi("ui.game.gamesurfacecomponent.none") },
+          ...((presets ?? []) as Array<{ id: string; name: string; isDefault?: boolean | string }>).map((preset) => ({
+            value: preset.id,
+            label: preset.name,
+          })),
+        ]}
+        onChange={(nextValue) => setPreset(nextValue || null)}
+      />
     );
   }
 
@@ -2446,11 +2517,11 @@ function RoleplaySetupWizard({ chat, onFinish }: ChatSetupWizardProps) {
                   className="flex items-center gap-2.5 rounded-lg bg-[var(--primary)]/10 px-3 py-2 ring-1 ring-[var(--primary)]/30"
                 >
                   {c.avatarPath ? (
-                    <CharacterAvatarImage
-                      character={c}
+                    <CroppedAvatarImage
                       src={c.avatarPath}
                       alt={name}
                       className="h-6 w-6 rounded-full"
+                      crop={getCharacterInfo(c).avatarCrop ?? null}
                     />
                   ) : (
                     <div className="flex h-6 w-6 items-center justify-center rounded-full bg-[var(--accent)] text-[0.5625rem] font-bold">
@@ -2554,11 +2625,11 @@ function RoleplaySetupWizard({ chat, onFinish }: ChatSetupWizardProps) {
                   className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-left transition-all hover:bg-[var(--accent)]"
                 >
                   {c.avatarPath ? (
-                    <CharacterAvatarImage
-                      character={c}
+                    <CroppedAvatarImage
                       src={c.avatarPath}
                       alt={name}
                       className="h-6 w-6 rounded-full"
+                      crop={getCharacterInfo(c).avatarCrop ?? null}
                     />
                   ) : (
                     <div className="flex h-6 w-6 items-center justify-center rounded-full bg-[var(--accent)] text-[0.5625rem] font-bold">
@@ -2956,7 +3027,7 @@ function RoleplaySetupWizard({ chat, onFinish }: ChatSetupWizardProps) {
                   const activeCount = section.agents.filter((agent) => activeAgentIds.includes(agent.id)).length;
                   return (
                     <div key={section.category} className="border-b border-[var(--border)]/70 last:border-b-0">
-                      <div className="sticky top-0 z-10 flex items-center justify-between bg-[var(--secondary)]/95 px-3 py-1.5 backdrop-blur-sm">
+                      <div className="flex items-center justify-between bg-[var(--secondary)] px-3 py-1.5">
                         <span className="text-[0.625rem] font-semibold uppercase tracking-wide text-[var(--muted-foreground)]">
                           {section.title}
                         </span>

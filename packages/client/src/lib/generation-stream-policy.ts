@@ -22,6 +22,14 @@ interface TypewriterFrameBudget {
   maxCharacters: number;
 }
 
+interface RoleplayTypewriterRevealRateInput {
+  selectedCharsPerSecond: number;
+  pendingCharacters: number;
+  previousCharsPerSecond: number | null;
+  elapsedMs: number;
+  streamComplete: boolean;
+}
+
 interface GenerationSendBlockInput {
   streamActive: boolean;
   agentsProcessing: boolean;
@@ -30,9 +38,24 @@ interface GenerationSendBlockInput {
 }
 
 interface GenerationStartBlockInput {
-  setupLocked: boolean;
   activeController: boolean;
   backgroundIllustration: boolean;
+}
+
+const ROLEPLAY_QUEUE_RESERVE_SECONDS = 0.9;
+const ROLEPLAY_SLOWDOWN_RESPONSE_MS = 120;
+const ROLEPLAY_SPEEDUP_RESPONSE_MS = 480;
+const TYPEWRITER_TARGET_FRAME_MS = 1000 / 60;
+const TYPEWRITER_MAX_CATCH_UP_FRAMES = 2;
+const IOS_TYPEWRITER_TARGET_FRAME_MS = 1000 / 20;
+
+/** iOS browsers all use WebKit, where repainting growing Markdown at 60 FPS can freeze long streams. */
+export function isIosWebKitBrowser(userAgent: string, platform: string, maxTouchPoints: number): boolean {
+  return /iP(?:ad|hone|od)/iu.test(userAgent) || (platform === "MacIntel" && maxTouchPoints > 1);
+}
+
+export function getTypewriterPaintIntervalMs(userAgent: string, platform: string, maxTouchPoints: number): number {
+  return isIosWebKitBrowser(userAgent, platform, maxTouchPoints) ? IOS_TYPEWRITER_TARGET_FRAME_MS : 0;
 }
 
 /** Keep send actions guarded while leaving the draft field itself editable. */
@@ -42,14 +65,13 @@ export function isGenerationSendBlocked(input: GenerationSendBlockInput): boolea
 
 /** An Illustrator-only SSE tail may coexist with the chat's next text generation. */
 export function isGenerationStartBlocked(input: GenerationStartBlockInput): boolean {
-  return input.setupLocked || (input.activeController && !input.backgroundIllustration);
+  return input.activeController && !input.backgroundIllustration;
 }
 
 /**
- * Map the 1–100 streaming-speed control directly to visible characters per
- * second. Provider arrival rate and queue depth must not change the animation
- * cadence: those inputs are bursty and were what made the typewriter appear to
- * lurch. The final setting remains an intentional instant-reveal shortcut.
+ * Map the 1–100 streaming-speed control to the visible-speed ceiling. Roleplay
+ * may ease below that ceiling to preserve a queue between provider bursts. The
+ * final setting remains an intentional instant-reveal shortcut.
  */
 export function getStreamingCharsPerSecond(streamingSpeed: number, prefersReducedMotion = false): number {
   if (prefersReducedMotion || streamingSpeed >= 100) return Infinity;
@@ -57,16 +79,45 @@ export function getStreamingCharsPerSecond(streamingSpeed: number, prefersReduce
   return Math.max(1, Math.min(99, Math.round(streamingSpeed)));
 }
 
-/** Preserve the selected reveal rate even when animation frames arrive below 60 Hz. */
+/**
+ * Keep Roleplay's reveal queue slightly behind the open transport so provider
+ * bursts remain one continuous motion. The selected speed stays the ceiling.
+ */
+export function getRoleplayTypewriterRevealCharsPerSecond(input: RoleplayTypewriterRevealRateInput): number {
+  if (!Number.isFinite(input.selectedCharsPerSecond)) return input.selectedCharsPerSecond;
+  if (input.streamComplete) return input.selectedCharsPerSecond;
+
+  const minimumRate = Math.min(6, input.selectedCharsPerSecond);
+  const queueSmoothedTarget = Math.max(minimumRate, input.pendingCharacters / ROLEPLAY_QUEUE_RESERVE_SECONDS);
+  const targetRate = Math.min(input.selectedCharsPerSecond, queueSmoothedTarget);
+
+  if (input.previousCharsPerSecond === null || !Number.isFinite(input.previousCharsPerSecond)) {
+    return targetRate;
+  }
+
+  const responseTimeMs =
+    targetRate < input.previousCharsPerSecond ? ROLEPLAY_SLOWDOWN_RESPONSE_MS : ROLEPLAY_SPEEDUP_RESPONSE_MS;
+  const blend = 1 - Math.exp(-Math.max(0, input.elapsedMs) / responseTimeMs);
+  return input.previousCharsPerSecond + (targetRate - input.previousCharsPerSecond) * blend;
+}
+
+/** Carry delayed-frame debt forward without painting a visible burst in one frame. */
 export function getTypewriterFrameBudget(
   charsPerSecond: number,
   elapsedMs: number,
   carriedRemainder: number,
+  paintIntervalMs = TYPEWRITER_TARGET_FRAME_MS,
 ): TypewriterFrameBudget {
   const newlyAccruedCharacters = (charsPerSecond * Math.max(0, elapsedMs)) / 1000;
   return {
     accruedCharacters: carriedRemainder + newlyAccruedCharacters,
-    maxCharacters: Math.max(1, Math.ceil(newlyAccruedCharacters)),
+    maxCharacters: Math.max(
+      1,
+      Math.ceil(
+        (charsPerSecond * Math.max(TYPEWRITER_TARGET_FRAME_MS, paintIntervalMs) * TYPEWRITER_MAX_CATCH_UP_FRAMES) /
+          1000,
+      ),
+    ),
   };
 }
 

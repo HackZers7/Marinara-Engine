@@ -18,14 +18,14 @@ export interface RuntimeAgentSectionTokens {
 
 const RUNTIME_AGENT_SECTION_TOKEN_PREFIX = "__MARINARA_RUNTIME_AGENT_SECTION__";
 
-export const REVIEWABLE_WRITER_AGENT_TYPES = new Set(
-  BUILT_IN_AGENTS.filter(
-    (agent) =>
-      agent.category === "writer" &&
-      agent.phase === "pre_generation" &&
-      !["director", "knowledge-retrieval", "knowledge-router"].includes(agent.id),
-  ).map((agent) => agent.id),
-);
+const NON_REVIEWABLE_WRITER_AGENT_TYPES = new Set(["director", "knowledge-retrieval", "knowledge-router"]);
+
+export function isReviewableWriterAgentType(agentType: string): boolean {
+  const agent = BUILT_IN_AGENTS.find((entry) => entry.id === agentType);
+  return (
+    agent?.category === "writer" && agent.phase === "pre_generation" && !NON_REVIEWABLE_WRITER_AGENT_TYPES.has(agent.id)
+  );
+}
 
 export function formatAgentInjections(injections: AgentInjection[], wrapFormat: string): string {
   if (injections.length === 1) {
@@ -117,9 +117,12 @@ export function buildRuntimeAgentSectionEligibleTypes(input: {
   for (const agent of input.configuredAgents ?? []) {
     if (!activeAgentIds.has(agent.type)) continue;
     if (input.chatMode && !isAgentAvailableInChatMode(input.chatMode, agent.type)) continue;
-    if (agent.phase !== "pre_generation") continue;
     const settings = parseRuntimeAgentSettings(agent.settings);
-    if (resolveAgentResultType({ type: agent.type, settings }) !== "context_injection") continue;
+    const resultType = resolveAgentResultType({ type: agent.type, settings });
+    const isRuntimeInjection = agent.phase === "pre_generation" && resultType === "context_injection";
+    const isPersistentAgentSection =
+      agent.phase === "post_processing" && resultType === "memory_nag" && settings.injectAsSection === true;
+    if (!isRuntimeInjection && !isPersistentAgentSection) continue;
     eligible.add(agent.type);
   }
 
@@ -195,7 +198,7 @@ export function clearUnusedRuntimeAgentSections(
       const message = messages[i]!;
       if (!message.content.includes(tokens.start) && !message.content.includes(tokens.placeholder)) continue;
       const content = message.content
-        .replace(sectionPattern, (_match, sectionContent: string) => sectionContent.split(tokens.placeholder).join(""))
+        .replace(sectionPattern, "")
         .split(tokens.start)
         .join("")
         .split(tokens.end)

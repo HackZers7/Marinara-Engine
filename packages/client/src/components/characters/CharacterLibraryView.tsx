@@ -12,7 +12,7 @@ import {
   Star,
   User,
 } from "lucide-react";
-import { type CharacterData } from "@marinara-engine/shared";
+import { type CharacterData, type Persona } from "@marinara-engine/shared";
 import { useTranslation, useTranslation as useUiTranslation } from "react-i18next";
 import {
   flattenCharacterPages,
@@ -29,7 +29,8 @@ import {
 } from "../../lib/card-library-search";
 import { estimateCharacterCardTokens, formatEstimatedTokens } from "../../lib/character-token-count";
 import { applyInlineMarkdown, renderMarkdownBlocks } from "../../lib/markdown";
-import { cn, getAvatarCropStyle, parseAvatarCropJson, type AvatarCropValue } from "../../lib/utils";
+import { normalizeAvatarCrop, type AvatarCrop } from "@marinara-engine/shared";
+import { cn, getAvatarCropStyle } from "../../lib/utils";
 import { useLocalizedUiText } from "../../localization/use-localized-ui-text";
 import {
   useUIStore,
@@ -57,26 +58,6 @@ type ParsedCharacterRow = CharacterRow & {
   };
 };
 
-type PersonaRow = {
-  id: string;
-  name: string;
-  comment?: string | null;
-  creator?: string | null;
-  personaVersion?: string | null;
-  creatorNotes?: string | null;
-  description?: string | null;
-  personality?: string | null;
-  scenario?: string | null;
-  backstory?: string | null;
-  appearance?: string | null;
-  avatarPath: string | null;
-  avatarCrop?: string | AvatarCropValue | null;
-  isActive?: boolean | string;
-  tags?: string | string[] | null;
-  createdAt: string;
-  updatedAt: string;
-};
-
 type LibrarySection = { title: string; content: string };
 
 type LibraryCard = {
@@ -86,7 +67,7 @@ type LibraryCard = {
   meta: string | null;
   summary: string;
   avatarPath: string | null;
-  avatarCrop?: AvatarCropValue;
+  avatarCrop?: AvatarCrop;
   createdAt: string;
   updatedAt: string;
   tags: string[];
@@ -138,26 +119,11 @@ function getCharacterTags(char: ParsedCharacterRow): string[] {
   );
 }
 
-function getPersonaTags(persona: PersonaRow): string[] {
-  if (Array.isArray(persona.tags)) {
-    return persona.tags.filter((tag): tag is string => typeof tag === "string" && tag.trim().length > 0);
-  }
-  if (!persona.tags) return [];
-  try {
-    const parsed = JSON.parse(persona.tags);
-    return Array.isArray(parsed)
-      ? parsed.filter((tag): tag is string => typeof tag === "string" && tag.trim().length > 0)
-      : [];
-  } catch {
-    return [];
-  }
-}
-
 function getCharacterSummary(char: ParsedCharacterRow) {
   return getCardLibrarySummary([char.parsed.creator_notes, char.parsed.description, char.parsed.personality]);
 }
 
-function getPersonaSummary(persona: PersonaRow) {
+function getPersonaSummary(persona: Persona) {
   return getCardLibrarySummary([persona.creatorNotes, persona.description, persona.personality, persona.backstory]);
 }
 
@@ -175,7 +141,7 @@ function getCharacterSections(char: ParsedCharacterRow): LibrarySection[] {
   ].filter((section) => section.content);
 }
 
-function getPersonaSections(persona: PersonaRow): LibrarySection[] {
+function getPersonaSections(persona: Persona): LibrarySection[] {
   return [
     { title: "Description", content: getText(persona.description) },
     { title: "Personality", content: getText(persona.personality) },
@@ -185,18 +151,12 @@ function getPersonaSections(persona: PersonaRow): LibrarySection[] {
   ].filter((section) => section.content);
 }
 
-function estimatePersonaTokens(persona: PersonaRow) {
+function estimatePersonaTokens(persona: Persona) {
   return Math.ceil(
     [persona.description, persona.personality, persona.scenario, persona.backstory, persona.appearance]
       .map(getText)
       .join("").length / 4,
   );
-}
-
-function parsePersonaAvatarCrop(value: PersonaRow["avatarCrop"]): AvatarCropValue | undefined {
-  if (!value) return undefined;
-  if (typeof value === "string") return parseAvatarCropJson(value) ?? undefined;
-  return value;
 }
 
 function toCharacterLibraryCard(char: ParsedCharacterRow): LibraryCard {
@@ -208,7 +168,7 @@ function toCharacterLibraryCard(char: ParsedCharacterRow): LibraryCard {
     meta: formatCardLibraryMeta(char.parsed.creator, char.parsed.character_version),
     summary: getCharacterSummary(char),
     avatarPath: char.avatarPath,
-    avatarCrop: char.parsed.extensions?.avatarCrop as AvatarCropValue | undefined,
+    avatarCrop: normalizeAvatarCrop(char.parsed.extensions?.avatarCrop) ?? undefined,
     createdAt: char.createdAt,
     updatedAt: char.updatedAt,
     tags: getCharacterTags(char),
@@ -220,7 +180,7 @@ function toCharacterLibraryCard(char: ParsedCharacterRow): LibraryCard {
   };
 }
 
-function toPersonaLibraryCard(persona: PersonaRow): LibraryCard {
+function toPersonaLibraryCard(persona: Persona): LibraryCard {
   return {
     id: persona.id,
     name: getText(persona.name) || "Unnamed",
@@ -228,13 +188,13 @@ function toPersonaLibraryCard(persona: PersonaRow): LibraryCard {
     meta: formatCardLibraryMeta(persona.creator, persona.personaVersion),
     summary: getPersonaSummary(persona),
     avatarPath: persona.avatarPath,
-    avatarCrop: parsePersonaAvatarCrop(persona.avatarCrop),
+    avatarCrop: persona.avatarCrop ?? undefined,
     createdAt: persona.createdAt,
     updatedAt: persona.updatedAt,
-    tags: getPersonaTags(persona),
+    tags: persona.tags.filter((tag) => tag.trim().length > 0),
     tokenEstimate: estimatePersonaTokens(persona),
     favorite: false,
-    active: persona.isActive === true || persona.isActive === "true",
+    active: persona.isActive,
     creatorNotes: getText(persona.creatorNotes),
     sections: getPersonaSections(persona),
   };
@@ -306,7 +266,7 @@ function CardLibraryDetailCard({
                 {card.favorite && (
                   <span
                     data-character-favorite-indicator="detail"
-                    className="mari-chrome-accent-surface mari-accent-animated inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-[0.6875rem] font-medium"
+                    className="mari-chrome-accent-surface mari-accent-animated mari-chrome-tag inline-flex items-center gap-1 px-2.5 py-1 text-[0.6875rem] font-medium"
                   >
                     <Star size="0.75rem" className="fill-current" />{" "}
                     {localizeUi("ui.characters.cardlibrarydetailcard.favorite")}
@@ -416,7 +376,7 @@ export function CharacterLibraryView() {
   const libraryScrollFrameRef = useRef<number | null>(null);
 
   const cards = useMemo<LibraryCard[]>(() => {
-    if (isPersonaLibrary) return (personas as PersonaRow[]).map(toPersonaLibraryCard);
+    if (isPersonaLibrary) return personas.map(toPersonaLibraryCard);
     return (characters as CharacterRow[]).map(parseCharacterRow).map(toCharacterLibraryCard);
   }, [characters, isPersonaLibrary, personas]);
 
@@ -698,6 +658,7 @@ export function CharacterLibraryView() {
                   <Fragment key={card.id}>
                     <button
                       type="button"
+                      data-card-library-card={card.id}
                       onClick={() => setSelectedId(card.id)}
                       className={cn(
                         "group flex h-full items-stretch overflow-hidden rounded-[1.25rem] border bg-[var(--card)]/70 text-left shadow-[0_20px_50px_-32px_rgba(15,23,42,0.75)] transition-all hover:border-[var(--marinara-chat-chrome-button-border-hover)] hover:shadow-[0_24px_60px_-32px_color-mix(in_srgb,var(--marinara-chat-chrome-accent)_35%,transparent)] sm:flex-col sm:rounded-[1.75rem] sm:hover:-translate-y-0.5",
@@ -707,8 +668,9 @@ export function CharacterLibraryView() {
                       )}
                     >
                       <div
+                        data-card-library-avatar
                         className={cn(
-                          "mari-avatar-placeholder relative h-24 w-24 shrink-0 overflow-hidden sm:h-auto sm:w-full sm:aspect-square",
+                          "mari-avatar-placeholder relative min-h-24 w-24 shrink-0 self-stretch overflow-hidden sm:h-auto sm:min-h-0 sm:w-full sm:self-auto sm:aspect-square",
                           placeholderClass,
                         )}
                       >
@@ -728,14 +690,14 @@ export function CharacterLibraryView() {
                         {card.favorite && (
                           <div
                             data-character-favorite-indicator="card"
-                            className="mari-chrome-accent-surface mari-accent-animated absolute right-2 top-2 inline-flex items-center gap-1 rounded-full px-2 py-1 text-[0.5625rem] font-medium backdrop-blur-sm sm:right-3 sm:top-3 sm:text-[0.625rem]"
+                            className="mari-chrome-accent-surface mari-accent-animated mari-chrome-tag absolute right-2 top-2 inline-flex items-center gap-1 px-2 py-1 text-[0.5625rem] font-medium backdrop-blur-sm sm:right-3 sm:top-3 sm:text-[0.625rem]"
                           >
                             <Star size="0.625rem" className="fill-current sm:h-[0.6875rem] sm:w-[0.6875rem]" />{" "}
                             {localizeUi("ui.characters.cardlibrarydetailcard.favorite")}
                           </div>
                         )}
                         {card.active && (
-                          <div className="mari-chrome-accent-surface absolute right-2 top-2 inline-flex items-center gap-1 rounded-full px-2 py-1 text-[0.5625rem] font-medium backdrop-blur-sm sm:right-3 sm:top-3 sm:text-[0.625rem]">
+                          <div className="mari-chrome-accent-surface mari-chrome-tag absolute right-2 top-2 inline-flex items-center gap-1 px-2 py-1 text-[0.5625rem] font-medium backdrop-blur-sm sm:right-3 sm:top-3 sm:text-[0.625rem]">
                             <Check size="0.625rem" /> {localizeUi("ui.characters.lorebooktab.active")}
                           </div>
                         )}
@@ -773,13 +735,13 @@ export function CharacterLibraryView() {
                           {card.tags.slice(0, 2).map((tag) => (
                             <span
                               key={tag}
-                              className="rounded-full bg-[var(--marinara-chat-chrome-highlight-bg)] px-1.5 py-0.5 text-[0.5625rem] font-medium text-[var(--marinara-chat-chrome-panel-text)] sm:px-2 sm:py-1 sm:text-[0.625rem]"
+                              className="mari-chrome-tag bg-[var(--marinara-chat-chrome-highlight-bg)] px-1.5 py-0.5 text-[0.5625rem] font-medium text-[var(--marinara-chat-chrome-panel-text)] sm:px-2 sm:py-1 sm:text-[0.625rem]"
                             >
                               {tag}
                             </span>
                           ))}
                           {card.tags.length > 2 && (
-                            <span className="rounded-full bg-[var(--marinara-chat-chrome-button-bg)] px-1.5 py-0.5 text-[0.5625rem] text-[var(--marinara-chat-chrome-panel-muted)] sm:px-2 sm:py-1 sm:text-[0.625rem]">
+                            <span className="mari-chrome-tag bg-[var(--marinara-chat-chrome-button-bg)] px-1.5 py-0.5 text-[0.5625rem] text-[var(--marinara-chat-chrome-panel-muted)] sm:px-2 sm:py-1 sm:text-[0.625rem]">
                               +{card.tags.length - 2}
                             </span>
                           )}

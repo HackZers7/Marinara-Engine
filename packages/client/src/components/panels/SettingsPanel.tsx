@@ -27,10 +27,19 @@ import { useLocalizedUiText } from "../../localization/use-localized-ui-text";
 import { cn, copyToClipboard } from "../../lib/utils";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { ADMIN_SECRET_STORAGE_KEY, ApiError, api, getPrivilegedActionErrorMessage } from "../../lib/api-client";
+import { ANDROID_BRIDGE_READY_EVENT, getAndroidBridgeToken } from "../../lib/android-bridge";
 import { chatBackgroundUrlToMetadata } from "../../lib/backgrounds";
 import { normalizeThemeCss, sanitizeAppCss } from "../../lib/theme-css";
 import { forceRefreshSpa } from "@/lib/browser-runtime";
+import {
+  formatProfileImportWarningDetails,
+  formatProfileImportWarningSummary,
+  normalizeProfileImportWarnings,
+  type ProfileImportWarningCopy,
+  type ProfileImportWarning,
+} from "@/lib/profile-import-warnings";
 import React, { useRef, useState, useCallback, useEffect, useMemo } from "react";
+import type { TFunction } from "i18next";
 import { useTranslation, useTranslation as useUiTranslation } from "react-i18next";
 import { toast } from "sonner";
 import {
@@ -51,6 +60,7 @@ import {
   getFolderImportEntries,
   getFolderManifestConfig,
   type AppSettingsResponse,
+  type APIConnection,
   type ConversationCallCharacterVideoClipKind,
   type ImagePromptKind,
   type ImagePromptMode,
@@ -112,9 +122,18 @@ import {
   BookOpen,
   BarChart3,
   Gauge,
+  HardDrive,
+  LifeBuoy,
   SlidersHorizontal,
 } from "lucide-react";
-import { useClearAllData, useExpungeData, useUpdateChatMetadata, type ExpungeScope } from "../../hooks/use-chats";
+import {
+  useChat,
+  useClearAllData,
+  useExpungeData,
+  useUpdateChatMetadata,
+  type ExpungeScope,
+} from "../../hooks/use-chats";
+import { useConnections } from "../../hooks/use-connections";
 import { useChatStore } from "../../stores/chat.store";
 import { useOpenGameAssetsFolder, useRescanGameAssets } from "../../hooks/use-game-assets";
 import { chatKeys } from "../../hooks/use-chats";
@@ -136,18 +155,13 @@ import { TrackerCardColorSettings } from "./settings/TrackerCardColorSettings";
 import { PromptOverridesEditor } from "./settings/PromptOverridesEditor";
 import { BackgroundPicker } from "./settings/BackgroundPicker";
 import { CustomGenerationParametersSettings } from "./settings/CustomGenerationParametersSettings";
-import {
-  ExternalExtensionsSettings,
-  PersonalExtensionsSettings,
-} from "./settings/PersonalExtensionsSettings";
-import {
-  usePersonalExtensionPolicy,
-  useSetExternalExtensionsEnabled,
-} from "../../hooks/use-personal-extensions";
+import { ExternalExtensionsSettings, PersonalExtensionsSettings } from "./settings/PersonalExtensionsSettings";
+import { usePersonalExtensionPolicy, useSetExternalExtensionsEnabled } from "../../hooks/use-personal-extensions";
 import { useAgentImportPolicy, useSetAgentImportsEnabled } from "../../hooks/use-agents";
 import { DraftNumberInput } from "../ui/DraftNumberInput";
 import { ExportFormatDialog, type ExportFormatChoice } from "../ui/ExportFormatDialog";
 import { inspectCharacterFilesForEmbeddedLorebooks } from "../../lib/character-import";
+import { detectBrowserGpu, formatSupportDiagnostics, resolveClientOs } from "../../lib/support-diagnostics";
 import { showConfirmDialog } from "../../lib/app-dialogs";
 import { downloadJsonFile, sanitizeExportFilenamePart } from "../../lib/download-json";
 import {
@@ -244,9 +258,11 @@ type SettingsSectionId =
   | "sillytavern-import"
   | "admin-access"
   | "updates"
+  | "support-diagnostics"
   | "parameters"
   | "message-tools"
   | "backup-export"
+  | "storage-optimization"
   | "danger-zone";
 
 type SettingsSectionMeta = {
@@ -479,6 +495,13 @@ const SETTINGS_SECTIONS: readonly SettingsSectionMeta[] = [
     aliases: ["update", "version", "refresh", "release"],
   },
   {
+    id: "support-diagnostics",
+    tab: "advanced",
+    label: "Support Diagnostics",
+    description: "Copy technical details for support tickets.",
+    aliases: ["support", "diagnostics", "system info", "gpu", "model", "ticket", "bug report"],
+  },
+  {
     id: "parameters",
     tab: "advanced",
     label: "Parameters",
@@ -500,6 +523,13 @@ const SETTINGS_SECTIONS: readonly SettingsSectionMeta[] = [
     aliases: ["backup", "export", "download", "archive", "automatic", "scheduled"],
   },
   {
+    id: "storage-optimization",
+    tab: "advanced",
+    label: "Storage Optimization",
+    description: "Find and remove abandoned avatar files.",
+    aliases: ["storage", "avatar", "cleanup", "optimize", "orphan", "abandoned"],
+  },
+  {
     id: "danger-zone",
     tab: "advanced",
     label: "Danger Zone",
@@ -511,6 +541,14 @@ const SETTINGS_SECTIONS: readonly SettingsSectionMeta[] = [
 const SETTINGS_SECTION_BY_ID = new Map(SETTINGS_SECTIONS.map((section) => [section.id, section]));
 
 const SETTINGS_SEARCHABLE_CONTROLS: readonly SettingsSearchableControlMeta[] = [
+  {
+    id: "hide-chat-help-button",
+    sectionId: "application",
+    label: "Hide chat Help button",
+    description: "Remove the Help button from Conversation, Roleplay, and Game chats.",
+    aliases: ["help", "guide", "tutorial", "overlay", "question mark"],
+    kind: "Toggle",
+  },
   {
     id: "language",
     sectionId: "application",
@@ -524,7 +562,35 @@ const SETTINGS_SEARCHABLE_CONTROLS: readonly SettingsSearchableControlMeta[] = [
     sectionId: "application",
     label: "Documentation Language",
     description: "Choose the language for Marinara's built-in guides.",
-    aliases: ["documentation", "guides", "docs", "manual", "spanish", "español", "german", "deutsch", "french", "français", "portuguese", "português", "brazilian", "polish", "polski", "russian", "русский", "japanese", "日本語", "korean", "한국어", "chinese", "simplified", "简体中文", "中文"],
+    aliases: [
+      "documentation",
+      "guides",
+      "docs",
+      "manual",
+      "spanish",
+      "español",
+      "german",
+      "deutsch",
+      "french",
+      "français",
+      "portuguese",
+      "português",
+      "brazilian",
+      "polish",
+      "polski",
+      "russian",
+      "русский",
+      "japanese",
+      "日本語",
+      "korean",
+      "한국어",
+      "chinese",
+      "simplified",
+      "简体中文",
+      "中文",
+      "hindi",
+      "हिन्दी",
+    ],
     kind: "Select",
   },
   {
@@ -565,6 +631,14 @@ const SETTINGS_SEARCHABLE_CONTROLS: readonly SettingsSearchableControlMeta[] = [
     label: "Mini Mari surprise visits",
     description: "Allow rare Chibi Professor Mari messages while scrolling.",
     aliases: ["chibi", "professor", "surprise"],
+    kind: "Toggle",
+  },
+  {
+    id: "professor-mari-navigation",
+    sectionId: "application",
+    label: "Professor Mari navigation",
+    description: "Show Professor Mari's deterministic navigator on Home.",
+    aliases: ["home", "helper", "navigation", "navigator", "where is", "find"],
     kind: "Toggle",
   },
   {
@@ -712,6 +786,22 @@ const SETTINGS_SEARCHABLE_CONTROLS: readonly SettingsSearchableControlMeta[] = [
     kind: "Button group",
   },
   {
+    id: "color-inline-names",
+    sectionId: "text-rules",
+    label: "Color Character Names in Text",
+    description: "Color character names and aliases inline in message text.",
+    aliases: ["names", "aliases", "color", "gradient", "characters"],
+    kind: "Toggle",
+  },
+  {
+    id: "disable-inline-name-gradients",
+    sectionId: "text-rules",
+    label: "Force Solid Colors for Inline Names",
+    description: "Replace gradient name colors with the brightest solid color inline.",
+    aliases: ["gradient", "solid", "names", "readability"],
+    kind: "Toggle",
+  },
+  {
     id: "game-instant-text-reveal",
     sectionId: "game-playback",
     label: "Instantly reveal game text",
@@ -785,6 +875,14 @@ const SETTINGS_SEARCHABLE_CONTROLS: readonly SettingsSearchableControlMeta[] = [
     label: "Illustration image size",
     description: "Set default generated illustration dimensions.",
     aliases: ["image", "resolution", "canvas", "illustrator"],
+    kind: "Input",
+  },
+  {
+    id: "image-noodle-size",
+    sectionId: "image-generation",
+    label: "Noodle image size",
+    description: "Set default Noodle timeline image dimensions.",
+    aliases: ["image", "resolution", "canvas", "noodle", "timeline"],
     kind: "Input",
   },
   {
@@ -1052,11 +1150,35 @@ const SETTINGS_SEARCHABLE_CONTROLS: readonly SettingsSearchableControlMeta[] = [
     kind: "Toggle",
   },
   {
+    id: "show-roleplay-thinking-in-messages",
+    sectionId: "roleplay-messages",
+    label: "Show Thinking In Messages",
+    description: "Show model reasoning above the response inside Roleplay message bubbles.",
+    aliases: ["roleplay", "reasoning", "thinking", "thoughts", "messages"],
+    kind: "Toggle",
+  },
+  {
+    id: "keep-roleplay-thinking-expanded",
+    sectionId: "roleplay-messages",
+    label: "Don't Collapse Thinking",
+    description: "Keep inline model reasoning expanded when the response starts.",
+    aliases: ["roleplay", "reasoning", "thinking", "collapse", "expanded"],
+    kind: "Toggle",
+  },
+  {
     id: "scrollable-avatars",
     sectionId: "roleplay-messages",
     label: "Scrollable Avatars",
     description: "Keep roleplay avatars visible while scrolling long messages.",
     aliases: ["roleplay", "avatars", "sticky"],
+    kind: "Toggle",
+  },
+  {
+    id: "narrator-cycling-avatars",
+    sectionId: "roleplay-messages",
+    label: "Narrator's Cycling Avatars",
+    description: "Cycle Narrator avatars or show active characters together.",
+    aliases: ["roleplay", "narrator", "avatars", "cycle", "group"],
     kind: "Toggle",
   },
   {
@@ -1138,6 +1260,22 @@ const SETTINGS_SEARCHABLE_CONTROLS: readonly SettingsSearchableControlMeta[] = [
     description: "Choose which release channel update checks follow.",
     aliases: ["updates", "branch", "version"],
     kind: "Select",
+  },
+  {
+    id: "restart-server",
+    sectionId: "admin-access",
+    label: "Restart Server",
+    description: "Gracefully restart the Marinara server from this browser.",
+    aliases: ["server", "restart", "maintenance", "remote"],
+    kind: "Button group",
+  },
+  {
+    id: "copy-support-diagnostics",
+    sectionId: "support-diagnostics",
+    label: "Copy Diagnostics",
+    description: "Copy version, build, system, GPU, and active model details for support.",
+    aliases: ["support", "diagnostics", "system info", "gpu", "model", "clipboard"],
+    kind: "Button group",
   },
   {
     id: "custom-generation-parameters",
@@ -1227,6 +1365,14 @@ const SETTINGS_SEARCHABLE_CONTROLS: readonly SettingsSearchableControlMeta[] = [
     aliases: ["backup", "retention", "history", "rotate", "automatic"],
     kind: "Input",
   },
+  {
+    id: "avatar-storage-optimization",
+    sectionId: "storage-optimization",
+    label: "Optimize avatar storage",
+    description: "Find old avatar image files that are no longer referenced by Marinara data.",
+    aliases: ["storage", "avatar", "cleanup", "orphan", "abandoned", "disk space"],
+    kind: "Button group",
+  },
 ] as const;
 
 const SETTINGS_BUTTON_CLASS = "mari-chrome-control mari-chrome-control--small text-[0.6875rem]";
@@ -1234,9 +1380,18 @@ const SETTINGS_PRIMARY_BUTTON_CLASS = "mari-chrome-control mari-chrome-control--
 const SETTINGS_COMPACT_PRIMARY_BUTTON_CLASS =
   "mari-chrome-control mari-chrome-control--compact mari-chrome-control--selected text-[0.625rem]";
 type MarinaraAndroidBridge = {
-  openConsole?: () => void;
-  isStatusBarVisible?: () => boolean;
-  setStatusBarVisible?: (visible: boolean) => void;
+  openConsole?: {
+    (token: string): void;
+    (): void;
+  };
+  isStatusBarVisible?: {
+    (token: string): boolean;
+    (): boolean;
+  };
+  setStatusBarVisible?: {
+    (token: string, visible: boolean): void;
+    (visible: boolean): void;
+  };
 };
 
 function getMarinaraAndroidBridge(): MarinaraAndroidBridge | null {
@@ -1253,7 +1408,8 @@ function readAndroidStatusBarVisibility(): boolean | null {
   const bridge = getMarinaraAndroidBridge();
   if (typeof bridge?.isStatusBarVisible !== "function") return null;
   try {
-    return bridge.isStatusBarVisible();
+    const token = getAndroidBridgeToken();
+    return token ? bridge.isStatusBarVisible(token) : bridge.isStatusBarVisible();
   } catch {
     return null;
   }
@@ -1263,7 +1419,9 @@ function updateAndroidStatusBarVisibility(visible: boolean): boolean {
   const bridge = getMarinaraAndroidBridge();
   if (typeof bridge?.setStatusBarVisible !== "function") return false;
   try {
-    bridge.setStatusBarVisible(visible);
+    const token = getAndroidBridgeToken();
+    if (token) bridge.setStatusBarVisible(token, visible);
+    else bridge.setStatusBarVisible(visible);
     return true;
   } catch {
     return false;
@@ -1274,15 +1432,30 @@ function AndroidStatusBarSetting() {
   const { t } = useTranslation();
   const initialVisibility = readAndroidStatusBarVisibility();
   const [visible, setVisible] = useState(initialVisibility ?? false);
-  const supported = initialVisibility !== null;
+  const [supported, setSupported] = useState(initialVisibility !== null);
 
-  const handleChange = useCallback((nextVisible: boolean) => {
-    if (!updateAndroidStatusBarVisibility(nextVisible)) {
-      toast.error(t("settings.application.androidStatusBar.error"));
-      return;
-    }
-    setVisible(nextVisible);
-  }, [t]);
+  useEffect(() => {
+    const refreshBridge = () => {
+      const nextVisibility = readAndroidStatusBarVisibility();
+      if (nextVisibility === null) return;
+      setVisible(nextVisibility);
+      setSupported(true);
+    };
+    window.addEventListener(ANDROID_BRIDGE_READY_EVENT, refreshBridge);
+    refreshBridge();
+    return () => window.removeEventListener(ANDROID_BRIDGE_READY_EVENT, refreshBridge);
+  }, []);
+
+  const handleChange = useCallback(
+    (nextVisible: boolean) => {
+      if (!updateAndroidStatusBarVisibility(nextVisible)) {
+        toast.error(t("settings.application.androidStatusBar.error"));
+        return;
+      }
+      setVisible(nextVisible);
+    },
+    [t],
+  );
 
   let help = t("settings.application.androidStatusBar.unavailable");
   if (supported) {
@@ -1468,21 +1641,33 @@ const EXPUNGE_SCOPE_OPTIONS: Array<{ id: ExpungeScope; label: string; descriptio
   },
 ];
 
-async function readSettingsResponseError(res: Response, fallback: string) {
-  const contentType = res.headers.get("content-type") ?? "";
-
-  try {
-    if (contentType.includes("application/json")) {
-      const payload = (await res.json()) as { error?: unknown; message?: unknown };
-      const message = typeof payload.message === "string" ? payload.message : payload.error;
-      return typeof message === "string" && message.trim() ? message : fallback;
-    }
-
-    const text = (await res.text()).trim();
-    return text ? text.slice(0, 500) : fallback;
-  } catch {
-    return fallback;
+function formatStorageBytes(bytes: number): string {
+  const safeBytes = Math.max(0, Number.isFinite(bytes) ? bytes : 0);
+  if (safeBytes < 1_000) {
+    return new Intl.NumberFormat(undefined, { style: "unit", unit: "byte", unitDisplay: "short" }).format(safeBytes);
   }
+  if (safeBytes < 1_000_000) {
+    return new Intl.NumberFormat(undefined, {
+      style: "unit",
+      unit: "kilobyte",
+      unitDisplay: "short",
+      maximumFractionDigits: 1,
+    }).format(safeBytes / 1_000);
+  }
+  if (safeBytes < 1_000_000_000) {
+    return new Intl.NumberFormat(undefined, {
+      style: "unit",
+      unit: "megabyte",
+      unitDisplay: "short",
+      maximumFractionDigits: 1,
+    }).format(safeBytes / 1_000_000);
+  }
+  return new Intl.NumberFormat(undefined, {
+    style: "unit",
+    unit: "gigabyte",
+    unitDisplay: "short",
+    maximumFractionDigits: 1,
+  }).format(safeBytes / 1_000_000_000);
 }
 
 const ROLEPLAY_AVATAR_STYLE_OPTIONS: Array<{ id: RoleplayAvatarStyle; label: string; desc: string }> = [
@@ -1588,6 +1773,10 @@ const TRACKER_PANEL_CARD_OPTIONS: Record<TrackerDataPanelSection, { label: strin
   characters: {
     label: "Characters",
     desc: "Present character cards, stats, portraits, and thoughts.",
+  },
+  inventory: {
+    label: "ui.panels.trackerOrder.inventoryTracker",
+    desc: "ui.panels.trackerOrder.inventoryTrackerDescription",
   },
   quests: {
     label: "Quests",
@@ -1705,7 +1894,9 @@ function ImageDimensionRow({
           {label}
           <HelpTooltip text={help} />
         </div>
-        <div className="mt-1 text-[0.625rem] text-[var(--muted-foreground)]">{localizeUi("ui.panels.imagedimensionrow.pixelsClampedFrom64To4096")}</div>
+        <div className="mt-1 text-[0.625rem] text-[var(--muted-foreground)]">
+          {localizeUi("ui.panels.imagedimensionrow.pixelsClampedFrom64To4096")}
+        </div>
       </div>
       <div className="grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-1.5 sm:w-40">
         <DraftNumberInput
@@ -1716,7 +1907,9 @@ function ImageDimensionRow({
           onCommit={(nextWidth) => onCommit(nextWidth, height)}
           className="min-w-0 rounded-md border border-[var(--border)] bg-[var(--secondary)] px-2 py-1 text-xs"
         />
-        <span className="text-[0.625rem] text-[var(--muted-foreground)]">{localizeUi("ui.panels.imagedimensionrow.x")}</span>
+        <span className="text-[0.625rem] text-[var(--muted-foreground)]">
+          {localizeUi("ui.panels.imagedimensionrow.x")}
+        </span>
         <DraftNumberInput
           value={height}
           min={64}
@@ -1833,7 +2026,9 @@ function ImageStyleProfilesEditor({
       <div className="space-y-3">
         <div className="grid gap-2">
           <label className="min-w-0">
-            <span className="mb-1 block text-[0.6875rem] font-medium text-[var(--muted-foreground)]">{localizeUi("ui.panels.imagestyleprofileseditor.defaultStyle")}</span>
+            <span className="mb-1 block text-[0.6875rem] font-medium text-[var(--muted-foreground)]">
+              {localizeUi("ui.panels.imagestyleprofileseditor.defaultStyle")}
+            </span>
             <select
               value={settings.defaultProfileId}
               onChange={(event) => setDefaultProfileId(event.target.value)}
@@ -1848,7 +2043,9 @@ function ImageStyleProfilesEditor({
           </label>
 
           <label className="min-w-0">
-            <span className="mb-1 block text-[0.6875rem] font-medium text-[var(--muted-foreground)]">{localizeUi("ui.panels.imagestyleprofileseditor.editing")}</span>
+            <span className="mb-1 block text-[0.6875rem] font-medium text-[var(--muted-foreground)]">
+              {localizeUi("ui.panels.imagestyleprofileseditor.editing")}
+            </span>
             <select
               value={selected.id}
               onChange={(event) => setSelectedId(event.target.value)}
@@ -1869,27 +2066,35 @@ function ImageStyleProfilesEditor({
             onClick={cloneSelected}
             className="inline-flex h-8 items-center gap-1 rounded-md bg-[var(--secondary)] px-2.5 text-xs ring-1 ring-[var(--border)] transition-colors hover:bg-[var(--accent)]"
           >
-            <Plus size="0.75rem" />{localizeUi("ui.panels.imagestyleprofileseditor.clone")}</button>
+            <Plus size="0.75rem" />
+            {localizeUi("ui.panels.imagestyleprofileseditor.clone")}
+          </button>
           <button
             type="button"
             onClick={resetSelected}
             disabled={!selected.builtIn}
             className="inline-flex h-8 items-center gap-1 rounded-md bg-[var(--secondary)] px-2.5 text-xs ring-1 ring-[var(--border)] transition-colors hover:bg-[var(--accent)] disabled:cursor-not-allowed disabled:opacity-45"
           >
-            <RotateCcw size="0.75rem" />{localizeUi("ui.panels.imagestyleprofileseditor.reset")}</button>
+            <RotateCcw size="0.75rem" />
+            {localizeUi("ui.panels.imagestyleprofileseditor.reset")}
+          </button>
           <button
             type="button"
             onClick={deleteSelected}
             disabled={selected.builtIn || settings.profiles.length <= 1}
             className="inline-flex h-8 items-center gap-1 rounded-md bg-[var(--secondary)] px-2.5 text-xs text-[var(--muted-foreground)] ring-1 ring-[var(--border)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)] disabled:cursor-not-allowed disabled:opacity-45"
           >
-            <Trash2 size="0.75rem" />{localizeUi("lorebook.editor.batch.delete")}</button>
+            <Trash2 size="0.75rem" />
+            {localizeUi("lorebook.editor.batch.delete")}
+          </button>
         </div>
       </div>
 
       <div className="mt-4 grid gap-3">
         <label className="min-w-0">
-          <span className="mb-1 block text-[0.6875rem] font-medium text-[var(--muted-foreground)]">{localizeUi("ui.panels.imagestyleprofileseditor.name")}</span>
+          <span className="mb-1 block text-[0.6875rem] font-medium text-[var(--muted-foreground)]">
+            {localizeUi("ui.panels.imagestyleprofileseditor.name")}
+          </span>
           <input
             value={selected.name}
             onChange={(event) => updateSelected({ name: event.target.value })}
@@ -1897,7 +2102,9 @@ function ImageStyleProfilesEditor({
           />
         </label>
         <label className="min-w-0">
-          <span className="mb-1 block text-[0.6875rem] font-medium text-[var(--muted-foreground)]">{localizeUi("ui.panels.imagestyleprofileseditor.promptGrammar")}</span>
+          <span className="mb-1 block text-[0.6875rem] font-medium text-[var(--muted-foreground)]">
+            {localizeUi("ui.panels.imagestyleprofileseditor.promptGrammar")}
+          </span>
           <select
             value={selected.promptMode}
             onChange={(event) => updateSelected({ promptMode: event.target.value as ImagePromptMode })}
@@ -1913,7 +2120,9 @@ function ImageStyleProfilesEditor({
       </div>
 
       <label className="mt-3 block">
-        <span className="mb-1 block text-[0.6875rem] font-medium text-[var(--muted-foreground)]">{localizeUi("ui.panels.imagestyleprofileseditor.styleText")}</span>
+        <span className="mb-1 block text-[0.6875rem] font-medium text-[var(--muted-foreground)]">
+          {localizeUi("ui.panels.imagestyleprofileseditor.styleText")}
+        </span>
         <textarea
           value={selected.styleText}
           onChange={(event) => updateSelected({ styleText: event.target.value })}
@@ -1923,7 +2132,9 @@ function ImageStyleProfilesEditor({
 
       <div className="mt-3 grid gap-3">
         <label className="block">
-          <span className="mb-1 block text-[0.6875rem] font-medium text-[var(--muted-foreground)]">{localizeUi("ui.panels.imagestyleprofileseditor.positiveTags")}</span>
+          <span className="mb-1 block text-[0.6875rem] font-medium text-[var(--muted-foreground)]">
+            {localizeUi("ui.panels.imagestyleprofileseditor.positiveTags")}
+          </span>
           <textarea
             value={selected.positiveTags}
             onChange={(event) => updateSelected({ positiveTags: event.target.value })}
@@ -1931,7 +2142,9 @@ function ImageStyleProfilesEditor({
           />
         </label>
         <label className="block">
-          <span className="mb-1 block text-[0.6875rem] font-medium text-[var(--muted-foreground)]">{localizeUi("ui.panels.imagestyleprofileseditor.negativeTags")}</span>
+          <span className="mb-1 block text-[0.6875rem] font-medium text-[var(--muted-foreground)]">
+            {localizeUi("ui.panels.imagestyleprofileseditor.negativeTags")}
+          </span>
           <textarea
             value={selected.negativeTags}
             onChange={(event) => updateSelected({ negativeTags: event.target.value })}
@@ -1941,7 +2154,9 @@ function ImageStyleProfilesEditor({
       </div>
 
       <details className="mt-3 rounded-md bg-[var(--secondary)]/55 p-2.5 ring-1 ring-[var(--border)]">
-        <summary className="cursor-pointer text-xs font-medium text-[var(--foreground)]">{localizeUi("ui.panels.imagestyleprofileseditor.perImageTags")}</summary>
+        <summary className="cursor-pointer text-xs font-medium text-[var(--foreground)]">
+          {localizeUi("ui.panels.imagestyleprofileseditor.perImageTags")}
+        </summary>
         <div className="mt-2 grid gap-2">
           {IMAGE_STYLE_SUBJECT_KINDS.map((kind) => (
             <label key={kind} className="block">
@@ -1959,11 +2174,15 @@ function ImageStyleProfilesEditor({
       </details>
 
       <details className="mt-2 rounded-md bg-[var(--secondary)]/55 p-2 ring-1 ring-[var(--border)]">
-        <summary className="cursor-pointer text-xs font-medium text-[var(--foreground)]">{localizeUi("ui.panels.imagestyleprofileseditor.testBench")}</summary>
+        <summary className="cursor-pointer text-xs font-medium text-[var(--foreground)]">
+          {localizeUi("ui.panels.imagestyleprofileseditor.testBench")}
+        </summary>
         <div className="mt-2 grid gap-2 lg:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)]">
           <div className="space-y-2">
             <label className="block">
-              <span className="mb-1 block text-[0.625rem] font-medium text-[var(--muted-foreground)]">{localizeUi("ui.panels.imagestyleprofileseditor.imageKind")}</span>
+              <span className="mb-1 block text-[0.625rem] font-medium text-[var(--muted-foreground)]">
+                {localizeUi("ui.panels.imagestyleprofileseditor.imageKind")}
+              </span>
               <select
                 value={previewKind}
                 onChange={(event) => setPreviewKind(event.target.value as ImagePromptKind)}
@@ -1977,7 +2196,9 @@ function ImageStyleProfilesEditor({
               </select>
             </label>
             <label className="block">
-              <span className="mb-1 block text-[0.625rem] font-medium text-[var(--muted-foreground)]">{localizeUi("ui.panels.imagestyleprofileseditor.sampleInput")}</span>
+              <span className="mb-1 block text-[0.625rem] font-medium text-[var(--muted-foreground)]">
+                {localizeUi("ui.panels.imagestyleprofileseditor.sampleInput")}
+              </span>
               <textarea
                 value={previewPrompt}
                 onChange={(event) => setPreviewPrompt(event.target.value)}
@@ -1987,13 +2208,18 @@ function ImageStyleProfilesEditor({
             </label>
             <div className="text-[0.625rem] text-[var(--muted-foreground)]">
               {cleanupCount > 0
-                ?localizeUi("ui.panels.imagestyleprofileseditor.value1DuplicateOrMisplacedFragmentValue2Cleaned", { value1: cleanupCount, value2: cleanupCount === 1 ? "" :localizeUi("ui.noodle.stageprofileview.s") })
-                :localizeUi("ui.panels.imagestyleprofileseditor.noCleanupNeededForThisSample")}
+                ? localizeUi("ui.panels.imagestyleprofileseditor.value1DuplicateOrMisplacedFragmentValue2Cleaned", {
+                    value1: cleanupCount,
+                    value2: cleanupCount === 1 ? "" : localizeUi("ui.noodle.stageprofileview.s"),
+                  })
+                : localizeUi("ui.panels.imagestyleprofileseditor.noCleanupNeededForThisSample")}
             </div>
           </div>
           <div className="grid gap-2">
             <label className="block">
-              <span className="mb-1 block text-[0.625rem] font-medium text-[var(--muted-foreground)]">{localizeUi("ui.panels.imagestyleprofileseditor.finalPositivePrompt")}</span>
+              <span className="mb-1 block text-[0.625rem] font-medium text-[var(--muted-foreground)]">
+                {localizeUi("ui.panels.imagestyleprofileseditor.finalPositivePrompt")}
+              </span>
               <textarea
                 value={preview.prompt}
                 readOnly
@@ -2002,7 +2228,9 @@ function ImageStyleProfilesEditor({
               />
             </label>
             <label className="block">
-              <span className="mb-1 block text-[0.625rem] font-medium text-[var(--muted-foreground)]">{localizeUi("ui.panels.imagestyleprofileseditor.finalNegativePrompt")}</span>
+              <span className="mb-1 block text-[0.625rem] font-medium text-[var(--muted-foreground)]">
+                {localizeUi("ui.panels.imagestyleprofileseditor.finalNegativePrompt")}
+              </span>
               <textarea
                 value={preview.negativePrompt}
                 readOnly
@@ -2055,10 +2283,14 @@ function TrackerPanelCardOrderSetting() {
           />
           <span className="truncate">{localizeUi("ui.panels.trackerpanelcardordersetting.cardOrder")}</span>
           <span className="shrink-0 rounded-full bg-[var(--secondary)] px-1.5 py-0.5 text-[0.5625rem] font-normal text-[var(--muted-foreground)]">
-            {isDefaultOrder ?localizeUi("ui.noodle.noodlehome.default") :localizeUi("settings.notifications.customSound.status.custom")}
+            {isDefaultOrder
+              ? localizeUi("ui.noodle.noodlehome.default")
+              : localizeUi("settings.notifications.customSound.status.custom")}
           </span>
         </button>
-        <HelpTooltip text={localizeUi("ui.panels.trackerpanelcardordersetting.controlsTheTopToBottomOrderOfTrackerCards")} />
+        <HelpTooltip
+          text={localizeUi("ui.panels.trackerpanelcardordersetting.controlsTheTopToBottomOrderOfTrackerCards")}
+        />
         <button
           type="button"
           onClick={() => setTrackerPanelSectionOrder([...TRACKER_DATA_PANEL_SECTIONS])}
@@ -2078,20 +2310,24 @@ function TrackerPanelCardOrderSetting() {
               <div
                 key={section}
                 className="grid min-h-7 min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-1.5 rounded-sm bg-[var(--secondary)]/42 px-1.5 py-1 ring-1 ring-[var(--border)]/60"
-                title={option.desc}
+                title={localizeUi(option.desc)}
               >
                 <div className="min-w-0">
                   <div className="truncate text-[0.6875rem] font-medium leading-4 text-[var(--foreground)]">
-                    {option.label}
+                    {localizeUi(option.label)}
                   </div>
                 </div>
                 <div className="flex shrink-0 items-center gap-0.5">
                   <button
                     type="button"
                     onClick={() => moveCard(section, -1)}
-                    disabled={index === 0}
-                    title={localizeUi("ui.panels.trackerpanelcardordersetting.moveValue1Up", { value1: option.label })}
-                    aria-label={localizeUi("ui.panels.trackerpanelcardordersetting.moveValue1Up", { value1: option.label })}
+                    disabled={index === 0 || (section === "custom" && orderedSections[index - 1] === "inventory")}
+                    title={localizeUi("ui.panels.trackerpanelcardordersetting.moveValue1Up", {
+                      value1: localizeUi(option.label),
+                    })}
+                    aria-label={localizeUi("ui.panels.trackerpanelcardordersetting.moveValue1Up", {
+                      value1: localizeUi(option.label),
+                    })}
                     className="flex h-5 w-5 items-center justify-center rounded-sm text-[var(--muted-foreground)] ring-1 ring-[var(--border)] transition-all hover:bg-[var(--background)] hover:text-[var(--primary)] active:scale-95 disabled:cursor-default disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-[var(--muted-foreground)]"
                   >
                     <ArrowUp size="0.6875rem" />
@@ -2099,9 +2335,16 @@ function TrackerPanelCardOrderSetting() {
                   <button
                     type="button"
                     onClick={() => moveCard(section, 1)}
-                    disabled={index === orderedSections.length - 1}
-                    title={localizeUi("ui.panels.trackerpanelcardordersetting.moveValue1Down", { value1: option.label })}
-                    aria-label={localizeUi("ui.panels.trackerpanelcardordersetting.moveValue1Down", { value1: option.label })}
+                    disabled={
+                      index === orderedSections.length - 1 ||
+                      (section === "inventory" && orderedSections[index + 1] === "custom")
+                    }
+                    title={localizeUi("ui.panels.trackerpanelcardordersetting.moveValue1Down", {
+                      value1: localizeUi(option.label),
+                    })}
+                    aria-label={localizeUi("ui.panels.trackerpanelcardordersetting.moveValue1Down", {
+                      value1: localizeUi(option.label),
+                    })}
                     className="flex h-5 w-5 items-center justify-center rounded-sm text-[var(--muted-foreground)] ring-1 ring-[var(--border)] transition-all hover:bg-[var(--background)] hover:text-[var(--primary)] active:scale-95 disabled:cursor-default disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-[var(--muted-foreground)]"
                   >
                     <ArrowDown size="0.6875rem" />
@@ -2126,9 +2369,7 @@ function TrackerPanelAppearanceDrawer() {
   const setTrackerPanelUseExpressionSprites = useUIStore((state) => state.setTrackerPanelUseExpressionSprites);
   const trackerPanelThoughtBubbleDisplay = useUIStore((state) => state.trackerPanelThoughtBubbleDisplay);
   const setTrackerPanelThoughtBubbleDisplay = useUIStore((state) => state.setTrackerPanelThoughtBubbleDisplay);
-  const trackerPanelDockedThoughtsAlwaysVisible = useUIStore(
-    (state) => state.trackerPanelDockedThoughtsAlwaysVisible,
-  );
+  const trackerPanelDockedThoughtsAlwaysVisible = useUIStore((state) => state.trackerPanelDockedThoughtsAlwaysVisible);
   const setTrackerPanelDockedThoughtsAlwaysVisible = useUIStore(
     (state) => state.setTrackerPanelDockedThoughtsAlwaysVisible,
   );
@@ -2151,10 +2392,16 @@ function TrackerPanelAppearanceDrawer() {
             <TrackerPanelIcon size="0.9rem" />
           </span>
           <span className="min-w-0">
-            <span className="inline-flex items-center gap-1 text-xs font-semibold text-[var(--foreground)]">{localizeUi("ui.panels.trackerpanelappearancedrawer.trackerPanel")}<HelpTooltip text={localizeUi("ui.panels.trackerpanelappearancedrawer.controlsTheRoleplayHudSidePanelForTheFixed")} />
+            <span className="inline-flex items-center gap-1 text-xs font-semibold text-[var(--foreground)]">
+              {localizeUi("ui.panels.trackerpanelappearancedrawer.trackerPanel")}
+              <HelpTooltip
+                text={localizeUi("ui.panels.trackerpanelappearancedrawer.controlsTheRoleplayHudSidePanelForTheFixed")}
+              />
             </span>
             <span className="block truncate text-[0.625rem] text-[var(--muted-foreground)]">
-              {trackerPanelEnabled ?localizeUi("ui.panels.trackerpanelappearancedrawer.shownInTheRoleplayHud") :localizeUi("ui.panels.trackerpanelappearancedrawer.hiddenFromTheRoleplayHud")}
+              {trackerPanelEnabled
+                ? localizeUi("ui.panels.trackerpanelappearancedrawer.shownInTheRoleplayHud")
+                : localizeUi("ui.panels.trackerpanelappearancedrawer.hiddenFromTheRoleplayHud")}
             </span>
           </span>
         </div>
@@ -2175,7 +2422,11 @@ function TrackerPanelAppearanceDrawer() {
           onClick={() => setDrawerOpen((open) => !open)}
           aria-expanded={drawerOpen}
           aria-controls={drawerId}
-          aria-label={drawerOpen ?localizeUi("ui.panels.trackerpanelappearancedrawer.collapseTrackerPanelSettings") :localizeUi("ui.panels.trackerpanelappearancedrawer.expandTrackerPanelSettings")}
+          aria-label={
+            drawerOpen
+              ? localizeUi("ui.panels.trackerpanelappearancedrawer.collapseTrackerPanelSettings")
+              : localizeUi("ui.panels.trackerpanelappearancedrawer.expandTrackerPanelSettings")
+          }
           className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-[var(--muted-foreground)] transition-all hover:bg-[var(--secondary)] hover:text-[var(--foreground)] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[var(--primary)] active:scale-95"
         >
           <ChevronDown
@@ -2216,12 +2467,20 @@ function TrackerPanelAppearanceDrawer() {
               compact
               label={localizeUi("settings.controls.panelBackground.label")}
               helpText="Pick the Tracker panel and tracker section background. CSS colors and gradients are accepted."
-              emptyText={localizeUi("ui.panels.trackerpanelappearancedrawer.defaultValue1", { value1: TRACKER_PANEL_DEFAULT_BACKGROUND_COLOR })}
+              emptyText={localizeUi("ui.panels.trackerpanelappearancedrawer.defaultValue1", {
+                value1: TRACKER_PANEL_DEFAULT_BACKGROUND_COLOR,
+              })}
               clearLabel="Reset"
             />
           </div>
           <div id={getSettingsControlAnchorId("tracker-desktop-size")} className="mt-2 grid scroll-mt-3 gap-1.5">
-            <span className="inline-flex items-center gap-1 text-[0.6875rem] font-medium">{localizeUi("ui.panels.trackerpanelappearancedrawer.desktopSize")}<HelpTooltip text={localizeUi("ui.panels.trackerpanelappearancedrawer.chooseTheDesignedDesktopWidthForTheTrackerPanel")} />
+            <span className="inline-flex items-center gap-1 text-[0.6875rem] font-medium">
+              {localizeUi("ui.panels.trackerpanelappearancedrawer.desktopSize")}
+              <HelpTooltip
+                text={localizeUi(
+                  "ui.panels.trackerpanelappearancedrawer.chooseTheDesignedDesktopWidthForTheTrackerPanel",
+                )}
+              />
             </span>
             <div className="grid grid-cols-3 gap-0.5 rounded-lg border border-[var(--border)] bg-[var(--secondary)]/45 p-0.5">
               {TRACKER_PANEL_SIZE_PROFILE_OPTIONS.map((opt) => {
@@ -2232,7 +2491,11 @@ function TrackerPanelAppearanceDrawer() {
                     type="button"
                     onClick={() => setTrackerPanelSizeProfile(opt.id)}
                     aria-pressed={selected}
-                    title={localizeUi("ui.panels.trackerpanelappearancedrawer.value1Value2PxValue3", { value1: opt.label, value2: getTrackerPanelWidthForProfile(opt.id), value3: opt.desc })}
+                    title={localizeUi("ui.panels.trackerpanelappearancedrawer.value1Value2PxValue3", {
+                      value1: opt.label,
+                      value2: getTrackerPanelWidthForProfile(opt.id),
+                      value3: opt.desc,
+                    })}
                     className={cn(
                       "flex min-h-8 min-w-0 items-center justify-center rounded-md px-1.5 text-[0.6875rem] transition-all disabled:cursor-not-allowed",
                       selected
@@ -2255,7 +2518,13 @@ function TrackerPanelAppearanceDrawer() {
             id={getSettingsControlAnchorId("tracker-thought-display-mode")}
             className="mt-2 grid scroll-mt-3 gap-1.5"
           >
-            <span className="inline-flex items-center gap-1 text-[0.6875rem] font-medium">{localizeUi("ui.panels.trackerpanelappearancedrawer.thoughtDisplayMode")}<HelpTooltip text={localizeUi("ui.panels.trackerpanelappearancedrawer.chooseWhetherFeaturedCharacterThoughtsOpenInsideTheTracker")} />
+            <span className="inline-flex items-center gap-1 text-[0.6875rem] font-medium">
+              {localizeUi("ui.panels.trackerpanelappearancedrawer.thoughtDisplayMode")}
+              <HelpTooltip
+                text={localizeUi(
+                  "ui.panels.trackerpanelappearancedrawer.chooseWhetherFeaturedCharacterThoughtsOpenInsideTheTracker",
+                )}
+              />
             </span>
             <div className="grid grid-cols-2 gap-0.5 rounded-lg border border-[var(--border)] bg-[var(--secondary)]/45 p-0.5">
               {TRACKER_THOUGHT_BUBBLE_DISPLAY_OPTIONS.map((opt) => {
@@ -2287,14 +2556,24 @@ function TrackerPanelAppearanceDrawer() {
           <div id={getSettingsControlAnchorId("tracker-stat-display-mode")} className="mt-2 grid scroll-mt-3 gap-1.5">
             <span className="inline-flex items-center gap-1 text-[0.6875rem] font-medium">
               {localizeUi("ui.panels.trackerpanelappearancedrawer.statDisplayMode")}
-              <HelpTooltip text={localizeUi("ui.panels.trackerpanelappearancedrawer.chooseBarsOrGaugesForTrackerStats")} />
+              <HelpTooltip
+                text={localizeUi("ui.panels.trackerpanelappearancedrawer.chooseBarsOrGaugesForTrackerStats")}
+              />
             </span>
             <div className="grid grid-cols-2 gap-0.5 rounded-lg border border-[var(--border)] bg-[var(--secondary)]/45 p-0.5">
               {TRACKER_STAT_DISPLAY_OPTIONS.map((option) => {
                 const selected = trackerStatDisplayMode === option;
                 const Icon = option === "bars" ? BarChart3 : Gauge;
-                const label = localizeUi(option === "bars" ? "ui.panels.trackerpanelappearancedrawer.bars" : "ui.panels.trackerpanelappearancedrawer.gauges");
-                const description = localizeUi(option === "bars" ? "ui.panels.trackerpanelappearancedrawer.barsDescription" : "ui.panels.trackerpanelappearancedrawer.gaugesDescription");
+                const label = localizeUi(
+                  option === "bars"
+                    ? "ui.panels.trackerpanelappearancedrawer.bars"
+                    : "ui.panels.trackerpanelappearancedrawer.gauges",
+                );
+                const description = localizeUi(
+                  option === "bars"
+                    ? "ui.panels.trackerpanelappearancedrawer.barsDescription"
+                    : "ui.panels.trackerpanelappearancedrawer.gaugesDescription",
+                );
                 return (
                   <button
                     key={option}
@@ -2329,17 +2608,28 @@ function TrackerPanelAppearanceDrawer() {
             id={getSettingsControlAnchorId("tracker-temperature-unit")}
             className="mt-2 flex scroll-mt-3 min-h-8 items-center justify-between gap-2"
           >
-            <span className="inline-flex items-center gap-1 text-[0.6875rem] font-medium">{localizeUi("ui.panels.trackerpanelappearancedrawer.temperatureUnit")}<HelpTooltip text={localizeUi("ui.panels.trackerpanelappearancedrawer.changesTrackerPanelAndRoleplayHudTemperatureDisplaysWithout")} />
+            <span className="inline-flex items-center gap-1 text-[0.6875rem] font-medium">
+              {localizeUi("ui.panels.trackerpanelappearancedrawer.temperatureUnit")}
+              <HelpTooltip
+                text={localizeUi(
+                  "ui.panels.trackerpanelappearancedrawer.changesTrackerPanelAndRoleplayHudTemperatureDisplaysWithout",
+                )}
+              />
             </span>
             <button
               type="button"
               role="switch"
               aria-checked={trackerTemperatureUnit === "fahrenheit"}
-              aria-label={localizeUi("ui.panels.trackerpanelappearancedrawer.trackerTemperatureUnitValue1", { value1: trackerTemperatureUnit === "celsius" ?localizeUi("ui.panels.trackerpanelappearancedrawer.celsius") :localizeUi("ui.panels.trackerpanelappearancedrawer.fahrenheit") })}
+              aria-label={localizeUi("ui.panels.trackerpanelappearancedrawer.trackerTemperatureUnitValue1", {
+                value1:
+                  trackerTemperatureUnit === "celsius"
+                    ? localizeUi("ui.panels.trackerpanelappearancedrawer.celsius")
+                    : localizeUi("ui.panels.trackerpanelappearancedrawer.fahrenheit"),
+              })}
               title={
                 trackerTemperatureUnit === "celsius"
-                  ?localizeUi("ui.panels.trackerpanelappearancedrawer.showingTrackerTemperaturesAsCClickForF")
-                  :localizeUi("ui.panels.trackerpanelappearancedrawer.showingTrackerTemperaturesAsFClickForC")
+                  ? localizeUi("ui.panels.trackerpanelappearancedrawer.showingTrackerTemperaturesAsCClickForF")
+                  : localizeUi("ui.panels.trackerpanelappearancedrawer.showingTrackerTemperaturesAsFClickForC")
               }
               onClick={() => setTrackerTemperatureUnit(trackerTemperatureUnit === "celsius" ? "fahrenheit" : "celsius")}
               className="relative grid h-7 w-[4.75rem] shrink-0 grid-cols-2 items-center rounded-full border border-[var(--border)] bg-[var(--secondary)]/55 p-0.5 text-[0.625rem] font-semibold transition-colors hover:bg-[var(--accent)]/50 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[var(--primary)]"
@@ -2355,7 +2645,9 @@ function TrackerPanelAppearanceDrawer() {
                   "relative z-10 text-center transition-colors",
                   trackerTemperatureUnit === "celsius" ? "text-[var(--foreground)]" : "text-[var(--muted-foreground)]",
                 )}
-              >{localizeUi("ui.panels.trackerpanelappearancedrawer.c")}</span>
+              >
+                {localizeUi("ui.panels.trackerpanelappearancedrawer.c")}
+              </span>
               <span
                 className={cn(
                   "relative z-10 text-center transition-colors",
@@ -2363,7 +2655,9 @@ function TrackerPanelAppearanceDrawer() {
                     ? "text-[var(--foreground)]"
                     : "text-[var(--muted-foreground)]",
                 )}
-              >{localizeUi("ui.panels.trackerpanelappearancedrawer.f")}</span>
+              >
+                {localizeUi("ui.panels.trackerpanelappearancedrawer.f")}
+              </span>
             </button>
           </div>
           <TrackerPanelCardOrderSetting />
@@ -2535,7 +2829,7 @@ export function SettingsPanel() {
                 tabIndex={settingsTab === tab.id ? 0 : -1}
                 onClick={() => setSettingsTab(tab.id)}
                 className={cn(
-                  "group relative isolate flex min-h-8 min-w-0 flex-col items-center justify-center gap-0.5 overflow-hidden rounded-lg border px-1 py-0.5 text-center text-[0.625rem] font-semibold leading-tight transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--primary)]/40",
+                  "group relative isolate flex min-h-8 min-w-0 flex-col items-center justify-center gap-0.5 overflow-hidden rounded-md border px-1 py-0.5 text-center text-[0.625rem] font-semibold leading-tight transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--primary)]/40",
                   active
                     ? "border-[var(--primary)]/35 bg-[var(--primary)]/10 text-[var(--foreground)] shadow-[inset_0_1px_0_color-mix(in_srgb,var(--foreground)_11%,transparent)]"
                     : "border-transparent text-[var(--muted-foreground)] hover:border-[var(--border)]/80 hover:bg-[var(--secondary)]/60 hover:text-[var(--foreground)]",
@@ -2595,7 +2889,10 @@ export function SettingsPanel() {
                     type="button"
                     onClick={() => jumpToSection(section)}
                     className="flex min-h-6 max-w-full min-w-0 items-center rounded-lg border border-[var(--border)]/65 bg-[var(--secondary)]/38 px-1.5 py-0.5 text-[0.625rem] font-semibold leading-tight text-[var(--muted-foreground)] shadow-[inset_0_1px_0_color-mix(in_srgb,var(--foreground)_7%,transparent)] transition-all hover:border-[var(--primary)]/35 hover:bg-[var(--primary)]/11 hover:text-[var(--foreground)]"
-                    title={localizeUi("ui.panels.settingspanel.value1Value2", { value1: localize(section.label), value2: localize(section.description) })}
+                    title={localizeUi("ui.panels.settingspanel.value1Value2", {
+                      value1: localize(section.label),
+                      value2: localize(section.description),
+                    })}
                   >
                     <span className="block max-w-full break-words">{localize(section.label)}</span>
                   </button>
@@ -2722,7 +3019,7 @@ function QuickRepliesSetting() {
       {showQuickRepliesMenu && drawerOpen && (
         <div
           id="quick-replies-actions-drawer"
-          className="grid gap-1 border-t border-[var(--border)]/60 bg-[var(--background)]/25 p-1"
+          className="grid min-w-0 max-w-full gap-1 overflow-hidden border-t border-[var(--border)]/60 bg-[var(--background)]/25 p-1"
           role="group"
           aria-label={localize("Quick replies actions to include")}
         >
@@ -2757,7 +3054,7 @@ function QuickRepliesSetting() {
                 aria-pressed={option.checked}
                 onClick={() => option.onChange(!option.checked)}
                 className={cn(
-                  "group flex min-h-10 w-full items-center gap-2.5 rounded-md px-2 py-1.5 text-left transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--primary)] active:scale-[0.99]",
+                  "group flex min-h-10 min-w-0 max-w-full items-center gap-2.5 overflow-hidden rounded-md px-2 py-1.5 text-left transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--primary)] active:scale-[0.99]",
                   option.checked
                     ? "bg-[var(--primary)]/8 text-[var(--foreground)] ring-1 ring-[var(--primary)]/30"
                     : "text-[var(--muted-foreground)] ring-1 ring-transparent hover:bg-[var(--secondary)]/45 hover:text-[var(--foreground)]",
@@ -2845,15 +3142,15 @@ function CustomQuickRepliesManager() {
   const removeCustomQuickReply = useUIStore((s) => s.removeCustomQuickReply);
 
   return (
-    <div className="mt-1 border-t border-[var(--border)]/60 pt-2">
-      <div className="mb-1 flex items-center justify-between gap-2 px-1">
-        <span className="text-[0.65rem] font-semibold uppercase tracking-wide text-[var(--muted-foreground)]">
+    <div className="mt-1 min-w-0 max-w-full overflow-hidden border-t border-[var(--border)]/60 pt-2">
+      <div className="mb-1 flex min-w-0 items-center justify-between gap-2 px-1">
+        <span className="min-w-0 truncate text-[0.65rem] font-semibold uppercase tracking-wide text-[var(--muted-foreground)]">
           {localize("Custom quick replies")}
         </span>
         <button
           type="button"
           onClick={() => addCustomQuickReply("", "")}
-          className="flex items-center gap-1 rounded-md bg-[var(--secondary)]/50 px-2 py-1 text-[0.65rem] font-medium text-[var(--muted-foreground)] transition-colors hover:bg-[var(--secondary)] hover:text-[var(--foreground)] active:scale-[0.98]"
+          className="flex shrink-0 items-center gap-1 rounded-md bg-[var(--secondary)]/50 px-2 py-1 text-[0.65rem] font-medium text-[var(--muted-foreground)] transition-colors hover:bg-[var(--secondary)] hover:text-[var(--foreground)] active:scale-[0.98]"
           title={localize("Add a custom quick reply")}
         >
           <Plus size="0.75rem" aria-hidden="true" />
@@ -2867,13 +3164,13 @@ function CustomQuickRepliesManager() {
           )}
         </p>
       ) : (
-        <div className="grid gap-1.5">
+        <div className="grid min-w-0 max-w-full gap-1.5">
           {customQuickReplies.map((entry) => (
             <div
               key={entry.id}
-              className="grid gap-1 rounded-md border border-[var(--border)]/60 bg-[var(--background)]/30 p-1.5"
+              className="grid min-w-0 max-w-full gap-1 overflow-hidden rounded-md border border-[var(--border)]/60 bg-[var(--background)]/30 p-1.5"
             >
-              <div className="flex items-center gap-1.5">
+              <div className="flex min-w-0 max-w-full items-center gap-1.5">
                 <CustomQuickReplyIconButton
                   icon={entry.icon}
                   onSelect={(icon) => updateCustomQuickReply(entry.id, { icon })}
@@ -2887,7 +3184,7 @@ function CustomQuickRepliesManager() {
                 <button
                   type="button"
                   onClick={() => removeCustomQuickReply(entry.id)}
-                  className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-[var(--destructive)] transition-colors hover:bg-[var(--destructive)]/10 active:scale-90"
+                  className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-[var(--primary)] transition-colors hover:bg-[var(--primary)]/10 active:scale-90"
                   title={localize("Remove quick reply")}
                   aria-label={localize("Remove quick reply")}
                 >
@@ -2899,7 +3196,7 @@ function CustomQuickRepliesManager() {
                 onChange={(event) => updateCustomQuickReply(entry.id, { content: event.target.value })}
                 placeholder={localize("Message, macro, or /slash command to send")}
                 rows={2}
-                className="w-full resize-y rounded bg-[var(--secondary)]/60 px-2 py-1 text-xs outline-none ring-1 ring-transparent focus:ring-[var(--primary)]/40"
+                className="min-w-0 max-w-full resize-y rounded bg-[var(--secondary)]/60 px-2 py-1 text-xs outline-none ring-1 ring-transparent focus:ring-[var(--primary)]/40"
               />
             </div>
           ))}
@@ -3011,7 +3308,12 @@ function DocsLanguageSetting() {
         </p>
       ) : null}
       {pendingSwitch ? (
-        <button type="button" onClick={() => void handleSwitch()} disabled={setDocsLanguage.isPending} className={SETTINGS_PRIMARY_BUTTON_CLASS}>
+        <button
+          type="button"
+          onClick={() => void handleSwitch()}
+          disabled={setDocsLanguage.isPending}
+          className={SETTINGS_PRIMARY_BUTTON_CLASS}
+        >
           {setDocsLanguage.isPending ? (
             <>
               <Loader2 size="0.8125rem" className="animate-spin" />
@@ -3042,7 +3344,12 @@ function DocsLanguageSetting() {
               {localizeUi("settings.application.docsLanguage.fixNeeded")}
             </span>
           </div>
-          <button type="button" onClick={() => void handleFix()} disabled={fixDocsLanguage.isPending} className={SETTINGS_PRIMARY_BUTTON_CLASS}>
+          <button
+            type="button"
+            onClick={() => void handleFix()}
+            disabled={fixDocsLanguage.isPending}
+            className={SETTINGS_PRIMARY_BUTTON_CLASS}
+          >
             {fixDocsLanguage.isPending ? (
               <>
                 <Loader2 size="0.8125rem" className="animate-spin" />
@@ -3062,6 +3369,10 @@ function GeneralSettings() {
   const { t: localizeUi } = useUiTranslation();
   const { t, i18n: localization } = useTranslation();
   const localize = useLocalizedUiText();
+  const { data: installedCapabilities = [] } = useInstalledCapabilityPackages();
+  const musicDjInstalled = installedCapabilities.some(
+    (capability) => capability.id === "spotify" && capability.status === "active",
+  );
   const language = useUIStore((s) => s.language);
   const setLanguage = useUIStore((s) => s.setLanguage);
   const enableStreaming = useUIStore((s) => s.enableStreaming);
@@ -3082,14 +3393,22 @@ function GeneralSettings() {
   const setEnterToSendConvo = useUIStore((s) => s.setEnterToSendConvo);
   const enterToSendGame = useUIStore((s) => s.enterToSendGame);
   const setEnterToSendGame = useUIStore((s) => s.setEnterToSendGame);
+  const enterToSendProfessorMari = useUIStore((s) => s.enterToSendProfessorMari);
+  const setEnterToSendProfessorMari = useUIStore((s) => s.setEnterToSendProfessorMari);
   const confirmBeforeDelete = useUIStore((s) => s.confirmBeforeDelete);
   const setConfirmBeforeDelete = useUIStore((s) => s.setConfirmBeforeDelete);
+  const chatHelpButtonHidden = useUIStore((s) => s.chatHelpButtonHidden ?? false);
+  const setChatHelpButtonHidden = useUIStore((s) => s.setChatHelpButtonHidden);
   const achievementsEnabled = useUIStore((s) => s.achievementsEnabled);
   const setAchievementsEnabled = useUIStore((s) => s.setAchievementsEnabled);
   const messagesPerPage = useUIStore((s) => s.messagesPerPage);
   const setMessagesPerPage = useUIStore((s) => s.setMessagesPerPage);
   const boldDialogue = useUIStore((s) => s.boldDialogue);
   const setBoldDialogue = useUIStore((s) => s.setBoldDialogue);
+  const colorInlineNames = useUIStore((s) => s.colorInlineNames);
+  const setColorInlineNames = useUIStore((s) => s.setColorInlineNames);
+  const disableInlineNameGradients = useUIStore((s) => s.disableInlineNameGradients);
+  const setDisableInlineNameGradients = useUIStore((s) => s.setDisableInlineNameGradients);
   const quoteFormat = useUIStore((s) => s.quoteFormat);
   const setQuoteFormat = useUIStore((s) => s.setQuoteFormat);
   const convertLatexSymbols = useUIStore((s) => s.convertLatexSymbols);
@@ -3104,6 +3423,8 @@ function GeneralSettings() {
   const setChibiProfessorMariEnabled = useUIStore((s) => s.setChibiProfessorMariEnabled);
   const professorMariSuggestionsEnabled = useUIStore((s) => s.professorMariSuggestionsEnabled);
   const setProfessorMariSuggestionsEnabled = useUIStore((s) => s.setProfessorMariSuggestionsEnabled);
+  const professorMariNavigationEnabled = useUIStore((s) => s.professorMariNavigationEnabled);
+  const setProfessorMariNavigationEnabled = useUIStore((s) => s.setProfessorMariNavigationEnabled);
   const musicPlayerEnabled = useUIStore((s) => s.musicPlayerEnabled);
   const setMusicPlayerEnabled = useUIStore((s) => s.setMusicPlayerEnabled);
   const intuitiveSwipeNavigation = useUIStore((s) => s.intuitiveSwipeNavigation);
@@ -3156,6 +3477,13 @@ function GeneralSettings() {
             onChange={setConfirmBeforeDelete}
             help={localizeUi("settings.controls.confirmBeforeDelete.help")}
           />
+          <ToggleSetting
+            anchorId={getSettingsControlAnchorId("hide-chat-help-button")}
+            label={localizeUi("settings.controls.hideChatHelpButton.label")}
+            checked={chatHelpButtonHidden}
+            onChange={setChatHelpButtonHidden}
+            help={localizeUi("settings.controls.hideChatHelpButton.help")}
+          />
           <AndroidStatusBarSetting />
           <ToggleSetting
             anchorId={getSettingsControlAnchorId("achievements")}
@@ -3167,9 +3495,12 @@ function GeneralSettings() {
           <ToggleSetting
             anchorId={getSettingsControlAnchorId("music-player")}
             label={localizeUi("settings.controls.musicPlayer.label")}
-            checked={musicPlayerEnabled}
+            checked={musicDjInstalled && musicPlayerEnabled}
             onChange={setMusicPlayerEnabled}
-            help={localizeUi("settings.controls.musicPlayer.help")}
+            help={localizeUi(
+              musicDjInstalled ? "settings.controls.musicPlayer.help" : "settings.controls.musicPlayer.requiresMusicDj",
+            )}
+            disabled={!musicDjInstalled}
           />
           <ToggleSetting
             anchorId={getSettingsControlAnchorId("mini-mari")}
@@ -3184,6 +3515,13 @@ function GeneralSettings() {
             checked={professorMariSuggestionsEnabled}
             onChange={setProfessorMariSuggestionsEnabled}
             help={localizeUi("settings.controls.professorMariSuggestions.help")}
+          />
+          <ToggleSetting
+            anchorId={getSettingsControlAnchorId("professor-mari-navigation")}
+            label={localizeUi("settings.controls.professorMariNavigation.label")}
+            checked={professorMariNavigationEnabled}
+            onChange={setProfessorMariNavigationEnabled}
+            help={localizeUi("settings.controls.professorMariNavigation.help")}
           />
         </div>
       </SettingsSection>
@@ -3290,16 +3628,14 @@ function GeneralSettings() {
         <div className="flex flex-col gap-2.5">
           <div className="flex flex-col gap-1.5 rounded-lg p-1 transition-colors hover:bg-[var(--secondary)]/50">
             <div className="flex items-center gap-2">
-              <span className="text-xs">{localize("Send on Enter")}</span>
-              <HelpTooltip
-                text={localize(
-                  "Choose which chat modes send on Enter. When off, Enter creates a new line and you have to press the send button manually.",
-                )}
-              />
+              <span className="text-xs">{localizeUi("settings.controls.sendOnEnter.label")}</span>
+              <HelpTooltip text={localizeUi("settings.controls.sendOnEnter.help")} />
             </div>
             <div className="flex flex-wrap items-center gap-1.5">
               <button
+                type="button"
                 onClick={() => setEnterToSendRP(!enterToSendRP)}
+                aria-pressed={enterToSendRP}
                 className={cn(
                   "rounded-md px-2 py-1 text-[0.625rem] font-medium transition-all",
                   enterToSendRP
@@ -3307,10 +3643,12 @@ function GeneralSettings() {
                     : "bg-[var(--secondary)] text-[var(--muted-foreground)] ring-1 ring-[var(--border)] hover:bg-[var(--accent)]",
                 )}
               >
-                {localize("Roleplay")}
+                {localizeUi("settings.modes.roleplay")}
               </button>
               <button
+                type="button"
                 onClick={() => setEnterToSendConvo(!enterToSendConvo)}
+                aria-pressed={enterToSendConvo}
                 className={cn(
                   "rounded-md px-2 py-1 text-[0.625rem] font-medium transition-all",
                   enterToSendConvo
@@ -3318,10 +3656,12 @@ function GeneralSettings() {
                     : "bg-[var(--secondary)] text-[var(--muted-foreground)] ring-1 ring-[var(--border)] hover:bg-[var(--accent)]",
                 )}
               >
-                {localize("Conversations")}
+                {localizeUi("settings.modes.conversations")}
               </button>
               <button
+                type="button"
                 onClick={() => setEnterToSendGame(!enterToSendGame)}
+                aria-pressed={enterToSendGame}
                 className={cn(
                   "rounded-md px-2 py-1 text-[0.625rem] font-medium transition-all",
                   enterToSendGame
@@ -3329,7 +3669,20 @@ function GeneralSettings() {
                     : "bg-[var(--secondary)] text-[var(--muted-foreground)] ring-1 ring-[var(--border)] hover:bg-[var(--accent)]",
                 )}
               >
-                {localize("Game")}
+                {localizeUi("settings.modes.game")}
+              </button>
+              <button
+                type="button"
+                onClick={() => setEnterToSendProfessorMari(!enterToSendProfessorMari)}
+                aria-pressed={enterToSendProfessorMari}
+                className={cn(
+                  "rounded-md px-2 py-1 text-[0.625rem] font-medium transition-all",
+                  enterToSendProfessorMari
+                    ? "bg-[var(--primary)]/15 text-[var(--primary)] ring-1 ring-[var(--primary)]/30"
+                    : "bg-[var(--secondary)] text-[var(--muted-foreground)] ring-1 ring-[var(--border)] hover:bg-[var(--accent)]",
+                )}
+              >
+                {localizeUi("settings.modes.professorMari")}
               </button>
             </div>
           </div>
@@ -3387,8 +3740,7 @@ function GeneralSettings() {
             label={localizeUi("settings.controls.boldDialogue.label")}
             checked={boldDialogue ?? true}
             onChange={setBoldDialogue}
-            help={localizeUi("settings.controls.boldDialogue.help")
-            }
+            help={localizeUi("settings.controls.boldDialogue.help")}
           />
           <ToggleSetting
             anchorId={getSettingsControlAnchorId("convert-latex-symbols")}
@@ -3397,7 +3749,22 @@ function GeneralSettings() {
             onChange={setConvertLatexSymbols}
             help={localizeUi("ui.panels.generalsettings.turnsCommonModelWrittenLatexCommandsLikeRightarrowNeq")}
           />
-
+          <ToggleSetting
+            anchorId={getSettingsControlAnchorId("color-inline-names")}
+            label={localizeUi("settings.controls.colorInlineNames.label")}
+            checked={colorInlineNames ?? false}
+            onChange={setColorInlineNames}
+            help={localizeUi("settings.controls.colorInlineNames.help")}
+          />
+          {colorInlineNames && (
+            <ToggleSetting
+              anchorId={getSettingsControlAnchorId("disable-inline-name-gradients")}
+              label={localizeUi("settings.controls.disableInlineNameGradients.label")}
+              checked={disableInlineNameGradients ?? false}
+              onChange={setDisableInlineNameGradients}
+              help={localizeUi("settings.controls.disableInlineNameGradients.help")}
+            />
+          )}
           <div
             id={getSettingsControlAnchorId("quote-style")}
             className="flex scroll-mt-3 flex-col gap-1.5 rounded-lg p-1 transition-colors hover:bg-[var(--secondary)]/50"
@@ -3570,6 +3937,9 @@ function ImageGenerationSettings() {
   const imageIllustrationWidth = useUIStore((s) => s.imageIllustrationWidth);
   const imageIllustrationHeight = useUIStore((s) => s.imageIllustrationHeight);
   const setImageIllustrationDimensions = useUIStore((s) => s.setImageIllustrationDimensions);
+  const imageNoodleWidth = useUIStore((s) => s.imageNoodleWidth);
+  const imageNoodleHeight = useUIStore((s) => s.imageNoodleHeight);
+  const setImageNoodleDimensions = useUIStore((s) => s.setImageNoodleDimensions);
   const imageGameWidth = useUIStore((s) => s.imageGameWidth);
   const imageGameHeight = useUIStore((s) => s.imageGameHeight);
   const setImageGameDimensions = useUIStore((s) => s.setImageGameDimensions);
@@ -3607,6 +3977,14 @@ function ImageGenerationSettings() {
           onCommit={setImageIllustrationDimensions}
         />
         <ImageDimensionRow
+          controlId="image-noodle-size"
+          label={localizeUi("settings.controls.noodleGeneration.label")}
+          help={localizeUi("settings.controls.noodleGeneration.help")}
+          width={imageNoodleWidth}
+          height={imageNoodleHeight}
+          onCommit={setImageNoodleDimensions}
+        />
+        <ImageDimensionRow
           controlId="image-game-size"
           label={localizeUi("settings.controls.gameGeneration.label")}
           help={localizeUi("settings.controls.gameGeneration.help")}
@@ -3632,7 +4010,13 @@ function ImageGenerationSettings() {
         />
 
         <div id={getSettingsControlAnchorId("image-style-profiles")} className="mt-1 scroll-mt-3">
-          <div className="mb-2 flex items-center gap-1 text-xs font-medium text-[var(--foreground)]">{localizeUi("ui.panels.imagegenerationsettings.styleProfiles")}<HelpTooltip text={localizeUi("ui.panels.imagegenerationsettings.definesWhatAnimeDanbooruRealisticAndCustomStylesMean")} />
+          <div className="mb-2 flex items-center gap-1 text-xs font-medium text-[var(--foreground)]">
+            {localizeUi("ui.panels.imagegenerationsettings.styleProfiles")}
+            <HelpTooltip
+              text={localizeUi(
+                "ui.panels.imagegenerationsettings.definesWhatAnimeDanbooruRealisticAndCustomStylesMean",
+              )}
+            />
           </div>
           <ImageStyleProfilesEditor value={imageStyleProfiles} onChange={setImageStyleProfiles} />
         </div>
@@ -3675,7 +4059,7 @@ function VideoGenerationSettings() {
     },
     onError: (err) => {
       setDraft(savedSettings);
-      toast.error(err.message ||localizeUi("ui.panels.videogenerationsettings.failedToSaveVideoGenerationSettings"));
+      toast.error(err.message || localizeUi("ui.panels.videogenerationsettings.failedToSaveVideoGenerationSettings"));
     },
   });
 
@@ -3719,10 +4103,14 @@ function VideoGenerationSettings() {
     >
       {videoSettingsQuery.isLoading ? (
         <div className="flex items-center gap-2 rounded-lg bg-[var(--background)]/55 px-3 py-2 text-xs text-[var(--muted-foreground)] ring-1 ring-[var(--border)]">
-          <Loader2 size="0.8125rem" className="animate-spin" />{localizeUi("ui.panels.videogenerationsettings.loadingVideoSettings")}</div>
+          <Loader2 size="0.8125rem" className="animate-spin" />
+          {localizeUi("ui.panels.videogenerationsettings.loadingVideoSettings")}
+        </div>
       ) : videoSettingsQuery.isError ? (
         <div className="flex items-center gap-1.5 rounded-lg bg-[var(--destructive)]/10 px-2.5 py-2 text-xs text-[var(--destructive)] ring-1 ring-[var(--destructive)]/20">
-          <AlertTriangle size="0.8125rem" className="shrink-0" />{localizeUi("ui.panels.videogenerationsettings.couldNotLoadVideoSettings")}</div>
+          <AlertTriangle size="0.8125rem" className="shrink-0" />
+          {localizeUi("ui.panels.videogenerationsettings.couldNotLoadVideoSettings")}
+        </div>
       ) : (
         <div className="flex flex-col gap-3">
           <div
@@ -3730,9 +4118,15 @@ function VideoGenerationSettings() {
             className="grid scroll-mt-3 gap-2 rounded-lg bg-[var(--background)]/55 p-3 ring-1 ring-[var(--border)] sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center"
           >
             <div className="min-w-0">
-              <div className="inline-flex items-center gap-1 text-xs font-medium text-[var(--foreground)]">{localizeUi("ui.panels.videogenerationsettings.sceneVideoFallbackLength")}<HelpTooltip text={localizeUi("ui.panels.videogenerationsettings.usedByGameAndGallerySceneVideosWhenThe")} />
+              <div className="inline-flex items-center gap-1 text-xs font-medium text-[var(--foreground)]">
+                {localizeUi("ui.panels.videogenerationsettings.sceneVideoFallbackLength")}
+                <HelpTooltip
+                  text={localizeUi("ui.panels.videogenerationsettings.usedByGameAndGallerySceneVideosWhenThe")}
+                />
               </div>
-              <div className="mt-1 text-[0.625rem] text-[var(--muted-foreground)]">{localizeUi("ui.panels.videogenerationsettings.secondsClampedFrom")} {VIDEO_SCENE_DURATION_MIN} {localizeUi("ui.noodle.wizardfooter.to")} {VIDEO_SCENE_DURATION_MAX}.
+              <div className="mt-1 text-[0.625rem] text-[var(--muted-foreground)]">
+                {localizeUi("ui.panels.videogenerationsettings.secondsClampedFrom")} {VIDEO_SCENE_DURATION_MIN}{" "}
+                {localizeUi("ui.noodle.wizardfooter.to")} {VIDEO_SCENE_DURATION_MAX}.
               </div>
             </div>
             <div className="grid grid-cols-[minmax(0,4rem)_auto] items-center gap-1.5 sm:w-28">
@@ -3744,54 +4138,74 @@ function VideoGenerationSettings() {
                 className="min-w-0 rounded-md border border-[var(--border)] bg-[var(--secondary)] px-2 py-1 text-xs"
                 ariaLabel="Scene video fallback length in seconds"
               />
-              <span className="text-[0.625rem] text-[var(--muted-foreground)]">{localizeUi("ui.noodle.stageprofileview.s")}</span>
+              <span className="text-[0.625rem] text-[var(--muted-foreground)]">
+                {localizeUi("ui.noodle.stageprofileview.s")}
+              </span>
             </div>
           </div>
 
           <div className="rounded-lg bg-[var(--background)]/55 p-3 ring-1 ring-[var(--border)]">
-            <div className="mb-2 flex items-center gap-1 text-xs font-medium text-[var(--foreground)]">{localizeUi("ui.panels.videogenerationsettings.conversationCallClips")}<HelpTooltip text={localizeUi("ui.panels.videogenerationsettings.lengthsForGeneratedCharacterVideoCallPresenceClipsIdle")} />
+            <div className="mb-2 flex items-center gap-1 text-xs font-medium text-[var(--foreground)]">
+              {localizeUi("ui.panels.videogenerationsettings.conversationCallClips")}
+              <HelpTooltip
+                text={localizeUi(
+                  "ui.panels.videogenerationsettings.lengthsForGeneratedCharacterVideoCallPresenceClipsIdle",
+                )}
+              />
             </div>
-            <div className="grid gap-2 sm:grid-cols-2">
+            <div className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,10rem),1fr))] gap-2">
               {CONVERSATION_CALL_CHARACTER_VIDEO_CLIP_KINDS.map((kind) => (
                 <label
                   key={kind}
-                  className="flex min-w-0 items-center justify-between gap-3 rounded-md bg-[var(--secondary)]/60 px-2.5 py-2 ring-1 ring-[var(--border)]/80"
+                  className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-2 rounded-md bg-[var(--secondary)]/60 px-2.5 py-2 ring-1 ring-[var(--border)]/80"
                 >
                   <span className="truncate text-xs text-[var(--foreground)]">
                     {CONVERSATION_CALL_VIDEO_CLIP_LABELS[kind]}
                   </span>
-                  <span className="grid w-20 shrink-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-1.5">
+                  <span className="grid w-[3.75rem] grid-cols-[minmax(0,1fr)_auto] items-center gap-1">
                     <DraftNumberInput
                       value={draft.callClipDurations[kind]}
                       min={VIDEO_CALL_CLIP_DURATION_MIN}
                       max={VIDEO_CALL_CLIP_DURATION_MAX}
                       onCommit={(duration) => handleCallClipDurationChange(kind, duration)}
-                      className="min-w-0 rounded-md border border-[var(--border)] bg-[var(--background)] px-2 py-1 text-xs"
+                      className="min-w-0 rounded-md border border-[var(--border)] bg-[var(--background)] px-1.5 py-1 text-xs"
                       ariaLabel={`${CONVERSATION_CALL_VIDEO_CLIP_LABELS[kind]} length in seconds`}
                     />
-                    <span className="text-[0.625rem] text-[var(--muted-foreground)]">{localizeUi("ui.noodle.stageprofileview.s")}</span>
+                    <span className="text-[0.625rem] text-[var(--muted-foreground)]">
+                      {localizeUi("ui.noodle.stageprofileview.s")}
+                    </span>
                   </span>
                 </label>
               ))}
             </div>
-            <label className="mt-2 flex min-w-0 items-center justify-between gap-3 rounded-md bg-[var(--secondary)]/60 px-2.5 py-2 ring-1 ring-[var(--border)]/80">
+            <label className="mt-2 grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-2 rounded-md bg-[var(--secondary)]/60 px-2.5 py-2 ring-1 ring-[var(--border)]/80">
               <span className="flex min-w-0 flex-col gap-0.5">
-                <span className="truncate text-xs text-[var(--foreground)]">{localizeUi("ui.panels.videogenerationsettings.customRequest")}</span>
-                <span className="text-[0.55rem] leading-snug text-[var(--muted-foreground)]">{localizeUi("ui.panels.videogenerationsettings.usedForOneOffClipsCharactersGenerateFromExplicit")}</span>
+                <span className="truncate text-xs text-[var(--foreground)]">
+                  {localizeUi("ui.panels.videogenerationsettings.customRequest")}
+                </span>
+                <span className="text-[0.55rem] leading-snug text-[var(--muted-foreground)]">
+                  {localizeUi("ui.panels.videogenerationsettings.usedForOneOffClipsCharactersGenerateFromExplicit")}
+                </span>
               </span>
-              <span className="grid w-20 shrink-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-1.5">
+              <span className="grid w-[3.75rem] grid-cols-[minmax(0,1fr)_auto] items-center gap-1">
                 <DraftNumberInput
                   value={draft.callCustomClipDurationSeconds}
                   min={VIDEO_CALL_CLIP_DURATION_MIN}
                   max={VIDEO_CALL_CLIP_DURATION_MAX}
                   onCommit={handleCustomClipDurationChange}
-                  className="min-w-0 rounded-md border border-[var(--border)] bg-[var(--background)] px-2 py-1 text-xs"
+                  className="min-w-0 rounded-md border border-[var(--border)] bg-[var(--background)] px-1.5 py-1 text-xs"
                   ariaLabel="Custom call clip length in seconds"
                 />
-                <span className="text-[0.625rem] text-[var(--muted-foreground)]">{localizeUi("ui.noodle.stageprofileview.s")}</span>
+                <span className="text-[0.625rem] text-[var(--muted-foreground)]">
+                  {localizeUi("ui.noodle.stageprofileview.s")}
+                </span>
               </span>
             </label>
-            <div className="mt-2 text-[0.625rem] text-[var(--muted-foreground)]">{localizeUi("ui.panels.videogenerationsettings.callClipsAreClampedFrom")} {VIDEO_CALL_CLIP_DURATION_MIN} {localizeUi("ui.noodle.wizardfooter.to")} {VIDEO_CALL_CLIP_DURATION_MAX} {localizeUi("ui.panels.videogenerationsettings.seconds")}{saveVideoSettings.isPending ?localizeUi("chat.settings.inlineEditor.saving") : ""}
+            <div className="mt-2 text-[0.625rem] text-[var(--muted-foreground)]">
+              {localizeUi("ui.panels.videogenerationsettings.callClipsAreClampedFrom")} {VIDEO_CALL_CLIP_DURATION_MIN}{" "}
+              {localizeUi("ui.noodle.wizardfooter.to")} {VIDEO_CALL_CLIP_DURATION_MAX}{" "}
+              {localizeUi("ui.panels.videogenerationsettings.seconds")}
+              {saveVideoSettings.isPending ? localizeUi("chat.settings.inlineEditor.saving") : ""}
             </div>
           </div>
 
@@ -3800,9 +4214,17 @@ function VideoGenerationSettings() {
             className="grid scroll-mt-3 gap-2 rounded-lg bg-[var(--background)]/55 p-3 ring-1 ring-[var(--border)] sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center"
           >
             <div className="min-w-0">
-              <div className="inline-flex items-center gap-1 text-xs font-medium text-[var(--foreground)]">{localizeUi("ui.panels.videogenerationsettings.animatedExpressionLength")}<HelpTooltip text={localizeUi("ui.panels.videogenerationsettings.usedByExpressionEngineAnimatedPortraitGenerationBeforeThe")} />
+              <div className="inline-flex items-center gap-1 text-xs font-medium text-[var(--foreground)]">
+                {localizeUi("ui.panels.videogenerationsettings.animatedExpressionLength")}
+                <HelpTooltip
+                  text={localizeUi(
+                    "ui.panels.videogenerationsettings.usedByExpressionEngineAnimatedPortraitGenerationBeforeThe",
+                  )}
+                />
               </div>
-              <div className="mt-1 text-[0.625rem] text-[var(--muted-foreground)]">{localizeUi("ui.panels.videogenerationsettings.secondsClampedFrom")} {VIDEO_ANIMATED_EXPRESSION_CLIP_DURATION_MIN} {localizeUi("ui.noodle.wizardfooter.to")}{" "}
+              <div className="mt-1 text-[0.625rem] text-[var(--muted-foreground)]">
+                {localizeUi("ui.panels.videogenerationsettings.secondsClampedFrom")}{" "}
+                {VIDEO_ANIMATED_EXPRESSION_CLIP_DURATION_MIN} {localizeUi("ui.noodle.wizardfooter.to")}{" "}
                 {VIDEO_ANIMATED_EXPRESSION_CLIP_DURATION_MAX}.
               </div>
             </div>
@@ -3815,7 +4237,9 @@ function VideoGenerationSettings() {
                 className="min-w-0 rounded-md border border-[var(--border)] bg-[var(--secondary)] px-2 py-1 text-xs"
                 ariaLabel="Animated expression clip length in seconds"
               />
-              <span className="text-[0.625rem] text-[var(--muted-foreground)]">{localizeUi("ui.noodle.stageprofileview.s")}</span>
+              <span className="text-[0.625rem] text-[var(--muted-foreground)]">
+                {localizeUi("ui.noodle.stageprofileview.s")}
+              </span>
             </div>
           </div>
         </div>
@@ -3849,7 +4273,12 @@ function GameAssetsSettings() {
     openGameAssetsFolder.mutate(subfolder, {
       onError: (error) => {
         if (error instanceof HostDeviceFileManagerError) return;
-        toast.error(getPrivilegedActionErrorMessage(error,localizeUi("ui.panels.gameassetssettings.failedToOpenGameAssetsFolder")));
+        toast.error(
+          getPrivilegedActionErrorMessage(
+            error,
+            localizeUi("ui.panels.gameassetssettings.failedToOpenGameAssetsFolder"),
+          ),
+        );
       },
     });
   };
@@ -3868,7 +4297,9 @@ function GameAssetsSettings() {
 
     const tooLarge = assetFiles.find((file) => file.size > 50 * 1024 * 1024);
     if (tooLarge) {
-      toast.error(localizeUi("ui.panels.gameassetssettings.value1IsTooLargeGameAssetsAreLimitedTo", { value1: tooLarge.name }));
+      toast.error(
+        localizeUi("ui.panels.gameassetssettings.value1IsTooLargeGameAssetsAreLimitedTo", { value1: tooLarge.name }),
+      );
       return;
     }
 
@@ -3887,14 +4318,22 @@ function GameAssetsSettings() {
       const failed = uploads.length - succeeded;
       await rescanGameAssets.mutateAsync();
       if (succeeded > 0) {
-        toast.success(localizeUi("ui.panels.gameassetssettings.uploadedValue1GameAssetValue2", { value1: succeeded, value2: succeeded === 1 ? "" :localizeUi("ui.noodle.stageprofileview.s") }));
+        toast.success(
+          localizeUi("ui.panels.gameassetssettings.uploadedValue1GameAssetValue2", {
+            value1: succeeded,
+            value2: succeeded === 1 ? "" : localizeUi("ui.noodle.stageprofileview.s"),
+          }),
+        );
       }
       if (failed > 0) {
         const reason = uploads.find((result) => result.status === "rejected");
         toast.error(
           reason?.status === "rejected" && reason.reason instanceof Error
             ? reason.reason.message
-            :localizeUi("ui.panels.gameassetssettings.value1AssetUploadValue2Failed", { value1: failed, value2: failed === 1 ? "" :localizeUi("ui.noodle.stageprofileview.s") }),
+            : localizeUi("ui.panels.gameassetssettings.value1AssetUploadValue2Failed", {
+                value1: failed,
+                value2: failed === 1 ? "" : localizeUi("ui.noodle.stageprofileview.s"),
+              }),
         );
       }
       setAssetFiles([]);
@@ -3918,7 +4357,9 @@ function GameAssetsSettings() {
             className="mari-chrome-control mari-chrome-control--primary w-full gap-2 text-xs"
             title={localizeUi("settings.actions.openAssetBrowser")}
           >
-            <Image size="0.75rem" />{localizeUi("ui.panels.gameassetssettings.assetBrowser")}</button>
+            <Image size="0.75rem" />
+            {localizeUi("ui.panels.gameassetssettings.assetBrowser")}
+          </button>
           <button
             onClick={() => {
               rescanGameAssets
@@ -3928,7 +4369,9 @@ function GameAssetsSettings() {
             }}
             className={cn(SETTINGS_BUTTON_CLASS, "w-full justify-center")}
           >
-            <RefreshCw size="0.75rem" />{localizeUi("ui.panels.gameassetssettings.rescan")}</button>
+            <RefreshCw size="0.75rem" />
+            {localizeUi("ui.panels.gameassetssettings.rescan")}
+          </button>
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
@@ -3946,7 +4389,9 @@ function GameAssetsSettings() {
 
         <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
           <label className="flex min-w-0 flex-col gap-1">
-            <span className="text-[0.625rem] font-medium text-[var(--muted-foreground)]">{localizeUi("ui.panels.gameassetssettings.type")}</span>
+            <span className="text-[0.625rem] font-medium text-[var(--muted-foreground)]">
+              {localizeUi("ui.panels.gameassetssettings.type")}
+            </span>
             <select
               value={assetCategory}
               onChange={(e) => handleAssetCategoryChange(e.target.value as GameAssetCategoryId)}
@@ -3960,7 +4405,9 @@ function GameAssetsSettings() {
             </select>
           </label>
           <label className="flex min-w-0 flex-col gap-1">
-            <span className="text-[0.625rem] font-medium text-[var(--muted-foreground)]">{localizeUi("ui.panels.gameassetssettings.folder")}</span>
+            <span className="text-[0.625rem] font-medium text-[var(--muted-foreground)]">
+              {localizeUi("ui.panels.gameassetssettings.folder")}
+            </span>
             <input
               value={assetSubcategory}
               onChange={(e) => setAssetSubcategory(e.target.value)}
@@ -3980,7 +4427,9 @@ function GameAssetsSettings() {
             onChange={(e) => setAssetFiles(Array.from(e.target.files ?? []))}
           />
           <button onClick={() => assetFileRef.current?.click()} className={cn(SETTINGS_BUTTON_CLASS, "justify-center")}>
-            <Upload size="0.875rem" />{localizeUi("ui.panels.gameassetssettings.chooseFiles")}</button>
+            <Upload size="0.875rem" />
+            {localizeUi("ui.panels.gameassetssettings.chooseFiles")}
+          </button>
           <button
             onClick={handleGameAssetUpload}
             disabled={assetUploading || assetFiles.length === 0}
@@ -3990,15 +4439,21 @@ function GameAssetsSettings() {
               assetUploading || assetFiles.length === 0 ? "" : "mari-chrome-control--selected",
             )}
           >
-            {assetUploading ? <Loader2 size="0.875rem" className="animate-spin" /> : <Upload size="0.875rem" />}{localizeUi("ui.panels.gameassetssettings.uploadToServer")}</button>
+            {assetUploading ? <Loader2 size="0.875rem" className="animate-spin" /> : <Upload size="0.875rem" />}
+            {localizeUi("ui.panels.gameassetssettings.uploadToServer")}
+          </button>
           {assetFiles.length > 0 && (
             <span className="truncate text-[0.625rem] text-[var(--muted-foreground)]">
-              {assetFiles.length === 1 ? assetFiles[0]?.name :localizeUi("ui.panels.gameassetssettings.value1FilesSelected", { value1: assetFiles.length })}
+              {assetFiles.length === 1
+                ? assetFiles[0]?.name
+                : localizeUi("ui.panels.gameassetssettings.value1FilesSelected", { value1: assetFiles.length })}
             </span>
           )}
         </div>
 
-        <p className="text-[0.625rem] leading-relaxed text-[var(--muted-foreground)]">{localizeUi("ui.panels.gameassetssettings.audioSupportsMp3OggWavFlacM4aAacAnd")}</p>
+        <p className="text-[0.625rem] leading-relaxed text-[var(--muted-foreground)]">
+          {localizeUi("ui.panels.gameassetssettings.audioSupportsMp3OggWavFlacM4aAacAnd")}
+        </p>
       </div>
     </SettingsSection>
   );
@@ -4018,6 +4473,8 @@ function AppearanceSettings() {
   const setAppAccentRgbMode = useUIStore((s) => s.setAppAccentRgbMode);
   const customCursorEnabled = useUIStore((s) => s.customCursorEnabled);
   const setCustomCursorEnabled = useUIStore((s) => s.setCustomCursorEnabled);
+  const reduceAmbientEffects = useUIStore((s) => s.reduceAmbientEffects);
+  const setReduceAmbientEffects = useUIStore((s) => s.setReduceAmbientEffects);
   const defaultAppBackgroundColor = getDefaultAppBackgroundColor(theme);
   const displayedAppBackgroundColor =
     appBackgroundColor.trim().toLowerCase() === defaultAppBackgroundColor.toLowerCase() ? "" : appBackgroundColor;
@@ -4044,7 +4501,9 @@ function AppearanceSettings() {
     try {
       await api.post("/fonts/open-folder");
     } catch (error) {
-      toast.error(getPrivilegedActionErrorMessage(error,localizeUi("ui.panels.appearancesettings.couldNotOpenFontsFolder")));
+      toast.error(
+        getPrivilegedActionErrorMessage(error, localizeUi("ui.panels.appearancesettings.couldNotOpenFontsFolder")),
+      );
     }
   };
   const handleAppBackgroundColorChange = useCallback(
@@ -4212,12 +4671,18 @@ function AppearanceSettings() {
   const setChatFontOpacity = useUIStore((s) => s.setChatFontOpacity);
   const roleplayReducedPaintEffects = useUIStore((s) => s.roleplayReducedPaintEffects);
   const setRoleplayReducedPaintEffects = useUIStore((s) => s.setRoleplayReducedPaintEffects);
+  const showRoleplayThinkingInMessages = useUIStore((s) => s.showRoleplayThinkingInMessages);
+  const setShowRoleplayThinkingInMessages = useUIStore((s) => s.setShowRoleplayThinkingInMessages);
+  const keepRoleplayThinkingExpanded = useUIStore((s) => s.keepRoleplayThinkingExpanded);
+  const setKeepRoleplayThinkingExpanded = useUIStore((s) => s.setKeepRoleplayThinkingExpanded);
   const roleplayAvatarStyle = useUIStore((s) => s.roleplayAvatarStyle);
   const setRoleplayAvatarStyle = useUIStore((s) => s.setRoleplayAvatarStyle);
   const roleplayAvatarScale = useUIStore((s) => s.roleplayAvatarScale);
   const setRoleplayAvatarScale = useUIStore((s) => s.setRoleplayAvatarScale);
   const roleplayAvatarsScrollable = useUIStore((s) => s.roleplayAvatarsScrollable);
   const setRoleplayAvatarsScrollable = useUIStore((s) => s.setRoleplayAvatarsScrollable);
+  const roleplayNarratorAvatarCycling = useUIStore((s) => s.roleplayNarratorAvatarCycling);
+  const setRoleplayNarratorAvatarCycling = useUIStore((s) => s.setRoleplayNarratorAvatarCycling);
   const roleplaySpriteScale = useUIStore((s) => s.roleplaySpriteScale);
   const setRoleplaySpriteScale = useUIStore((s) => s.setRoleplaySpriteScale);
   const gameDialogueDisplayMode = useUIStore((s) => s.gameDialogueDisplayMode);
@@ -4265,7 +4730,7 @@ function AppearanceSettings() {
       queryClient.invalidateQueries({ queryKey: ["custom-fonts"] });
     },
     onError: (err: Error) => {
-      toast.error(err.message ||localizeUi("ui.panels.appearancesettings.failedToDownloadFont"));
+      toast.error(err.message || localizeUi("ui.panels.appearancesettings.failedToDownloadFont"));
     },
   });
 
@@ -4305,7 +4770,9 @@ function AppearanceSettings() {
 
   return (
     <div className="flex flex-col gap-3">
-      <SettingsIntro>{localizeUi("ui.panels.appearancesettings.visualPreferencesGroupedByGlobalChromeTextConversationRoleplay")}</SettingsIntro>
+      <SettingsIntro>
+        {localizeUi("ui.panels.appearancesettings.visualPreferencesGroupedByGlobalChromeTextConversationRoleplay")}
+      </SettingsIntro>
 
       <SettingsSection
         title={localizeUi("settings.sections.appStyle.title")}
@@ -4326,7 +4793,9 @@ function AppearanceSettings() {
                 <Loader2 size="0.75rem" className="animate-spin" />
               ) : (
                 <RotateCcw size="0.75rem" />
-              )}{localizeUi("ui.panels.appearancesettings.resetAppearance")}</button>
+              )}
+              {localizeUi("ui.panels.appearancesettings.resetAppearance")}
+            </button>
           </div>
           {/* ── Visual Style ── */}
           <div id={getSettingsControlAnchorId("visual-theme")} className="flex scroll-mt-3 flex-col gap-2">
@@ -4368,7 +4837,8 @@ function AppearanceSettings() {
           </div>
 
           <label id={getSettingsControlAnchorId("theme-mode")} className="flex scroll-mt-3 flex-col gap-1">
-            <span className="text-xs font-medium inline-flex items-center gap-1">{localizeUi("ui.panels.appearancesettings.colorScheme")}{" "}
+            <span className="text-xs font-medium inline-flex items-center gap-1">
+              {localizeUi("ui.panels.appearancesettings.colorScheme")}{" "}
               <HelpTooltip text={localizeUi("ui.panels.appearancesettings.switchBetweenDarkAndLightModeDarkModeIs")} />
             </span>
             <select
@@ -4389,6 +4859,14 @@ function AppearanceSettings() {
             help={localizeUi("settings.controls.customPointer.help")}
           />
 
+          <ToggleSetting
+            anchorId={getSettingsControlAnchorId("reduce-ambient-effects")}
+            label={localizeUi("settings.controls.reduceAmbientEffects.label")}
+            checked={reduceAmbientEffects}
+            onChange={setReduceAmbientEffects}
+            help={localizeUi("settings.controls.reduceAmbientEffects.help")}
+          />
+
           <SearchableSettingTarget controlId="app-background-color">
             <ColorPicker
               value={displayedAppBackgroundColor}
@@ -4397,7 +4875,9 @@ function AppearanceSettings() {
               compact
               label={localizeUi("settings.controls.backgroundColor.label")}
               helpText="Colors the main app shell background. Leave it on the scheme default to follow Dark and Light mode automatically. Gradients are supported for the shell paint."
-              emptyText={localizeUi("ui.panels.trackerpanelappearancedrawer.defaultValue1", { value1: defaultAppBackgroundColor })}
+              emptyText={localizeUi("ui.panels.trackerpanelappearancedrawer.defaultValue1", {
+                value1: defaultAppBackgroundColor,
+              })}
               emptyPreviewValue={defaultAppBackgroundColor}
               clearLabel="Reset to default"
             />
@@ -4411,7 +4891,9 @@ function AppearanceSettings() {
               compact
               label={localizeUi("settings.controls.accentColor.label")}
               helpText="Colors the shared app accent layer: buttons, active icons, focus rings, highlights, panel outlines, and chat chrome. Accent Pulse animates this selected color."
-              emptyText={localizeUi("ui.panels.trackerpanelappearancedrawer.defaultValue1", { value1: defaultAppAccentColor })}
+              emptyText={localizeUi("ui.panels.trackerpanelappearancedrawer.defaultValue1", {
+                value1: defaultAppAccentColor,
+              })}
               emptyPreviewValue={defaultAppAccentColor}
               clearLabel="Reset to default"
             />
@@ -4428,7 +4910,9 @@ function AppearanceSettings() {
           <ToggleSetting
             anchorId={getSettingsControlAnchorId("rgb-mode")}
             label={
-              <span className={cn(appAccentRgbMode && "mari-logo-gradient-text mari-logo-gradient-text--active")}>{localizeUi("ui.panels.appearancesettings.rgbMode")}</span>
+              <span className={cn(appAccentRgbMode && "mari-logo-gradient-text mari-logo-gradient-text--active")}>
+                {localizeUi("ui.panels.appearancesettings.rgbMode")}
+              </span>
             }
             checked={appAccentRgbMode}
             onChange={handleAppAccentRgbModeChange}
@@ -4446,8 +4930,11 @@ function AppearanceSettings() {
       >
         <div className="flex flex-col gap-3">
           <label id={getSettingsControlAnchorId("font-family")} className="flex scroll-mt-3 flex-col gap-1">
-            <span className="text-xs font-medium inline-flex items-center gap-1">{localizeUi("ui.panels.appearancesettings.font")}{" "}
-              <HelpTooltip text={localizeUi("ui.panels.appearancesettings.chooseTheFontUsedAcrossTheAppDefaultInter")} />
+            <span className="text-xs font-medium inline-flex items-center gap-1">
+              {localizeUi("ui.panels.appearancesettings.font")}{" "}
+              <HelpTooltip
+                text={localizeUi("ui.panels.appearancesettings.chooseTheFontUsedAcrossTheAppDefaultInter")}
+              />
             </span>
             <select
               value={fontFamily}
@@ -4462,18 +4949,24 @@ function AppearanceSettings() {
               ))}
             </select>
             {(!customFonts || customFonts.length === 0) && (
-              <p className="text-[0.625rem] text-[var(--muted-foreground)]">{localizeUi("ui.panels.appearancesettings.dropFontFilesTtfOtfWoffWoff2IntoThe")} <span className="font-medium">{localizeUi("ui.panels.appearancesettings.dataFonts")}</span>{" "}{localizeUi("ui.panels.appearancesettings.folderToAddCustomFonts")}</p>
+              <p className="text-[0.625rem] text-[var(--muted-foreground)]">
+                {localizeUi("ui.panels.appearancesettings.dropFontFilesTtfOtfWoffWoff2IntoThe")}{" "}
+                <span className="font-medium">{localizeUi("ui.panels.appearancesettings.dataFonts")}</span>{" "}
+                {localizeUi("ui.panels.appearancesettings.folderToAddCustomFonts")}
+              </p>
             )}
-            <button
-              onClick={handleOpenFontsFolder}
-              className={cn(SETTINGS_BUTTON_CLASS, "mt-1 self-start")}
-            >
-              <FolderOpen size="0.75rem" />{localizeUi("ui.panels.appearancesettings.openFontsFolder")}</button>
+            <button onClick={handleOpenFontsFolder} className={cn(SETTINGS_BUTTON_CLASS, "mt-1 self-start")}>
+              <FolderOpen size="0.75rem" />
+              {localizeUi("ui.panels.appearancesettings.openFontsFolder")}
+            </button>
           </label>
 
           <div className="flex flex-col gap-1.5">
-            <span className="text-xs font-medium inline-flex items-center gap-1">{localizeUi("ui.panels.appearancesettings.googleFonts")}{" "}
-              <HelpTooltip text={localizeUi("ui.panels.appearancesettings.downloadAFontDirectlyFromGoogleFontsByName")} />
+            <span className="text-xs font-medium inline-flex items-center gap-1">
+              {localizeUi("ui.panels.appearancesettings.googleFonts")}{" "}
+              <HelpTooltip
+                text={localizeUi("ui.panels.appearancesettings.downloadAFontDirectlyFromGoogleFontsByName")}
+              />
             </span>
             <div className="flex gap-1.5">
               <input
@@ -4498,7 +4991,9 @@ function AppearanceSettings() {
                 ) : (
                   <Download size="0.75rem" />
                 )}
-                {googleFontMutation.isPending ?localizeUi("ui.panels.appearancesettings.downloading") :localizeUi("ui.panels.appearancesettings.add")}
+                {googleFontMutation.isPending
+                  ? localizeUi("ui.panels.appearancesettings.downloading")
+                  : localizeUi("ui.panels.appearancesettings.add")}
               </button>
             </div>
             <a
@@ -4506,11 +5001,14 @@ function AppearanceSettings() {
               target="_blank"
               rel="noopener noreferrer"
               className="text-[0.625rem] text-[var(--muted-foreground)] hover:text-[var(--primary)] transition-colors inline-flex items-center gap-1"
-            >{localizeUi("ui.panels.appearancesettings.browseFontsAtFontsGoogleCom")}</a>
+            >
+              {localizeUi("ui.panels.appearancesettings.browseFontsAtFontsGoogleCom")}
+            </a>
           </div>
 
           <label id={getSettingsControlAnchorId("display-size")} className="flex scroll-mt-3 flex-col gap-1">
-            <span className="text-xs font-medium inline-flex items-center gap-1">{localizeUi("ui.panels.appearancesettings.displaySize")}{" "}
+            <span className="text-xs font-medium inline-flex items-center gap-1">
+              {localizeUi("ui.panels.appearancesettings.displaySize")}{" "}
               <HelpTooltip text={localizeUi("ui.panels.appearancesettings.adjustsTheBaseFontSizeAcrossTheWholeApp")} />
             </span>
             <select
@@ -4528,7 +5026,8 @@ function AppearanceSettings() {
           </label>
 
           <label id={getSettingsControlAnchorId("chat-font-size")} className="flex scroll-mt-3 flex-col gap-1">
-            <span className="text-xs font-medium inline-flex items-center gap-1">{localizeUi("ui.panels.appearancesettings.chatFontSize")}{" "}
+            <span className="text-xs font-medium inline-flex items-center gap-1">
+              {localizeUi("ui.panels.appearancesettings.chatFontSize")}{" "}
               <HelpTooltip text={localizeUi("ui.panels.appearancesettings.adjustsTheFontSizeOfChatMessagesOnThis")} />
             </span>
             <div className="flex items-center gap-3">
@@ -4542,7 +5041,9 @@ function AppearanceSettings() {
                 className="flex-1 accent-[var(--primary)]"
               />
               <span className="text-xs tabular-nums text-[var(--muted-foreground)] w-8 text-right">
-                {chatFontSize}{localizeUi("ui.panels.appearancesettings.px")}</span>
+                {chatFontSize}
+                {localizeUi("ui.panels.appearancesettings.px")}
+              </span>
             </div>
           </label>
 
@@ -4554,7 +5055,9 @@ function AppearanceSettings() {
               compact
               label={localizeUi("settings.colors.chatText")}
               helpText="Controls the main chat message text color. Leave it on the scheme default to keep dark and light mode readable. Gradients are accepted for layouts that support them."
-              emptyText={localizeUi("ui.panels.appearancesettings.schemeDefaultValue1", { value1: getDefaultChatTextColor(theme) })}
+              emptyText={localizeUi("ui.panels.appearancesettings.schemeDefaultValue1", {
+                value1: getDefaultChatTextColor(theme),
+              })}
               emptyPreviewValue={getDefaultChatTextColor(theme)}
               clearLabel="Reset to default"
             />
@@ -4567,7 +5070,9 @@ function AppearanceSettings() {
               compact
               label={localizeUi("settings.colors.defaultDialogue")}
               helpText="Colors dialogue for character and persona cards that do not have their own Dialogue Highlight Color. A card's own dialogue color always overrides it."
-              emptyText={localizeUi("ui.panels.appearancesettings.schemeDefaultValue1", { value1: getDefaultChatTextColor(theme) })}
+              emptyText={localizeUi("ui.panels.appearancesettings.schemeDefaultValue1", {
+                value1: getDefaultChatTextColor(theme),
+              })}
               emptyPreviewValue={getDefaultChatTextColor(theme)}
               clearLabel="Reset to scheme default"
             />
@@ -4581,14 +5086,20 @@ function AppearanceSettings() {
               compact
               label={localizeUi("settings.colors.chatChrome")}
               helpText="Controls ordinary chrome copy in tracker widgets, folder labels, settings descriptors, and windows opened from chat buttons. Accent-colored button text and active icons follow Accent Color instead. Gradients use a compatible fallback where plain CSS color is required."
-              emptyText={localizeUi("ui.panels.appearancesettings.schemeDefaultValue1", { value1: getDefaultChatChromeTextColor(theme) })}
+              emptyText={localizeUi("ui.panels.appearancesettings.schemeDefaultValue1", {
+                value1: getDefaultChatChromeTextColor(theme),
+              })}
               emptyPreviewValue={getDefaultChatChromeTextColor(theme)}
               clearLabel="Reset to default"
             />
           </SearchableSettingTarget>
 
           <div id={getSettingsControlAnchorId("text-outline-width")} className="flex scroll-mt-3 flex-col gap-1.5">
-            <span className="text-[0.6875rem] font-medium inline-flex items-center gap-1">{localizeUi("ui.panels.appearancesettings.textOutlineStroke")}<HelpTooltip text={localizeUi("ui.panels.appearancesettings.addsAnOutlineAroundChatTextForBetterReadability")} />
+            <span className="text-[0.6875rem] font-medium inline-flex items-center gap-1">
+              {localizeUi("ui.panels.appearancesettings.textOutlineStroke")}
+              <HelpTooltip
+                text={localizeUi("ui.panels.appearancesettings.addsAnOutlineAroundChatTextForBetterReadability")}
+              />
             </span>
             <ColorPicker
               value={textStrokeColor || "#000000"}
@@ -4600,7 +5111,9 @@ function AppearanceSettings() {
               clearValue="#000000"
             />
             <label className="flex flex-col gap-1">
-              <span className="text-[0.625rem] text-[var(--muted-foreground)]">{localizeUi("ui.panels.appearancesettings.width")}</span>
+              <span className="text-[0.625rem] text-[var(--muted-foreground)]">
+                {localizeUi("ui.panels.appearancesettings.width")}
+              </span>
               <div className="flex items-center gap-2">
                 <input
                   type="range"
@@ -4612,7 +5125,9 @@ function AppearanceSettings() {
                   className="flex-1 accent-[var(--primary)]"
                 />
                 <span className="w-10 text-right text-xs tabular-nums text-[var(--muted-foreground)]">
-                  {textStrokeWidth}{localizeUi("ui.panels.appearancesettings.px")}</span>
+                  {textStrokeWidth}
+                  {localizeUi("ui.panels.appearancesettings.px")}
+                </span>
               </div>
             </label>
             <button
@@ -4621,7 +5136,9 @@ function AppearanceSettings() {
                 setTextStrokeColor("#000000");
               }}
               className="text-[0.625rem] text-[var(--muted-foreground)] hover:text-[var(--foreground)] transition-colors self-start"
-            >{localizeUi("ui.panels.appearancesettings.resetToDefault")}</button>
+            >
+              {localizeUi("ui.panels.appearancesettings.resetToDefault")}
+            </button>
           </div>
         </div>
       </SettingsSection>
@@ -4677,7 +5194,7 @@ function AppearanceSettings() {
                     <div
                       className={cn(
                         "h-5 w-5 shrink-0 bg-[var(--accent)]",
-                        conversationAvatarShape === "square" ? "rounded-md" : "rounded-full",
+                        conversationAvatarShape === "square" ? "rounded-[0.2rem]" : "rounded-full",
                       )}
                     />
                     <div className="mari-message-bubble texting-bubble texting-bubble-other max-w-[78%] rounded-2xl px-3 py-1.5 text-xs shadow-sm">
@@ -4690,7 +5207,7 @@ function AppearanceSettings() {
                   <div
                     className={cn(
                       "h-6 w-6 shrink-0 bg-[var(--accent)]",
-                      conversationAvatarShape === "square" ? "rounded-md" : "rounded-full",
+                      conversationAvatarShape === "square" ? "rounded-[0.2rem]" : "rounded-full",
                     )}
                   />
                   <div className="min-w-0 flex-1">
@@ -4730,7 +5247,7 @@ function AppearanceSettings() {
                   {
                     id: "square" as ConversationAvatarShape,
                     label: localizeUi("ui.panels.appearancesettings.squareAvatars"),
-                    cornerClass: "rounded-md",
+                    cornerClass: "rounded-[0.2rem]",
                   },
                 ] as const
               ).map((option) => (
@@ -4746,7 +5263,10 @@ function AppearanceSettings() {
                   )}
                   aria-pressed={conversationAvatarShape === option.id}
                 >
-                  <span className={cn("h-5 w-5 border border-current bg-[var(--accent)]", option.cornerClass)} />
+                  <span
+                    className={cn("h-5 w-5 border border-current bg-[var(--accent)]", option.cornerClass)}
+                    data-avatar-shape-preview={option.id}
+                  />
                   {option.label}
                 </button>
               ))}
@@ -4770,7 +5290,9 @@ function AppearanceSettings() {
             id={getSettingsControlAnchorId("roleplay-message-opacity")}
             className="flex scroll-mt-3 flex-col gap-1"
           >
-            <span className="text-[0.6875rem] font-medium">{localizeUi("ui.panels.appearancesettings.roleplayMessagesBackgroundOpacity")}</span>
+            <span className="text-[0.6875rem] font-medium">
+              {localizeUi("ui.panels.appearancesettings.roleplayMessagesBackgroundOpacity")}
+            </span>
             <div className="flex items-center gap-3">
               <input
                 type="range"
@@ -4790,7 +5312,9 @@ function AppearanceSettings() {
               onClick={() => setChatFontOpacity(90)}
               disabled={chatFontOpacity === 90}
               className="self-start text-[0.625rem] text-[var(--muted-foreground)] transition-colors hover:text-[var(--foreground)] disabled:pointer-events-none disabled:opacity-45"
-            >{localizeUi("ui.panels.appearancesettings.resetOpacityToDefault")}</button>
+            >
+              {localizeUi("ui.panels.appearancesettings.resetOpacityToDefault")}
+            </button>
           </label>
 
           <ToggleSetting
@@ -4801,11 +5325,29 @@ function AppearanceSettings() {
             help={localizeUi("settings.controls.reducedPaintEffects.help")}
           />
 
+          <ToggleSetting
+            anchorId={getSettingsControlAnchorId("show-roleplay-thinking-in-messages")}
+            label={localizeUi("settings.controls.showRoleplayThinkingInMessages.label")}
+            checked={showRoleplayThinkingInMessages}
+            onChange={setShowRoleplayThinkingInMessages}
+            help={localizeUi("settings.controls.showRoleplayThinkingInMessages.help")}
+          />
+          <ToggleSetting
+            anchorId={getSettingsControlAnchorId("keep-roleplay-thinking-expanded")}
+            label={localizeUi("settings.controls.keepRoleplayThinkingExpanded.label")}
+            checked={keepRoleplayThinkingExpanded}
+            onChange={setKeepRoleplayThinkingExpanded}
+            disabled={!showRoleplayThinkingInMessages}
+            help={localizeUi("settings.controls.keepRoleplayThinkingExpanded.help")}
+          />
+
           <div className="flex flex-col gap-2">
             <div className="flex items-center gap-1.5">
               <Image size="0.75rem" className="text-[var(--muted-foreground)]" />
               <span className="text-xs font-medium">{localizeUi("ui.panels.appearancesettings.roleplayAvatars")}</span>
-              <HelpTooltip text={localizeUi("ui.panels.appearancesettings.chooseHowAvatarsSitNextToRoleplayMessagesNone")} />
+              <HelpTooltip
+                text={localizeUi("ui.panels.appearancesettings.chooseHowAvatarsSitNextToRoleplayMessagesNone")}
+              />
             </div>
             <ToggleSetting
               anchorId={getSettingsControlAnchorId("scrollable-avatars")}
@@ -4813,6 +5355,13 @@ function AppearanceSettings() {
               checked={roleplayAvatarsScrollable}
               onChange={setRoleplayAvatarsScrollable}
               help={localizeUi("settings.controls.scrollableAvatars.help")}
+            />
+            <ToggleSetting
+              anchorId={getSettingsControlAnchorId("narrator-cycling-avatars")}
+              label={localizeUi("settings.controls.narratorCyclingAvatars.label")}
+              checked={roleplayNarratorAvatarCycling}
+              onChange={setRoleplayNarratorAvatarCycling}
+              help={localizeUi("settings.controls.narratorCyclingAvatars.help")}
             />
             <div
               id={getSettingsControlAnchorId("roleplay-avatar-style")}
@@ -4876,7 +5425,7 @@ function AppearanceSettings() {
               ))}
             </div>
             <div className="rounded-lg border border-[var(--border)] bg-[var(--secondary)]/45 p-3">
-              <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+              <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center">
                 <div className="flex h-20 w-full shrink-0 items-end justify-center gap-3 overflow-hidden rounded-md bg-black/30 p-2 ring-1 ring-[var(--border)]/70 sm:w-28">
                   {roleplayAvatarStyle === "none" ? (
                     <div
@@ -4885,7 +5434,9 @@ function AppearanceSettings() {
                         width: toPreviewRem(roleplayAvatarPreview.width),
                         height: toPreviewRem(roleplayAvatarPreview.height),
                       }}
-                    >{localizeUi("ui.panels.appearancesettings.noAvatars")}</div>
+                    >
+                      {localizeUi("ui.panels.appearancesettings.noAvatars")}
+                    </div>
                   ) : (
                     <div
                       className={cn(
@@ -4910,12 +5461,14 @@ function AppearanceSettings() {
                     }}
                   />
                 </div>
-                <div className="grid min-w-0 flex-1 gap-3">
+                <div className="grid min-w-0 flex-1 gap-3 sm:min-w-[9rem]">
                   <label
                     id={getSettingsControlAnchorId("roleplay-avatar-scale")}
                     className="flex scroll-mt-3 min-w-0 flex-col gap-1"
                   >
-                    <span className="text-[0.6875rem] font-medium text-[var(--foreground)]">{localizeUi("ui.panels.appearancesettings.messageAvatarScale")}</span>
+                    <span className="text-[0.6875rem] font-medium text-[var(--foreground)]">
+                      {localizeUi("ui.panels.appearancesettings.messageAvatarScale")}
+                    </span>
                     <div className="flex items-center gap-2">
                       <input
                         type="range"
@@ -4935,7 +5488,9 @@ function AppearanceSettings() {
                     id={getSettingsControlAnchorId("roleplay-sprite-scale")}
                     className="flex scroll-mt-3 min-w-0 flex-col gap-1"
                   >
-                    <span className="text-[0.6875rem] font-medium text-[var(--foreground)]">{localizeUi("ui.panels.appearancesettings.defaultSpriteScale")}</span>
+                    <span className="text-[0.6875rem] font-medium text-[var(--foreground)]">
+                      {localizeUi("ui.panels.appearancesettings.defaultSpriteScale")}
+                    </span>
                     <div className="flex items-center gap-2">
                       <input
                         type="range"
@@ -4954,7 +5509,9 @@ function AppearanceSettings() {
                 </div>
               </div>
             </div>
-            <p className="text-[0.625rem] text-[var(--muted-foreground)]">{localizeUi("ui.panels.appearancesettings.rectanglesKeepTheCompactSideSlotButGivePortraits")}</p>
+            <p className="text-[0.625rem] text-[var(--muted-foreground)]">
+              {localizeUi("ui.panels.appearancesettings.rectanglesKeepTheCompactSideSlotButGivePortraits")}
+            </p>
           </div>
         </div>
       </SettingsSection>
@@ -4970,10 +5527,12 @@ function AppearanceSettings() {
             <div className="flex items-center gap-1.5">
               <Image size="0.75rem" className="text-[var(--muted-foreground)]" />
               <span className="text-xs font-medium">{localizeUi("ui.panels.appearancesettings.gameVnArt")}</span>
-              <HelpTooltip text={localizeUi("ui.panels.appearancesettings.scalesGameModeDialoguePortraitsSeparatelyFromTheCenter")} />
+              <HelpTooltip
+                text={localizeUi("ui.panels.appearancesettings.scalesGameModeDialoguePortraitsSeparatelyFromTheCenter")}
+              />
             </div>
             <div className="rounded-lg border border-[var(--border)] bg-[var(--secondary)]/45 p-3">
-              <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+              <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center">
                 <div className="flex h-20 w-full shrink-0 items-end justify-center gap-3 overflow-hidden rounded-md bg-black/30 p-2 ring-1 ring-[var(--border)]/70 sm:w-28">
                   <div
                     className="shrink-0 rounded-lg border border-white/20 bg-gradient-to-b from-sky-300/80 via-cyan-200/65 to-slate-800/90 shadow-lg transition-all"
@@ -4990,12 +5549,14 @@ function AppearanceSettings() {
                     }}
                   />
                 </div>
-                <div className="grid min-w-0 flex-1 gap-3">
+                <div className="grid min-w-0 flex-1 gap-3 sm:min-w-[9rem]">
                   <label
                     id={getSettingsControlAnchorId("game-dialogue-portrait-scale")}
                     className="flex scroll-mt-3 min-w-0 flex-col gap-1"
                   >
-                    <span className="text-[0.6875rem] font-medium text-[var(--foreground)]">{localizeUi("ui.panels.appearancesettings.dialoguePortraitScale")}</span>
+                    <span className="text-[0.6875rem] font-medium text-[var(--foreground)]">
+                      {localizeUi("ui.panels.appearancesettings.dialoguePortraitScale")}
+                    </span>
                     <div className="flex items-center gap-2">
                       <input
                         type="range"
@@ -5015,7 +5576,9 @@ function AppearanceSettings() {
                     id={getSettingsControlAnchorId("game-full-body-sprite-scale")}
                     className="flex scroll-mt-3 min-w-0 flex-col gap-1"
                   >
-                    <span className="text-[0.6875rem] font-medium text-[var(--foreground)]">{localizeUi("ui.panels.appearancesettings.fullBodySpriteScale")}</span>
+                    <span className="text-[0.6875rem] font-medium text-[var(--foreground)]">
+                      {localizeUi("ui.panels.appearancesettings.fullBodySpriteScale")}
+                    </span>
                     <div className="flex items-center gap-2">
                       <input
                         type="range"
@@ -5039,8 +5602,12 @@ function AppearanceSettings() {
           <div className="flex flex-col gap-2">
             <div className="flex items-center gap-1.5">
               <ScrollText size="0.75rem" className="text-[var(--muted-foreground)]" />
-              <span className="text-xs font-medium">{localizeUi("ui.panels.appearancesettings.gameDialogueDisplay")}</span>
-              <HelpTooltip text={localizeUi("ui.panels.appearancesettings.chooseWhetherGameModeUsesAClassicDialogueBox")} />
+              <span className="text-xs font-medium">
+                {localizeUi("ui.panels.appearancesettings.gameDialogueDisplay")}
+              </span>
+              <HelpTooltip
+                text={localizeUi("ui.panels.appearancesettings.chooseWhetherGameModeUsesAClassicDialogueBox")}
+              />
             </div>
             <div
               id={getSettingsControlAnchorId("game-dialogue-display")}
@@ -5086,7 +5653,11 @@ function AppearanceSettings() {
             <div className="flex items-center gap-1.5">
               <CloudRain size="0.75rem" className="text-[var(--muted-foreground)]" />
               <span className="text-xs font-medium">{localizeUi("ui.panels.appearancesettings.effects")}</span>
-              <HelpTooltip text={localizeUi("ui.panels.appearancesettings.visualEffectsThatEnhanceTheRoleplayAtmosphereWeatherParticles")} />
+              <HelpTooltip
+                text={localizeUi(
+                  "ui.panels.appearancesettings.visualEffectsThatEnhanceTheRoleplayAtmosphereWeatherParticles",
+                )}
+              />
             </div>
             <ToggleSetting
               anchorId={getSettingsControlAnchorId("weather-effects")}
@@ -5094,8 +5665,11 @@ function AppearanceSettings() {
               checked={weatherEffects}
               onChange={setWeatherEffects}
             />
-            <p className="text-[0.625rem] text-[var(--muted-foreground)] pl-6">{localizeUi("ui.panels.appearancesettings.showsAnimatedWeatherParticlesBasedOnInStoryWeather")}{" "}
-              <span className="font-medium">{localizeUi("ui.panels.appearancesettings.worldState")}</span> {localizeUi("ui.panels.appearancesettings.agentToBeEnabledSoWeatherDataIsExtracted")}</p>
+            <p className="text-[0.625rem] text-[var(--muted-foreground)] pl-6">
+              {localizeUi("ui.panels.appearancesettings.showsAnimatedWeatherParticlesBasedOnInStoryWeather")}{" "}
+              <span className="font-medium">{localizeUi("ui.panels.appearancesettings.worldState")}</span>{" "}
+              {localizeUi("ui.panels.appearancesettings.agentToBeEnabledSoWeatherDataIsExtracted")}
+            </p>
           </div>
         </div>
       </SettingsSection>
@@ -5112,7 +5686,9 @@ function AppearanceSettings() {
               <div className="flex items-center gap-1.5">
                 <Palette size="0.75rem" className="text-[var(--muted-foreground)]" />
                 <span className="text-xs font-medium">{localizeUi("settings.sections.conversationTheme.title")}</span>
-                <HelpTooltip text={localizeUi("ui.panels.appearancesettings.setABackgroundGradientForAllConversationModeChats")} />
+                <HelpTooltip
+                  text={localizeUi("ui.panels.appearancesettings.setABackgroundGradientForAllConversationModeChats")}
+                />
               </div>
               {/* Scheme tabs */}
               <div className="flex rounded-lg bg-[var(--secondary)] p-0.5 text-[0.625rem]">
@@ -5125,7 +5701,9 @@ function AppearanceSettings() {
                       ? "mari-accent-animated bg-[var(--accent)] text-[var(--primary)] shadow-sm ring-1 ring-[var(--primary)]/25"
                       : "text-[var(--muted-foreground)] hover:text-[var(--foreground)]",
                   )}
-                >{localizeUi("ui.panels.appearancesettings.dark")}</button>
+                >
+                  {localizeUi("ui.panels.appearancesettings.dark")}
+                </button>
                 <button
                   type="button"
                   onClick={() => setActiveGradientScheme("light")}
@@ -5135,7 +5713,9 @@ function AppearanceSettings() {
                       ? "mari-accent-animated bg-[var(--accent)] text-[var(--primary)] shadow-sm ring-1 ring-[var(--primary)]/25"
                       : "text-[var(--muted-foreground)] hover:text-[var(--foreground)]",
                   )}
-                >{localizeUi("ui.panels.appearancesettings.light")}</button>
+                >
+                  {localizeUi("ui.panels.appearancesettings.light")}
+                </button>
               </div>
             </div>
             {/* Preview */}
@@ -5208,7 +5788,13 @@ function AppearanceSettings() {
                 setDraftTo(defaults.to);
               }}
               className="text-[0.625rem] text-[var(--muted-foreground)] hover:text-[var(--foreground)] transition-colors self-start"
-            >{localizeUi("ui.panels.imagestyleprofileseditor.reset")} {activeGradientScheme === "dark" ?localizeUi("ui.panels.appearancesettings.dark") :localizeUi("ui.panels.appearancesettings.light")} {localizeUi("ui.panels.appearancesettings.toDefault")}</button>
+            >
+              {localizeUi("ui.panels.imagestyleprofileseditor.reset")}{" "}
+              {activeGradientScheme === "dark"
+                ? localizeUi("ui.panels.appearancesettings.dark")
+                : localizeUi("ui.panels.appearancesettings.light")}{" "}
+              {localizeUi("ui.panels.appearancesettings.toDefault")}
+            </button>
           </div>
         </div>
       </SettingsSection>
@@ -5221,11 +5807,18 @@ function AppearanceSettings() {
       >
         <div className="flex flex-col gap-3">
           <div className="flex flex-col gap-2">
-            <span className="text-xs font-medium inline-flex items-center gap-1">{localizeUi("ui.panels.appearancesettings.chatBackground")}{" "}
+            <span className="text-xs font-medium inline-flex items-center gap-1">
+              {localizeUi("ui.panels.appearancesettings.chatBackground")}{" "}
               <HelpTooltip text={localizeUi("ui.panels.appearancesettings.importOneOrMoreCustomImagesOrChooseFrom")} />
             </span>
             <label className="flex flex-col gap-1 rounded-lg bg-[var(--secondary)]/45 p-3 ring-1 ring-[var(--border)]/70">
-              <span className="inline-flex items-center gap-1 text-[0.6875rem] font-medium">{localizeUi("ui.panels.appearancesettings.backgroundBlur")}<HelpTooltip text={localizeUi("ui.panels.appearancesettings.softensSelectedRoleplayAndGameModeBackgroundImagesBehind")} />
+              <span className="inline-flex items-center gap-1 text-[0.6875rem] font-medium">
+                {localizeUi("ui.panels.appearancesettings.backgroundBlur")}
+                <HelpTooltip
+                  text={localizeUi(
+                    "ui.panels.appearancesettings.softensSelectedRoleplayAndGameModeBackgroundImagesBehind",
+                  )}
+                />
               </span>
               <div className="flex items-center gap-3">
                 <input
@@ -5238,14 +5831,18 @@ function AppearanceSettings() {
                   className="min-w-0 flex-1 accent-[var(--primary)]"
                 />
                 <span className="w-12 text-right text-xs tabular-nums text-[var(--muted-foreground)]">
-                  {chatBackgroundBlur === 0 ?localizeUi("ui.panels.appearancesettings.off") :localizeUi("ui.panels.appearancesettings.value1Px", { value1: chatBackgroundBlur })}
+                  {chatBackgroundBlur === 0
+                    ? localizeUi("ui.panels.appearancesettings.off")
+                    : localizeUi("ui.panels.appearancesettings.value1Px", { value1: chatBackgroundBlur })}
                 </span>
               </div>
             </label>
             <label className="flex items-center gap-2">
               <span className="inline-flex shrink-0 items-center gap-1 text-[0.6875rem] font-medium">
                 {localizeUi("ui.panels.appearancesettings.chatListBackgrounds")}
-                <HelpTooltip text={localizeUi("ui.panels.appearancesettings.showsEachChatsOwnBackgroundAsAMutedBanner")} />
+                <HelpTooltip
+                  text={localizeUi("ui.panels.appearancesettings.showsEachChatsOwnBackgroundAsAMutedBanner")}
+                />
               </span>
               <select
                 id={getSettingsControlAnchorId("chat-list-backgrounds")}
@@ -5254,7 +5851,9 @@ function AppearanceSettings() {
                 className="h-7 min-w-0 flex-1 scroll-mt-3 rounded-md border border-[var(--border)] bg-[var(--secondary)] px-2 text-xs"
               >
                 {CHAT_LIST_BACKGROUND_OPTIONS.map((opt) => (
-                  <option key={opt.id} value={opt.id}>{opt.label}</option>
+                  <option key={opt.id} value={opt.id}>
+                    {opt.label}
+                  </option>
                 ))}
               </select>
             </label>
@@ -5286,16 +5885,24 @@ function GenerationsSettings() {
 
   return (
     <div className="flex flex-col gap-3">
-      <SettingsIntro>{localizeUi("ui.panels.generationssettings.globalDefaultsForGeneratedImagesVideosAndReusablePrompt")}</SettingsIntro>
+      <SettingsIntro>
+        {localizeUi("ui.panels.generationssettings.globalDefaultsForGeneratedImagesVideosAndReusablePrompt")}
+      </SettingsIntro>
 
       {isLoading ? (
         <div className="flex items-center justify-center gap-2 rounded-xl border border-[var(--marinara-chat-chrome-panel-border)] bg-[var(--marinara-chat-chrome-highlight-bg)] px-4 py-8 text-xs text-[var(--marinara-chat-chrome-panel-muted)]">
-          <Loader2 size="1rem" className="animate-spin" />{localizeUi("ui.panels.generationssettings.checkingInstalledAgents")}</div>
+          <Loader2 size="1rem" className="animate-spin" />
+          {localizeUi("ui.panels.generationssettings.checkingInstalledAgents")}
+        </div>
       ) : !illustratorInstalled ? (
         <div className="flex flex-col items-center gap-3 rounded-xl border border-[var(--marinara-chat-chrome-panel-border)] bg-[var(--marinara-chat-chrome-highlight-bg)] px-5 py-8 text-center">
           <WandSparkles size="1.5rem" className="text-[var(--marinara-chat-chrome-highlight-text)]" />
-          <p className="max-w-md text-xs leading-relaxed text-[var(--marinara-chat-chrome-panel-text)]">{localizeUi("ui.panels.generationssettings.downloadIllustratorAgentFirstFromAgentsTabToEnable")}</p>
-          <button type="button" onClick={openDownloadAgents} className={SETTINGS_PRIMARY_BUTTON_CLASS}>{localizeUi("ui.panels.generationssettings.downloadIllustratorAgent")}</button>
+          <p className="max-w-md text-xs leading-relaxed text-[var(--marinara-chat-chrome-panel-text)]">
+            {localizeUi("ui.panels.generationssettings.downloadIllustratorAgentFirstFromAgentsTabToEnable")}
+          </p>
+          <button type="button" onClick={openDownloadAgents} className={SETTINGS_PRIMARY_BUTTON_CLASS}>
+            {localizeUi("ui.panels.generationssettings.downloadIllustratorAgent")}
+          </button>
         </div>
       ) : (
         <>
@@ -5305,8 +5912,12 @@ function GenerationsSettings() {
           <div id={getSettingsSectionAnchorId("prompt-overrides")} className="flex flex-col gap-3">
             <div className="flex items-center justify-between gap-2 rounded-lg border border-[var(--border)]/70 bg-[var(--background)]/35 px-3 py-2">
               <div className="min-w-0">
-                <div className="text-xs font-semibold text-[var(--foreground)]">{localizeUi("settings.sections.promptOverrides.title")}</div>
-                <div className="mt-0.5 text-[0.625rem] text-[var(--muted-foreground)]">{localizeUi("settings.sections.promptOverrides.description")}</div>
+                <div className="text-xs font-semibold text-[var(--foreground)]">
+                  {localizeUi("settings.sections.promptOverrides.title")}
+                </div>
+                <div className="mt-0.5 text-[0.625rem] text-[var(--muted-foreground)]">
+                  {localizeUi("settings.sections.promptOverrides.description")}
+                </div>
               </div>
             </div>
             <PromptOverridesEditor
@@ -5334,13 +5945,17 @@ function AddonsSettings() {
   const { data: extensionPolicy } = usePersonalExtensionPolicy();
   return (
     <div className="flex flex-col gap-3">
-      <SettingsIntro>{localizeUi("ui.panels.addonssettings.privateCustomBehaviorAndAppearanceSyncedByThisMarinara")}</SettingsIntro>
+      <SettingsIntro>
+        {localizeUi("ui.panels.addonssettings.privateCustomBehaviorAndAppearanceSyncedByThisMarinara")}
+      </SettingsIntro>
       <PersonalExtensionsSettings showIntro={false} />
       {extensionPolicy?.externalExtensionsEnabled && <ExternalExtensionsSettings />}
       <ThemesSettings showIntro={false} />
     </div>
   );
 }
+
+const THEME_PREVIEW_DEBOUNCE_MS = 300;
 
 function ThemesSettings({ showIntro = true }: { showIntro?: boolean } = {}) {
   const { t: localizeUi } = useUiTranslation();
@@ -5359,26 +5974,39 @@ function ThemesSettings({ showIntro = true }: { showIntro?: boolean } = {}) {
   const [themeCss, setThemeCss] = useState("");
   const [livePreview, setLivePreview] = useState(true);
 
-  // Inject live preview CSS
+  // Replacing a dense app-level stylesheet invalidates styles across the full
+  // document. Keep typing immediate and apply only the settled preview instead
+  // of forcing that work for every character entered.
   useEffect(() => {
+    const previewStyleId = "marinara-css-editor-preview";
+    const existingStyle = document.getElementById(previewStyleId) as HTMLStyleElement | null;
+
     if (!editorOpen || !livePreview) {
-      const el = document.getElementById("marinara-css-editor-preview");
-      if (el) el.textContent = "";
+      existingStyle?.remove();
       return;
     }
-    let style = document.getElementById("marinara-css-editor-preview") as HTMLStyleElement | null;
-    if (!style) {
-      style = document.createElement("style");
-      style.id = "marinara-css-editor-preview";
+
+    const style = existingStyle ?? document.createElement("style");
+    if (!existingStyle) {
+      style.id = previewStyleId;
+      document.head.appendChild(style);
     }
-    style.textContent = sanitizeAppCss(themeCss);
-    // Always (re-)append so it's the last <style> in <head>,
-    // overriding the active-theme injector's saved CSS.
-    document.head.appendChild(style);
-    return () => {
-      style!.textContent = "";
-    };
+
+    const previewTimeout = window.setTimeout(() => {
+      style.textContent = sanitizeAppCss(themeCss);
+      // Keep the preview after the active-theme injector's saved CSS.
+      document.head.appendChild(style);
+    }, THEME_PREVIEW_DEBOUNCE_MS);
+
+    return () => window.clearTimeout(previewTimeout);
   }, [editorOpen, livePreview, themeCss]);
+
+  useEffect(
+    () => () => {
+      document.getElementById("marinara-css-editor-preview")?.remove();
+    },
+    [],
+  );
 
   const openNewTheme = useCallback(() => {
     setEditingId(null);
@@ -5512,7 +6140,7 @@ function ThemesSettings({ showIntro = true }: { showIntro?: boolean } = {}) {
       console.error("[ThemesSettings] Failed to import theme:", err);
       toast.error(
         err instanceof SyntaxError
-          ?localizeUi("ui.panels.themessettings.failedToImportThemeTheJsonCouldNotBe")
+          ? localizeUi("ui.panels.themessettings.failedToImportThemeTheJsonCouldNotBe")
           : getPrivilegedActionErrorMessage(
               err,
               localizeUi("ui.panels.themessettings.failedToImportThemeEnsureValidFile"),
@@ -5533,7 +6161,11 @@ function ThemesSettings({ showIntro = true }: { showIntro?: boolean } = {}) {
             >
               <X size="0.875rem" />
             </button>
-            <span className="text-xs font-semibold">{editingId ?localizeUi("ui.panels.themessettings.editTheme") :localizeUi("ui.panels.themessettings.newTheme")}</span>
+            <span className="text-xs font-semibold">
+              {editingId
+                ? localizeUi("ui.panels.themessettings.editTheme")
+                : localizeUi("ui.panels.themessettings.newTheme")}
+            </span>
           </div>
           <div className="flex items-center gap-1.5">
             <button
@@ -5544,12 +6176,20 @@ function ThemesSettings({ showIntro = true }: { showIntro?: boolean } = {}) {
                   ? "bg-emerald-500/15 text-emerald-400"
                   : "bg-[var(--secondary)] text-[var(--muted-foreground)]",
               )}
-              title={livePreview ?localizeUi("ui.panels.themessettings.disableLivePreview") :localizeUi("ui.panels.themessettings.enableLivePreview")}
+              title={
+                livePreview
+                  ? localizeUi("ui.panels.themessettings.disableLivePreview")
+                  : localizeUi("ui.panels.themessettings.enableLivePreview")
+              }
             >
-              {livePreview ? <Eye size="0.6875rem" /> : <EyeOff size="0.6875rem" />}{localizeUi("settings.notifications.customSound.actions.preview")}</button>
+              {livePreview ? <Eye size="0.6875rem" /> : <EyeOff size="0.6875rem" />}
+              {localizeUi("settings.notifications.customSound.actions.preview")}
+            </button>
             <button onClick={handleSave} disabled={isSavingTheme} className={SETTINGS_COMPACT_PRIMARY_BUTTON_CLASS}>
               {isSavingTheme ? <Loader2 size="0.6875rem" className="animate-spin" /> : <Save size="0.6875rem" />}
-              {isSavingTheme ?localizeUi("ui.noodle.stageprofileform.saving") :localizeUi("ui.noodle.noodlehome.save")}
+              {isSavingTheme
+                ? localizeUi("ui.noodle.stageprofileform.saving")
+                : localizeUi("ui.noodle.noodlehome.save")}
             </button>
           </div>
         </div>
@@ -5574,7 +6214,9 @@ function ThemesSettings({ showIntro = true }: { showIntro?: boolean } = {}) {
 
         {/* Quick reference */}
         <details className="group rounded-lg bg-[var(--secondary)]/50 ring-1 ring-[var(--border)]">
-          <summary className="cursor-pointer px-3 py-2 text-[0.625rem] font-medium text-[var(--muted-foreground)] transition-colors hover:text-[var(--foreground)]">{localizeUi("ui.panels.themessettings.cssVariableReference")}</summary>
+          <summary className="cursor-pointer px-3 py-2 text-[0.625rem] font-medium text-[var(--muted-foreground)] transition-colors hover:text-[var(--foreground)]">
+            {localizeUi("ui.panels.themessettings.cssVariableReference")}
+          </summary>
           <div className="border-t border-[var(--border)] px-3 py-2 font-mono text-[0.625rem] leading-relaxed text-[var(--muted-foreground)]">
             <div className="grid grid-cols-2 gap-x-4 gap-y-0.5">
               <span>{localizeUi("ui.panels.themessettings.background")}</span>
@@ -5616,7 +6258,9 @@ function ThemesSettings({ showIntro = true }: { showIntro?: boolean } = {}) {
   return (
     <div className="flex flex-col gap-3">
       {showIntro && (
-        <SettingsIntro>{localizeUi("ui.panels.themessettings.createOrImportCustomCssThemesThemesSyncAcross")}</SettingsIntro>
+        <SettingsIntro>
+          {localizeUi("ui.panels.themessettings.createOrImportCustomCssThemesThemesSyncAcross")}
+        </SettingsIntro>
       )}
 
       <SettingsSection
@@ -5632,7 +6276,8 @@ function ThemesSettings({ showIntro = true }: { showIntro?: boolean } = {}) {
               onClick={openNewTheme}
               className="flex flex-1 items-center justify-center gap-1.5 rounded-lg border-2 border-dashed border-[var(--primary)]/30 bg-[var(--primary)]/5 p-3 text-xs text-[var(--primary)] transition-all hover:border-[var(--primary)]/50 hover:bg-[var(--primary)]/10"
             >
-              <Plus size="0.875rem" /> {localizeUi("ui.panels.themessettings.createTheme")}</button>
+              <Plus size="0.875rem" /> {localizeUi("ui.panels.themessettings.createTheme")}
+            </button>
             <button
               onClick={() => {
                 triggerFilePicker({
@@ -5645,7 +6290,8 @@ function ThemesSettings({ showIntro = true }: { showIntro?: boolean } = {}) {
               }}
               className="flex flex-1 items-center justify-center gap-1.5 rounded-lg border-2 border-dashed border-[var(--border)] p-3 text-xs text-[var(--muted-foreground)] transition-all hover:border-[var(--primary)]/40 hover:bg-[var(--secondary)]/50"
             >
-              <Download size="0.875rem" /> {localizeUi("ui.panels.themessettings.importFile")}</button>
+              <Download size="0.875rem" /> {localizeUi("ui.panels.themessettings.importFile")}
+            </button>
           </div>
 
           {/* Active theme: None option */}
@@ -5661,13 +6307,15 @@ function ThemesSettings({ showIntro = true }: { showIntro?: boolean } = {}) {
                 })
               }
               className={cn(
-                "flex items-center gap-2 rounded-lg px-3 py-2 text-xs transition-all",
+                "flex items-center gap-2 rounded-md px-3 py-2 text-xs transition-all",
                 activeCustomTheme === null
                   ? "bg-[var(--primary)]/15 text-[var(--primary)] ring-1 ring-[var(--primary)]/30"
                   : "bg-[var(--secondary)] text-[var(--muted-foreground)] hover:bg-[var(--accent)]",
               )}
             >
-              <Palette size="0.75rem" className="mari-chrome-accent-icon" />{localizeUi("ui.panels.themessettings.defaultTheme")}{activeCustomTheme === null && <Check size="0.75rem" className="mari-chrome-accent-icon ml-auto" />}
+              <Palette size="0.75rem" className="mari-chrome-accent-icon" />
+              {localizeUi("ui.panels.themessettings.defaultTheme")}
+              {activeCustomTheme === null && <Check size="0.75rem" className="mari-chrome-accent-icon ml-auto" />}
             </button>
 
             {/* Custom theme list */}
@@ -5735,9 +6383,12 @@ function ThemesSettings({ showIntro = true }: { showIntro?: boolean } = {}) {
                   onClick={() => {
                     void (async () => {
                       const confirmed = await showConfirmDialog({
-                        title:localizeUi("ui.panels.themessettings.deleteTheme"),
-                        message:localizeUi("ui.panels.themessettings.deleteValue1ThisPermanentlyRemovesTheSavedThemeCss", { value1: t.name }),
-                        confirmLabel:localizeUi("lorebook.editor.batch.delete"),
+                        title: localizeUi("ui.panels.themessettings.deleteTheme"),
+                        message: localizeUi(
+                          "ui.panels.themessettings.deleteValue1ThisPermanentlyRemovesTheSavedThemeCss",
+                          { value1: t.name },
+                        ),
+                        confirmLabel: localizeUi("lorebook.editor.batch.delete"),
                         tone: "destructive",
                       });
                       if (!confirmed) return;
@@ -5759,25 +6410,33 @@ function ThemesSettings({ showIntro = true }: { showIntro?: boolean } = {}) {
             ))}
 
             {isLoading && syncedThemes.length === 0 && (
-              <p className="mari-chrome-text-muted py-2 text-center text-[0.625rem]">{localizeUi("ui.panels.themessettings.loadingSyncedThemes")}</p>
+              <p className="mari-chrome-text-muted py-2 text-center text-[0.625rem]">
+                {localizeUi("ui.panels.themessettings.loadingSyncedThemes")}
+              </p>
             )}
 
             {!isLoading && syncedThemes.length === 0 && (
-              <p className="mari-chrome-text-muted py-2 text-center text-[0.625rem]">{localizeUi("ui.panels.themessettings.noSyncedCustomThemesYetCreateOneOrImport")}</p>
+              <p className="mari-chrome-text-muted py-2 text-center text-[0.625rem]">
+                {localizeUi("ui.panels.themessettings.noSyncedCustomThemesYetCreateOneOrImport")}
+              </p>
             )}
           </div>
 
           {/* Info box */}
           <div className="rounded-lg bg-[var(--secondary)]/50 p-2.5 text-[0.625rem] text-[var(--muted-foreground)] ring-1 ring-[var(--border)]">
-            <strong>{localizeUi("ui.panels.themessettings.tip")}</strong> {localizeUi("ui.panels.themessettings.cssThemesCanOverrideAnyCssVariableEG")}{" "}
+            <strong>{localizeUi("ui.panels.themessettings.tip")}</strong>{" "}
+            {localizeUi("ui.panels.themessettings.cssThemesCanOverrideAnyCssVariableEG")}{" "}
             <code className="rounded bg-[var(--secondary)] px-1">{"--background"}</code>,{" "}
             <code className="rounded bg-[var(--secondary)] px-1">{"--primary"}</code>,{" "}
             <code className="rounded bg-[var(--secondary)] px-1">{"--marinara-app-accent-solid"}</code>,{" "}
             <code className="rounded bg-[var(--secondary)] px-1">{"--marinara-theme-accent-pulse"}</code>,{" "}
             <code className="rounded bg-[var(--secondary)] px-1">{"--marinara-chat-chrome-accent"}</code>,{" "}
             <code className="rounded bg-[var(--secondary)] px-1">{"--marinara-chat-chrome-accent-gradient"}</code>,{" "}
-            <code className="rounded bg-[var(--secondary)] px-1">{"--marinara-chat-chrome-surface-bg"}</code>{localizeUi("ui.panels.themessettings.orAddCustomStylesJsonThemesShouldHave")}{" "}
-            <code className="rounded bg-[var(--secondary)] px-1">{"{ \"name\": \"...\", \"css\": \"...\" }"}</code> {localizeUi("ui.panels.themessettings.formatImportedThemeFilesSyncToThisMarinaraServer")}</div>
+            <code className="rounded bg-[var(--secondary)] px-1">{"--marinara-chat-chrome-surface-bg"}</code>
+            {localizeUi("ui.panels.themessettings.orAddCustomStylesJsonThemesShouldHave")}{" "}
+            <code className="rounded bg-[var(--secondary)] px-1">{'{ "name": "...", "css": "..." }'}</code>{" "}
+            {localizeUi("ui.panels.themessettings.formatImportedThemeFilesSyncToThisMarinaraServer")}
+          </div>
         </div>
       </SettingsSection>
     </div>
@@ -5921,13 +6580,10 @@ type ProfileImportStats = {
   chats?: number;
   messages?: number;
   connections?: number;
+  customTools?: number;
+  mariInstructions?: number;
+  personalExtensions?: number;
   files?: number;
-};
-
-type ProfileImportWarning = {
-  type?: string;
-  path?: string;
-  message?: string;
 };
 
 type ProfileImportProgressData = {
@@ -5999,7 +6655,7 @@ function getProfileImportPercent(progress: ProfileImportProgressState) {
   return Math.min(99, Math.max(progress.status === "running" ? 8 : 0, percent));
 }
 
-function formatProfileImportStats(stats?: ProfileImportStats) {
+function formatProfileImportStats(stats: ProfileImportStats | undefined, localizeUi: TFunction) {
   if (!stats) return "";
   const entries: Array<[number | undefined, string]> = [
     [stats.characters, "characters"],
@@ -6011,6 +6667,9 @@ function formatProfileImportStats(stats?: ProfileImportStats) {
     [stats.chats, "chats"],
     [stats.messages, "messages"],
     [stats.connections, "connections"],
+    [stats.customTools, localizeUi("ui.panels.importsettings.customTools")],
+    [stats.mariInstructions, localizeUi("ui.panels.importsettings.professorMariMemories")],
+    [stats.personalExtensions, localizeUi("ui.panels.importsettings.personalExtensions")],
     [stats.files, "files"],
   ];
   return entries
@@ -6031,9 +6690,22 @@ function getProfileImportItemCount(stats?: ProfileImportStats) {
     stats.chats,
     stats.messages,
     stats.connections,
+    stats.customTools,
+    stats.mariInstructions,
+    stats.personalExtensions,
     stats.files,
   ];
   return counts.reduce<number>((total, count) => total + (typeof count === "number" && count > 0 ? count : 0), 0);
+}
+
+function getProfileImportWarningCopy(localizeUi: TFunction): ProfileImportWarningCopy {
+  return {
+    missingAssetSummary: (count) => localizeUi("ui.panels.importsettings.profileImportMissingAssets", { count }),
+    securityWarningSummary: (count) => localizeUi("ui.panels.importsettings.profileImportSecurityWarnings", { count }),
+    missingLabel: localizeUi("ui.panels.importsettings.profileImportMissingLabel"),
+    additionalPaths: (count) => localizeUi("ui.panels.importsettings.profileImportAdditionalPaths", { count }),
+    additionalMessages: (count) => localizeUi("ui.panels.importsettings.profileImportAdditionalMessages", { count }),
+  };
 }
 
 function getProfileImportErrorMessage(data: unknown) {
@@ -6046,41 +6718,13 @@ function getProfileImportErrorMessage(data: unknown) {
   return "Unknown error";
 }
 
-function normalizeProfileImportWarnings(warnings: unknown): ProfileImportWarning[] {
-  if (!Array.isArray(warnings)) return [];
-  return warnings.flatMap((warning) => {
-    if (!warning || typeof warning !== "object") return [];
-    const record = warning as { type?: unknown; path?: unknown; message?: unknown };
-    const path = typeof record.path === "string" ? record.path : undefined;
-    const message = typeof record.message === "string" ? record.message : undefined;
-    const type = typeof record.type === "string" ? record.type : undefined;
-    if (!path && !message) return [];
-    return [{ type, path, message }];
-  });
-}
-
-function formatProfileImportWarningSummary(warnings: ProfileImportWarning[]) {
-  const missingAssets = warnings.filter((warning) => warning.type === "missing_asset" || warning.path);
-  if (missingAssets.length > 0) {
-    return `${missingAssets.length} asset file${missingAssets.length === 1 ? "" : "s"} missing from the ZIP. Imported the rest.`;
-  }
-  return `${warnings.length} import warning${warnings.length === 1 ? "" : "s"}.`;
-}
-
-function formatProfileImportWarningDetails(warnings: ProfileImportWarning[]) {
-  const paths = warnings.map((warning) => warning.path).filter((path): path is string => !!path);
-  if (paths.length === 0) return warnings[0]?.message ?? "";
-  const visible = paths.slice(0, 3).join(", ");
-  const extra = paths.length > 3 ? `, +${paths.length - 3} more` : "";
-  return `Missing: ${visible}${extra}`;
-}
-
-function formatProfileImportConfirmationMessage(preview: ProfileImportPreviewResult) {
+function formatProfileImportConfirmationMessage(preview: ProfileImportPreviewResult, localizeUi: TFunction) {
   const warnings = normalizeProfileImportWarnings(preview.warnings);
-  const found = formatProfileImportStats(preview.imported) || "no counted records";
+  const found = formatProfileImportStats(preview.imported, localizeUi) || "no counted records";
+  const warningCopy = getProfileImportWarningCopy(localizeUi);
   const warningDetail =
     warnings.length > 0
-      ? `${formatProfileImportWarningSummary(warnings)} ${formatProfileImportWarningDetails(warnings)}`
+      ? `${formatProfileImportWarningSummary(warnings, warningCopy)} ${formatProfileImportWarningDetails(warnings, warningCopy)}`
       : "";
   return [
     `Found: ${found}.`,
@@ -6161,6 +6805,7 @@ async function* readProfileImportStream(res: Response): AsyncGenerator<ProfileIm
 
 function ImportSettings() {
   const { t: localizeUi } = useUiTranslation();
+  const profileImportWarningCopy = getProfileImportWarningCopy(localizeUi);
   const openModal = useUIStore((s) => s.openModal);
   const qc = useQueryClient();
   const setActiveChatId = useChatStore((s) => s.setActiveChatId);
@@ -6264,9 +6909,9 @@ function ImportSettings() {
       });
 
       const confirmed = await showConfirmDialog({
-        title:localizeUi("ui.panels.importsettings.importProfile"),
-        message: formatProfileImportConfirmationMessage(preview),
-        confirmLabel:localizeUi("ui.chat.chatbranchselector.import"),
+        title: localizeUi("ui.panels.importsettings.importProfile"),
+        message: formatProfileImportConfirmationMessage(preview, localizeUi),
+        confirmLabel: localizeUi("ui.chat.chatbranchselector.import"),
         cancelLabel: "Cancel",
         tone: "destructive",
       });
@@ -6351,12 +6996,15 @@ function ImportSettings() {
           qc.invalidateQueries();
           const imported = event.data?.imported;
           const warnings = normalizeProfileImportWarnings(event.data?.warnings);
-          const summary = formatProfileImportStats(imported);
+          const summary = formatProfileImportStats(imported, localizeUi);
           setProfileImportProgress((current) => {
             const totalItems = Math.max(1, current?.totalItems ?? 1);
             return {
               status: "success",
-              label: warnings.length > 0 ? "Profile import complete with missing assets" : "Profile import complete",
+              label:
+                warnings.length > 0
+                  ? localizeUi("ui.panels.importsettings.profileImportCompleteWithWarnings")
+                  : "Profile import complete",
               completedItems: totalItems,
               totalItems,
               startedAt,
@@ -6366,10 +7014,21 @@ function ImportSettings() {
             };
           });
           if (warnings.length > 0) {
-            const warningSummary = formatProfileImportWarningSummary(warnings);
-            toast.warning(summary ?localizeUi("ui.panels.importsettings.importedValue1Value2", { value1: summary, value2: warningSummary }) : warningSummary);
+            const warningSummary = formatProfileImportWarningSummary(warnings, profileImportWarningCopy);
+            toast.warning(
+              summary
+                ? localizeUi("ui.panels.importsettings.importedValue1Value2", {
+                    value1: summary,
+                    value2: warningSummary,
+                  })
+                : warningSummary,
+            );
           } else {
-            toast.success(summary ?localizeUi("ui.panels.importsettings.importedValue1", { value1: summary }) :localizeUi("ui.panels.importsettings.profileImported"));
+            toast.success(
+              summary
+                ? localizeUi("ui.panels.importsettings.importedValue1", { value1: summary })
+                : localizeUi("ui.panels.importsettings.profileImported"),
+            );
           }
         }
       }
@@ -6397,7 +7056,9 @@ function ImportSettings() {
 
   return (
     <div className="flex flex-col gap-3">
-      <SettingsIntro>{localizeUi("ui.panels.importsettings.importDataFromMarinaraExportsSillytavernOrAssetFolders")}</SettingsIntro>
+      <SettingsIntro>
+        {localizeUi("ui.panels.importsettings.importDataFromMarinaraExportsSillytavernOrAssetFolders")}
+      </SettingsIntro>
 
       <SettingsSection
         title={localizeUi("settings.sections.profileMarinara.title")}
@@ -6416,9 +7077,9 @@ function ImportSettings() {
             {profileImportBusy ? <Loader2 size="1rem" className="animate-spin" /> : <Download size="1rem" />}
             {profileImportBusy
               ? profileImportProgress?.status === "reading" || profileImportProgress?.status === "preview"
-                ?localizeUi("ui.panels.importsettings.scanningProfile")
-                :localizeUi("ui.panels.importsettings.importingProfile")
-              :localizeUi("ui.panels.importsettings.importProfileJsonZip")}
+                ? localizeUi("ui.panels.importsettings.scanningProfile")
+                : localizeUi("ui.panels.importsettings.importingProfile")
+              : localizeUi("ui.panels.importsettings.importProfileJsonZip")}
             <input
               type="file"
               accept=".json,.zip,application/json,application/zip"
@@ -6478,27 +7139,32 @@ function ImportSettings() {
                   </div>
                   <div className="flex flex-wrap items-center justify-between gap-2 text-[0.6875rem] text-[var(--muted-foreground)]">
                     <span>
-                      {profileImportProgress.completedItems}/{profileImportProgress.totalItems} {localizeUi("ui.panels.importsettings.items")}</span>
+                      {profileImportProgress.completedItems}/{profileImportProgress.totalItems}{" "}
+                      {localizeUi("ui.panels.importsettings.items")}
+                    </span>
                     {estimateProfileImportRemainingSeconds(profileImportProgress) !== null && (
-                      <span>{localizeUi("ui.panels.importsettings.eta")}{" "}
+                      <span>
+                        {localizeUi("ui.panels.importsettings.eta")}{" "}
                         {formatProfileImportDuration(estimateProfileImportRemainingSeconds(profileImportProgress) ?? 0)}
                       </span>
                     )}
                   </div>
-                  {formatProfileImportStats(profileImportProgress.imported) && (
+                  {formatProfileImportStats(profileImportProgress.imported, localizeUi) && (
                     <div className="text-[0.6875rem] text-[var(--muted-foreground)]">
-                      {profileImportProgress.status === "preview" ?localizeUi("ui.panels.importsettings.found") :localizeUi("ui.panels.importsettings.importedSoFar")}:{" "}
-                      {formatProfileImportStats(profileImportProgress.imported)}
+                      {profileImportProgress.status === "preview"
+                        ? localizeUi("ui.panels.importsettings.found")
+                        : localizeUi("ui.panels.importsettings.importedSoFar")}
+                      : {formatProfileImportStats(profileImportProgress.imported, localizeUi)}
                     </div>
                   )}
                   {profileImportProgress.warnings?.length ? (
                     <div className="rounded-md border border-amber-500/30 bg-amber-500/10 px-2 py-1.5 text-[0.6875rem] text-amber-700 dark:text-amber-200">
                       <div className="font-medium">
-                        {formatProfileImportWarningSummary(profileImportProgress.warnings)}
+                        {formatProfileImportWarningSummary(profileImportProgress.warnings, profileImportWarningCopy)}
                       </div>
-                      {formatProfileImportWarningDetails(profileImportProgress.warnings) && (
+                      {formatProfileImportWarningDetails(profileImportProgress.warnings, profileImportWarningCopy) && (
                         <div className="mt-0.5 break-words text-amber-700/80 dark:text-amber-100/80">
-                          {formatProfileImportWarningDetails(profileImportProgress.warnings)}
+                          {formatProfileImportWarningDetails(profileImportProgress.warnings, profileImportWarningCopy)}
                         </div>
                       )}
                     </div>
@@ -6525,7 +7191,9 @@ function ImportSettings() {
             onClick={() => openModal("st-bulk-import")}
             className={cn(SETTINGS_PRIMARY_BUTTON_CLASS, "w-full gap-2")}
           >
-            <Download size="1rem" />{localizeUi("ui.panels.importsettings.importFromSillytavernFolder")}</button>
+            <Download size="1rem" />
+            {localizeUi("ui.panels.importsettings.importFromSillytavernFolder")}
+          </button>
 
           <div className="flex flex-col gap-2">
             <ImportButton
@@ -6544,8 +7212,18 @@ function ImportSettings() {
                 if (data.chatId) setActiveChatId(data.chatId);
               }}
             />
-            <ImportButton label={localizeUi("settings.transfer.importPreset")} accept=".json" endpoint="/import/st-preset" mode="json" />
-            <ImportButton label={localizeUi("settings.transfer.importLorebook")} accept=".json" endpoint="/import/st-lorebook" mode="json" />
+            <ImportButton
+              label={localizeUi("settings.transfer.importPreset")}
+              accept=".json"
+              endpoint="/import/st-preset"
+              mode="json"
+            />
+            <ImportButton
+              label={localizeUi("settings.transfer.importLorebook")}
+              accept=".json"
+              endpoint="/import/st-lorebook"
+              mode="json"
+            />
           </div>
         </div>
       </SettingsSection>
@@ -6625,7 +7303,11 @@ function ImportButton({
           toast.success(localizeUi("ui.panels.importbutton.importedSuccessfully"));
         }
       } else {
-        toast.error(localizeUi("ui.panels.importbutton.importFailedValue1", { value1: data.error ??localizeUi("ui.panels.importbutton.unknownError") }));
+        toast.error(
+          localizeUi("ui.panels.importbutton.importFailedValue1", {
+            value1: data.error ?? localizeUi("ui.panels.importbutton.unknownError"),
+          }),
+        );
       }
     } catch {
       toast.error(localizeUi("chat.branches.importFailed"));
@@ -6657,7 +7339,9 @@ function ManualUpdateCommand({ command }: { command: string }) {
       className="min-w-0 rounded-md bg-[var(--background)]/70 p-2 ring-1 ring-[var(--border)]"
     >
       <div className="mb-1.5 flex items-center justify-between gap-2">
-        <span className="text-[0.625rem] font-semibold uppercase tracking-wide text-[var(--muted-foreground)]">{localizeUi("ui.panels.manualupdatecommand.manualUpdate")}</span>
+        <span className="text-[0.625rem] font-semibold uppercase tracking-wide text-[var(--muted-foreground)]">
+          {localizeUi("ui.panels.manualupdatecommand.manualUpdate")}
+        </span>
         <button
           type="button"
           onClick={() => void handleCopy()}
@@ -6665,7 +7349,7 @@ function ManualUpdateCommand({ command }: { command: string }) {
           aria-label={localizeUi("settings.actions.copyUpdateCommand")}
         >
           {copied ? <Check size="0.6875rem" /> : <Copy size="0.6875rem" />}
-          {copied ?localizeUi("ui.panels.manualupdatecommand.copied") :localizeUi("lorebook.editor.batch.copy")}
+          {copied ? localizeUi("ui.panels.manualupdatecommand.copied") : localizeUi("lorebook.editor.batch.copy")}
         </button>
       </div>
       <code className="block max-w-full overflow-x-auto whitespace-pre rounded bg-[var(--background)] px-2 py-1.5 font-mono text-[0.625rem] leading-relaxed text-[var(--foreground)]">
@@ -6678,6 +7362,9 @@ function ManualUpdateCommand({ command }: { command: string }) {
 function AdvancedSettings() {
   const { t: localizeUi } = useUiTranslation();
   const { t } = useTranslation();
+  const activeChatId = useChatStore((state) => state.activeChatId);
+  const { data: activeChat, isLoading: isActiveChatLoading } = useChat(activeChatId);
+  const { data: rawConnections, isLoading: isConnectionsLoading } = useConnections();
   const showTimestamps = useUIStore((s) => s.showTimestamps);
   const setShowTimestamps = useUIStore((s) => s.setShowTimestamps);
   const showModelName = useUIStore((s) => s.showModelName);
@@ -6700,10 +7387,41 @@ function AdvancedSettings() {
   const [exportProfileDialogOpen, setExportProfileDialogOpen] = useState(false);
   const [refreshingSpa, setRefreshingSpa] = useState(false);
   const [adminSecret, setAdminSecret] = useState(() => localStorage.getItem(ADMIN_SECRET_STORAGE_KEY) ?? "");
+  const restartServer = useMutation({
+    mutationFn: () => api.post<{ status: "restarting" }>("/admin/restart", { confirm: true }),
+    onSuccess: () => toast.success(localizeUi("settings.serverRestart.success")),
+    onError: (error) => {
+      toast.error(getPrivilegedActionErrorMessage(error, localizeUi("settings.serverRestart.error")));
+    },
+  });
   const { data: extensionPolicy, isLoading: extensionPolicyLoading } = usePersonalExtensionPolicy();
   const setExternalExtensionsEnabled = useSetExternalExtensionsEnabled();
   const { data: agentImportPolicy, isLoading: agentImportPolicyLoading } = useAgentImportPolicy();
   const setAgentImportsEnabled = useSetAgentImportsEnabled();
+  type AvatarStorageSummary = { files: number; bytes: number; minimumAgeMinutes: number };
+  const [avatarStorageSummary, setAvatarStorageSummary] = useState<AvatarStorageSummary | null>(null);
+  const scanAvatarStorage = useMutation({
+    mutationFn: () => api.get<AvatarStorageSummary>("/admin/avatar-storage/abandoned"),
+    onSuccess: setAvatarStorageSummary,
+    onError: (error) => {
+      toast.error(getPrivilegedActionErrorMessage(error, localizeUi("settings.storageOptimization.error")));
+    },
+  });
+  const cleanAvatarStorage = useMutation({
+    mutationFn: () => api.post<AvatarStorageSummary>("/admin/avatar-storage/cleanup", { confirm: true }),
+    onSuccess: (result) => {
+      setAvatarStorageSummary({ ...result, files: 0, bytes: 0 });
+      toast.success(
+        localizeUi("settings.storageOptimization.deleted", {
+          count: result.files,
+          size: formatStorageBytes(result.bytes),
+        }),
+      );
+    },
+    onError: (error) => {
+      toast.error(getPrivilegedActionErrorMessage(error, localizeUi("settings.storageOptimization.error")));
+    },
+  });
   const nativeConsoleBridge = getMarinaraAndroidBridge();
   const canOpenNativeConsole = typeof nativeConsoleBridge?.openConsole === "function";
   const nativeConsoleHelp = getNativeConsoleShortcutHelp();
@@ -6715,7 +7433,9 @@ function AdvancedSettings() {
       return;
     }
 
-    bridge.openConsole();
+    const token = getAndroidBridgeToken();
+    if (token) bridge.openConsole(token);
+    else bridge.openConsole();
     toast.info(localizeUi("ui.panels.advancedsettings.openingTermuxConsole"));
   }, [localizeUi]);
 
@@ -6733,18 +7453,9 @@ function AdvancedSettings() {
       }
       try {
         await setExternalExtensionsEnabled.mutateAsync(enabled);
-        toast.success(
-          enabled
-            ? t("settings.externalExtensions.enabled")
-            : t("settings.externalExtensions.disabled"),
-        );
+        toast.success(enabled ? t("settings.externalExtensions.enabled") : t("settings.externalExtensions.disabled"));
       } catch (toggleError) {
-        toast.error(
-          getPrivilegedActionErrorMessage(
-            toggleError,
-            t("settings.externalExtensions.error"),
-          ),
-        );
+        toast.error(getPrivilegedActionErrorMessage(toggleError, t("settings.externalExtensions.error")));
       }
     },
     [setExternalExtensionsEnabled, t],
@@ -6772,6 +7483,24 @@ function AdvancedSettings() {
     [setAgentImportsEnabled, t],
   );
 
+  const handleDeleteAbandonedAvatars = useCallback(async () => {
+    if (!avatarStorageSummary || avatarStorageSummary.files < 1) return;
+    const confirmed = await showConfirmDialog({
+      title: localizeUi("settings.storageOptimization.confirm.title", {
+        count: avatarStorageSummary.files,
+      }),
+      message: localizeUi("settings.storageOptimization.confirm.message", {
+        count: avatarStorageSummary.files,
+        minutes: avatarStorageSummary.minimumAgeMinutes,
+        size: formatStorageBytes(avatarStorageSummary.bytes),
+      }),
+      confirmLabel: localizeUi("settings.storageOptimization.action.delete"),
+      cancelLabel: localizeUi("chat.delete.dialog.cancel"),
+      tone: "destructive",
+    });
+    if (confirmed) cleanAvatarStorage.mutate();
+  }, [avatarStorageSummary, cleanAvatarStorage, localizeUi]);
+
   type ProfileExportFormat = "native" | "compatible" | "zip";
   const profileExportFallbackNames: Record<ProfileExportFormat, string> = {
     native: "marinara-profile.json",
@@ -6797,9 +7526,9 @@ function AdvancedSettings() {
           failure.fallbackFormat === "zip"
         ) {
           const confirmed = await showConfirmDialog({
-            title:localizeUi("ui.panels.advancedsettings.exportProfileAsZip"),
+            title: localizeUi("ui.panels.advancedsettings.exportProfileAsZip"),
             message: failure.message,
-            confirmLabel:localizeUi("ui.panels.advancedsettings.exportZip"),
+            confirmLabel: localizeUi("ui.panels.advancedsettings.exportZip"),
             cancelLabel: "Cancel",
           });
           if (confirmed) {
@@ -6818,7 +7547,7 @@ function AdvancedSettings() {
       URL.revokeObjectURL(url);
       toast.success(profileExportSuccessMessages[format]);
     } catch (err) {
-      toast.error(err instanceof Error ? err.message :localizeUi("ui.panels.advancedsettings.failedToExportProfile"));
+      toast.error(err instanceof Error ? err.message : localizeUi("ui.panels.advancedsettings.failedToExportProfile"));
     } finally {
       setExportingProfile(false);
     }
@@ -6841,7 +7570,7 @@ function AdvancedSettings() {
       await forceRefreshSpa();
     } catch (err) {
       setRefreshingSpa(false);
-      toast.error(err instanceof Error ? err.message :localizeUi("ui.panels.advancedsettings.failedToRefreshTheApp"));
+      toast.error(err instanceof Error ? err.message : localizeUi("ui.panels.advancedsettings.failedToRefreshTheApp"));
     }
   };
 
@@ -6849,76 +7578,39 @@ function AdvancedSettings() {
   const [creatingBackup, setCreatingBackup] = useState(false);
 
   /**
-   * Download a full backup to a user-chosen location.
-   *
-   * Uses the File System Access API (`showSaveFilePicker`) when available so
-   * the browser opens a native "Save As" dialog — this is important on Android
-   * and iOS, where the server-side `data/backups/` folder isn't reachable
-   * without root. Falls back to an anchor-triggered download (which routes
-   * through the browser's default Downloads handling).
+   * Prepare a full backup, then hand its finished stream directly to the browser.
+   * Keeping the archive out of a page-held Blob lets Safari and memory-limited
+   * mobile browsers save large backups through their normal download handling.
    */
   const handleCreateBackup = async () => {
     setCreatingBackup(true);
     try {
-      const res = await api.raw("/backup/download", {
-        method: "POST",
-      });
-      if (!res.ok) throw new Error(await readSettingsResponseError(res, "Backup failed"));
-
-      // Pull the filename from Content-Disposition if provided
-      const disposition = res.headers.get("content-disposition") ?? "";
-      const filenameMatch = disposition.match(/filename="?([^"]+)"?/i);
-      const timestamp = new Date().toISOString().replace(/[:.]/g, "-").replace("T", "_").slice(0, 19);
-      const suggestedName = filenameMatch?.[1] ?? `marinara-backup-${timestamp}.zip`;
-
-      const blob = await res.blob();
-
-      // Preferred path: native "Save As" dialog (Chromium desktop, some Android)
-      const w = window as typeof window & {
-        showSaveFilePicker?: (options: {
-          suggestedName?: string;
-          types?: Array<{ description?: string; accept: Record<string, string[]> }>;
-        }) => Promise<{
-          createWritable: () => Promise<{ write: (data: Blob) => Promise<void>; close: () => Promise<void> }>;
-        }>;
-      };
-      if (typeof w.showSaveFilePicker === "function") {
-        try {
-          const handle = await w.showSaveFilePicker({
-            suggestedName,
-            types: [
-              {
-                description: "Marinara backup archive",
-                accept: { "application/zip": [".zip"] },
-              },
-            ],
-          });
-          const writable = await handle.createWritable();
-          await writable.write(blob);
-          await writable.close();
-          toast.success(localizeUi("ui.panels.advancedsettings.backupSaved"));
-          qc.invalidateQueries({ queryKey: ["backups"] });
-          return;
-        } catch (err) {
-          // User cancelled the native picker — treat as a silent no-op
-          if (err instanceof DOMException && err.name === "AbortError") return;
-          // Any other failure falls through to the anchor fallback
+      const started = await api.post<{ jobId: string; status: "preparing" }>("/backup/download/start");
+      const deadline = Date.now() + 60 * 60 * 1_000;
+      let status: {
+        status: "preparing" | "ready" | "failed";
+        error?: string;
+        downloadUrl?: string;
+      } = { status: started.status };
+      while (status.status === "preparing") {
+        if (Date.now() >= deadline) {
+          throw new Error(localizeUi("ui.panels.advancedsettings.backupPreparationTimedOut"));
         }
+        await new Promise((resolve) => window.setTimeout(resolve, 2_000));
+        status = await api.get(`/backup/download/status/${encodeURIComponent(started.jobId)}`);
+      }
+      if (status.status === "failed") {
+        throw new Error(status.error || localizeUi("ui.panels.advancedsettings.failedToCreateBackup"));
+      }
+      if (!status.downloadUrl) {
+        throw new Error(localizeUi("ui.panels.advancedsettings.failedToCreateBackup"));
       }
 
-      // Fallback: anchor download. On Android Chrome this routes through the
-      // system Downloads handler (which typically prompts the user or drops
-      // the file in the Downloads folder, both of which are user-accessible).
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = suggestedName;
-      a.click();
-      URL.revokeObjectURL(url);
-      toast.success(localizeUi("ui.panels.advancedsettings.backupDownloaded"));
+      window.location.assign(status.downloadUrl);
+      toast.success(localizeUi("ui.panels.advancedsettings.backupDownloadStarted"));
       qc.invalidateQueries({ queryKey: ["backups"] });
     } catch (err) {
-      toast.error(err instanceof Error ? err.message :localizeUi("ui.panels.advancedsettings.failedToCreateBackup"));
+      toast.error(err instanceof Error ? err.message : localizeUi("ui.panels.advancedsettings.failedToCreateBackup"));
     } finally {
       setCreatingBackup(false);
     }
@@ -6976,11 +7668,45 @@ function AdvancedSettings() {
     version: string;
     commit: string | null;
     build: string;
+    serverOs: string;
+    memory: {
+      heapUsedMiB: number;
+      heapLimitMiB: number;
+      rssMiB: number;
+    };
   }>({
     queryKey: ["health"],
     queryFn: () => api.get("/health"),
     staleTime: 60_000,
   });
+  const connections = (rawConnections ?? []) as APIConnection[];
+  const activeConnection = activeChat?.connectionId
+    ? (connections.find((connection) => connection.id === activeChat.connectionId) ?? null)
+    : (connections.find((connection) => connection.isDefault) ?? null);
+  const supportDiagnosticsPending = isConnectionsLoading || (!!activeChatId && isActiveChatLoading);
+
+  const handleCopySupportDiagnostics = useCallback(async () => {
+    const copied = await copyToClipboard(
+      formatSupportDiagnostics({
+        version: health.data?.version ?? APP_VERSION,
+        build: health.data?.build ?? APP_VERSION,
+        commit: health.data?.commit ?? null,
+        serverOs: health.data?.serverOs ?? "Unavailable",
+        serverMemory: health.data?.memory,
+        clientOs: resolveClientOs(navigator.userAgent, navigator.platform, navigator.maxTouchPoints),
+        browser: navigator.userAgent,
+        gpu: detectBrowserGpu(),
+        connectionName: activeConnection?.name ?? null,
+        connectionProvider: activeConnection?.provider ?? null,
+        model: activeConnection?.model ?? null,
+      }),
+    );
+    if (copied) {
+      toast.success(localizeUi("ui.panels.advancedsettings.supportDiagnosticsCopied"));
+    } else {
+      toast.error(localizeUi("ui.panels.advancedsettings.supportDiagnosticsCopyFailed"));
+    }
+  }, [activeConnection, health.data, localizeUi]);
 
   const deleteBackupMutation = useMutation({
     mutationFn: (name: string) => api.delete(`/backup/${name}`),
@@ -7000,6 +7726,16 @@ function AdvancedSettings() {
       toast.info(localizeUi("ui.panels.advancedsettings.adminSecretCleared"));
     }
   }, [adminSecret, localizeUi]);
+
+  const handleRestartServer = useCallback(async () => {
+    const confirmed = await showConfirmDialog({
+      title: localizeUi("settings.serverRestart.confirm.title"),
+      message: localizeUi("settings.serverRestart.confirm.message"),
+      confirmLabel: localizeUi("settings.serverRestart.action"),
+      cancelLabel: localizeUi("chat.delete.dialog.cancel"),
+    });
+    if (confirmed) restartServer.mutate();
+  }, [localizeUi, restartServer]);
 
   type UpdateChannelId = "stable" | "staging";
   const [updateChannel, setUpdateChannel] = useState<UpdateChannelId | null>(null);
@@ -7029,7 +7765,7 @@ function AdvancedSettings() {
     releaseTag?: string;
     dockerImage?: string;
     dockerImageTag?: string;
-    dockerLiteImageTag?: string;
+    dockerLiteImageTag?: string | null;
     installType: "git" | "docker" | "standalone";
     serverPlatform?: "windows" | "macos" | "linux" | "android-termux" | "unknown";
     clientPlatform?: "ios" | "android" | "desktop" | "unknown";
@@ -7119,7 +7855,8 @@ function AdvancedSettings() {
   const runExpunge = (mode: "selected" | "all") => {
     if (mode === "all") {
       clearAllData.mutate(undefined, {
-        onSuccess: () => toast.success(localizeUi("ui.panels.advancedsettings.allSelectedDataWasClearedRuntimeCachesWereReset")),
+        onSuccess: () =>
+          toast.success(localizeUi("ui.panels.advancedsettings.allSelectedDataWasClearedRuntimeCachesWereReset")),
         onError: () => toast.error(localizeUi("ui.panels.advancedsettings.failedToClearAllData")),
         onSettled: () => setConfirmAction(null),
       });
@@ -7127,7 +7864,8 @@ function AdvancedSettings() {
     }
 
     expungeData.mutate(selectedScopes, {
-      onSuccess: () => toast.success(localizeUi("ui.panels.advancedsettings.selectedDataWasClearedRuntimeCachesWereResetImmediately")),
+      onSuccess: () =>
+        toast.success(localizeUi("ui.panels.advancedsettings.selectedDataWasClearedRuntimeCachesWereResetImmediately")),
       onError: () => toast.error(localizeUi("ui.panels.advancedsettings.failedToClearSelectedData")),
       onSettled: () => setConfirmAction(null),
     });
@@ -7145,7 +7883,9 @@ function AdvancedSettings() {
         onSelect={handleExportProfileChoice}
       />
 
-      <SettingsIntro>{localizeUi("ui.panels.advancedsettings.serverMaintenanceMessageUtilitiesBackupsAndDataRemoval")}</SettingsIntro>
+      <SettingsIntro>
+        {localizeUi("ui.panels.advancedsettings.serverMaintenanceMessageUtilitiesBackupsAndDataRemoval")}
+      </SettingsIntro>
 
       <SettingsSection
         title={localizeUi("settings.sections.adminAccess.title")}
@@ -7167,8 +7907,30 @@ function AdvancedSettings() {
             className={cn(SETTINGS_PRIMARY_BUTTON_CLASS, "w-full gap-2 whitespace-nowrap")}
           >
             <span className="flex min-w-0 items-center justify-center gap-1.5">
-              <Save size="0.75rem" className="shrink-0" />{localizeUi("ui.noodle.noodlehome.save")}</span>
+              <Save size="0.75rem" className="shrink-0" />
+              {localizeUi("ui.noodle.noodlehome.save")}
+            </span>
           </button>
+          <SearchableSettingTarget controlId="restart-server" className="flex flex-col gap-1.5">
+            <button
+              type="button"
+              onClick={() => void handleRestartServer()}
+              disabled={restartServer.isPending}
+              className={cn(SETTINGS_BUTTON_CLASS, "w-full justify-center gap-1.5 px-3 py-2 text-xs")}
+            >
+              {restartServer.isPending ? (
+                <Loader2 size="0.8125rem" className="animate-spin" />
+              ) : (
+                <Power size="0.8125rem" />
+              )}
+              {restartServer.isPending
+                ? localizeUi("settings.serverRestart.restarting")
+                : localizeUi("settings.serverRestart.action")}
+            </button>
+            <p className="text-[0.625rem] leading-relaxed text-[var(--muted-foreground)]">
+              {localizeUi("settings.serverRestart.description")}
+            </p>
+          </SearchableSettingTarget>
         </div>
       </SettingsSection>
 
@@ -7183,7 +7945,9 @@ function AdvancedSettings() {
             <label
               id={getSettingsControlAnchorId("release-channel")}
               className="flex scroll-mt-3 min-w-0 flex-col gap-1 text-[0.625rem] font-semibold uppercase tracking-wide text-[var(--muted-foreground)]"
-            >{localizeUi("ui.panels.advancedsettings.releaseChannel")}<select
+            >
+              {localizeUi("ui.panels.advancedsettings.releaseChannel")}
+              <select
                 value={selectedUpdateChannelId}
                 onChange={(event) => setUpdateChannel(event.target.value as UpdateChannelId)}
                 className="w-full rounded-lg bg-[var(--background)] px-3 py-2 text-xs font-medium normal-case tracking-normal text-[var(--foreground)] outline-none ring-1 ring-[var(--border)] focus:ring-[var(--primary)]"
@@ -7202,21 +7966,31 @@ function AdvancedSettings() {
             >
               {updateCheck.isFetching ? (
                 <>
-                  <Loader2 size="0.8125rem" className="animate-spin" />{localizeUi("settings.notifications.customSound.status.loading")}</>
+                  <Loader2 size="0.8125rem" className="animate-spin" />
+                  {localizeUi("settings.notifications.customSound.status.loading")}
+                </>
               ) : (
                 <>
-                  <RefreshCw size="0.8125rem" />{localizeUi("ui.panels.advancedsettings.checkForUpdates")}</>
+                  <RefreshCw size="0.8125rem" />
+                  {localizeUi("ui.panels.advancedsettings.checkForUpdates")}
+                </>
               )}
             </button>
             <div className="flex flex-col px-1 text-[0.6875rem] text-[var(--muted-foreground)]">
-              <span>{localizeUi("ui.panels.advancedsettings.release")} {currentReleaseLabel}</span>
+              <span>
+                {localizeUi("ui.panels.advancedsettings.release")} {currentReleaseLabel}
+              </span>
               <span>{currentBuildLabel}</span>
-              {updateCheck.data?.currentBranch && <span>{localizeUi("ui.panels.advancedsettings.branch")} {updateCheck.data.currentBranch}</span>}
+              {updateCheck.data?.currentBranch && (
+                <span>
+                  {localizeUi("ui.panels.advancedsettings.branch")} {updateCheck.data.currentBranch}
+                </span>
+              )}
             </div>
           </div>
 
           {selectedUpdateChannel?.warning && (
-            <div className="flex items-start gap-1.5 rounded-lg bg-amber-500/10 px-2.5 py-2 text-[0.6875rem] text-amber-700 ring-1 ring-amber-500/30 dark:text-amber-200">
+            <div className="flex items-start gap-1.5 rounded-lg bg-[var(--primary)]/10 px-2.5 py-2 text-[0.6875rem] text-[var(--primary)] ring-1 ring-[var(--primary)]/30">
               <AlertTriangle size="0.8125rem" className="mt-0.5 shrink-0" />
               <span>{selectedUpdateChannel.warning}</span>
             </div>
@@ -7226,7 +8000,10 @@ function AdvancedSettings() {
             <div className="flex items-center gap-1.5 rounded-lg bg-[var(--secondary)] px-2.5 py-2 ring-1 ring-[var(--border)]">
               <Check size="0.8125rem" className="text-green-500 shrink-0" />
               <div className="flex flex-col gap-0.5">
-                <span className="text-xs">{localizeUi("ui.panels.advancedsettings.youReOnTheLatest")} {updateCheck.data.channelLabel ?? "release"} {localizeUi("ui.panels.advancedsettings.target")}{currentReleaseLabel})
+                <span className="text-xs">
+                  {localizeUi("ui.panels.advancedsettings.youReOnTheLatest")}{" "}
+                  {updateCheck.data.channelLabel ?? "release"} {localizeUi("ui.panels.advancedsettings.target")}
+                  {currentReleaseLabel})
                 </span>
                 <span className="text-[0.6875rem] text-[var(--muted-foreground)]">{currentBuildLabel}</span>
               </div>
@@ -7237,9 +8014,19 @@ function AdvancedSettings() {
             <div className="flex flex-col gap-2 rounded-lg bg-[var(--secondary)] p-2.5 ring-1 ring-[var(--border)]">
               <div className="flex items-center justify-between">
                 <span className="text-xs font-medium">
-                  {updateCheck.data.versionUpdate
-                    ?localizeUi("ui.panels.advancedsettings.vValue1Available", { value1: updateCheck.data.latestVersion })
-                    :localizeUi("ui.panels.advancedsettings.value1CommitValue2BehindValue3", { value1: commitsBehind, value2: commitsBehind !== 1 ?localizeUi("ui.noodle.stageprofileview.s") : "", value3: updateCheck.data.targetRef ??localizeUi("ui.panels.advancedsettings.originMain") })}
+                  {updateCheck.data.channelSwitch
+                    ? localizeUi("ui.panels.advancedsettings.switchToValue1", {
+                        value1: updateCheck.data.channelLabel,
+                      })
+                    : updateCheck.data.versionUpdate
+                      ? localizeUi("ui.panels.advancedsettings.vValue1Available", {
+                          value1: updateCheck.data.latestVersion,
+                        })
+                      : localizeUi("ui.panels.advancedsettings.value1CommitValue2BehindValue3", {
+                          value1: commitsBehind,
+                          value2: commitsBehind !== 1 ? localizeUi("ui.noodle.stageprofileview.s") : "",
+                          value3: updateCheck.data.targetRef ?? localizeUi("ui.panels.advancedsettings.originMain"),
+                        })}
                 </span>
                 {updateCheck.data.versionUpdate && (
                   <a
@@ -7247,7 +8034,8 @@ function AdvancedSettings() {
                     target="_blank"
                     rel="noopener noreferrer"
                     className="flex items-center gap-1 text-[0.625rem] text-[var(--primary)] hover:underline"
-                  >{localizeUi("ui.panels.advancedsettings.releaseNotes")} <ExternalLink size="0.625rem" />
+                  >
+                    {localizeUi("ui.panels.advancedsettings.releaseNotes")} <ExternalLink size="0.625rem" />
                   </a>
                 )}
               </div>
@@ -7257,10 +8045,16 @@ function AdvancedSettings() {
                 </p>
               )}
               {commitsBehind > 0 && (
-                <p className="text-[0.625rem] text-[var(--muted-foreground)]">{localizeUi("ui.panels.advancedsettings.commitCountsCompareThisBuildWith")} {updateCheck.data.targetRef ?? "origin/main"} {localizeUi("ui.panels.advancedsettings.andMayIncludeUnreleasedDevelopmentCommitsNotJustTagged")}</p>
+                <p className="text-[0.625rem] text-[var(--muted-foreground)]">
+                  {localizeUi("ui.panels.advancedsettings.commitCountsCompareThisBuildWith")}{" "}
+                  {updateCheck.data.targetRef ?? "origin/main"}{" "}
+                  {localizeUi("ui.panels.advancedsettings.andMayIncludeUnreleasedDevelopmentCommitsNotJustTagged")}
+                </p>
               )}
               {isIosClient && (
-                <p className="text-[0.625rem] text-[var(--muted-foreground)]">{localizeUi("ui.panels.advancedsettings.onIphoneOrIpadThisUpdatesTheMarinaraServer")}</p>
+                <p className="text-[0.625rem] text-[var(--muted-foreground)]">
+                  {localizeUi("ui.panels.advancedsettings.onIphoneOrIpadThisUpdatesTheMarinaraServer")}
+                </p>
               )}
               {updateCheck.data.applyAvailable ? (
                 <button
@@ -7271,12 +8065,18 @@ function AdvancedSettings() {
                   {applyUpdate.isPending ? (
                     <>
                       <Loader2 size="0.8125rem" className="animate-spin" />
-                      {updateCheck.data.channelSwitch ?localizeUi("ui.panels.advancedsettings.switching") :localizeUi("ui.panels.advancedsettings.updating")}
+                      {updateCheck.data.channelSwitch
+                        ? localizeUi("ui.panels.advancedsettings.switching")
+                        : localizeUi("ui.panels.advancedsettings.updating")}
                     </>
                   ) : (
                     <>
                       <Download size="0.8125rem" />
-                      {updateCheck.data.channelSwitch ?localizeUi("ui.panels.advancedsettings.switchToValue1", { value1: updateCheck.data.channelLabel }) :localizeUi("ui.panels.advancedsettings.applyUpdate")}
+                      {updateCheck.data.channelSwitch
+                        ? localizeUi("ui.panels.advancedsettings.switchToValue1", {
+                            value1: updateCheck.data.channelLabel,
+                          })
+                        : localizeUi("ui.panels.advancedsettings.applyUpdate")}
                     </>
                   )}
                 </button>
@@ -7293,23 +8093,29 @@ function AdvancedSettings() {
                       rel="noopener noreferrer"
                       className={SETTINGS_PRIMARY_BUTTON_CLASS}
                     >
-                      <Download size="0.8125rem" />{localizeUi("ui.panels.advancedsettings.downloadV")}{updateCheck.data.latestVersion}
+                      <Download size="0.8125rem" />
+                      {localizeUi("ui.panels.advancedsettings.downloadV")}
+                      {updateCheck.data.latestVersion}
                     </a>
                   )}
                   {updateCheck.data.versionUpdate && (
-                    <span className="text-[0.625rem] text-[var(--muted-foreground)]">{localizeUi("ui.panels.advancedsettings.androidApkAssetsAreWebviewShellsNotStandaloneApps")}</span>
+                    <span className="text-[0.625rem] text-[var(--muted-foreground)]">
+                      {localizeUi("ui.panels.advancedsettings.androidApkAssetsAreWebviewShellsNotStandaloneApps")}
+                    </span>
                   )}
                   {manualUpdateHint && (
                     <span className="text-[0.625rem] text-[var(--muted-foreground)]">{manualUpdateHint}</span>
                   )}
                   {installType === "docker" && updateCheck.data.dockerImageTag && (
-                    <span className="text-[0.625rem] text-[var(--muted-foreground)]">{localizeUi("ui.panels.advancedsettings.containerTag")}{" "}
+                    <span className="text-[0.625rem] text-[var(--muted-foreground)]">
+                      {localizeUi("ui.panels.advancedsettings.containerTag")}{" "}
                       <code className="break-all rounded bg-[var(--background)] px-1 py-0.5">
                         {updateCheck.data.dockerImageTag}
                       </code>
                       {updateCheck.data.dockerLiteImageTag ? (
                         <>
-                          {" "}{localizeUi("ui.panels.advancedsettings.lite")}{" "}
+                          {" "}
+                          {localizeUi("ui.panels.advancedsettings.lite")}{" "}
                           <code className="break-all rounded bg-[var(--background)] px-1 py-0.5">
                             {updateCheck.data.dockerLiteImageTag}
                           </code>
@@ -7325,7 +8131,9 @@ function AdvancedSettings() {
 
           {updateCheck.isError && (
             <div className="flex items-center gap-1.5 rounded-lg bg-[var(--destructive)]/10 px-2.5 py-2 text-xs text-[var(--destructive)]">
-              <AlertTriangle size="0.8125rem" className="shrink-0" />{localizeUi("ui.panels.advancedsettings.couldNotCheckForUpdatesTryAgainLater")}</div>
+              <AlertTriangle size="0.8125rem" className="shrink-0" />
+              {localizeUi("ui.panels.advancedsettings.couldNotCheckForUpdatesTryAgainLater")}
+            </div>
           )}
 
           <div className="flex items-center gap-2">
@@ -7336,10 +8144,14 @@ function AdvancedSettings() {
             >
               {refreshingSpa ? (
                 <>
-                  <Loader2 size="0.8125rem" className="animate-spin" />{localizeUi("ui.panels.advancedsettings.refreshing")}</>
+                  <Loader2 size="0.8125rem" className="animate-spin" />
+                  {localizeUi("ui.panels.advancedsettings.refreshing")}
+                </>
               ) : (
                 <>
-                  <RefreshCw size="0.8125rem" />{localizeUi("ui.panels.advancedsettings.refreshApp")}</>
+                  <RefreshCw size="0.8125rem" />
+                  {localizeUi("ui.panels.advancedsettings.refreshApp")}
+                </>
               )}
             </button>
             <HelpTooltip
@@ -7348,6 +8160,25 @@ function AdvancedSettings() {
             />
           </div>
         </div>
+      </SettingsSection>
+
+      <SettingsSection
+        title={localizeUi("ui.panels.advancedsettings.supportDiagnostics")}
+        description={localizeUi("ui.panels.advancedsettings.supportDiagnosticsDescription")}
+        icon={<LifeBuoy size="0.875rem" />}
+        {...getSettingsSectionAnchorProps("support-diagnostics")}
+      >
+        <SearchableSettingTarget controlId="copy-support-diagnostics">
+          <button
+            type="button"
+            onClick={() => void handleCopySupportDiagnostics()}
+            disabled={supportDiagnosticsPending}
+            className={cn(SETTINGS_PRIMARY_BUTTON_CLASS, "w-full gap-2")}
+          >
+            <Copy size="0.8125rem" />
+            {localizeUi("ui.panels.advancedsettings.copySupportDiagnostics")}
+          </button>
+        </SearchableSettingTarget>
       </SettingsSection>
 
       <SettingsSection
@@ -7536,15 +8367,21 @@ function AdvancedSettings() {
           >
             {exportingProfile ? (
               <>
-                <Loader2 size="0.8125rem" className="animate-spin" />{localizeUi("ui.panels.advancedsettings.exporting")}</>
+                <Loader2 size="0.8125rem" className="animate-spin" />
+                {localizeUi("ui.panels.advancedsettings.exporting")}
+              </>
             ) : (
               <>
-                <Upload size="0.8125rem" />{localizeUi("settings.transfer.exportProfile.title")}</>
+                <Upload size="0.8125rem" />
+                {localizeUi("settings.transfer.exportProfile.title")}
+              </>
             )}
           </button>
           {backups && backups.length > 0 && (
             <div className="flex flex-col gap-1 mt-1">
-              <span className="text-[0.625rem] font-medium text-[var(--muted-foreground)]">{localizeUi("ui.panels.advancedsettings.existingBackups")}</span>
+              <span className="text-[0.625rem] font-medium text-[var(--muted-foreground)]">
+                {localizeUi("ui.panels.advancedsettings.existingBackups")}
+              </span>
               {backups.map((b) => (
                 <div
                   key={b.name}
@@ -7567,6 +8404,62 @@ function AdvancedSettings() {
             </div>
           )}
         </div>
+      </SettingsSection>
+
+      <SettingsSection
+        title={localizeUi("settings.sections.storageOptimization.title")}
+        description={localizeUi("settings.sections.storageOptimization.componentDescription")}
+        icon={<HardDrive size="0.875rem" />}
+        {...getSettingsSectionAnchorProps("storage-optimization")}
+      >
+        <SearchableSettingTarget controlId="avatar-storage-optimization" className="flex flex-col gap-2">
+          <p className="text-[0.6875rem] leading-relaxed text-[var(--muted-foreground)]">
+            {localizeUi("settings.storageOptimization.description")}
+          </p>
+          <button
+            type="button"
+            onClick={() => scanAvatarStorage.mutate()}
+            disabled={scanAvatarStorage.isPending || cleanAvatarStorage.isPending}
+            className={cn(SETTINGS_BUTTON_CLASS, "w-full justify-center gap-1.5 px-3 py-2 text-xs")}
+          >
+            {scanAvatarStorage.isPending ? (
+              <Loader2 size="0.8125rem" className="animate-spin" />
+            ) : (
+              <Search size="0.8125rem" />
+            )}
+            {scanAvatarStorage.isPending
+              ? localizeUi("settings.storageOptimization.scanning")
+              : localizeUi("settings.storageOptimization.action.check")}
+          </button>
+          {avatarStorageSummary && (
+            <div className="rounded-lg bg-[var(--background)]/55 p-2.5 text-[0.6875rem] leading-relaxed text-[var(--muted-foreground)] ring-1 ring-[var(--border)]">
+              {avatarStorageSummary.files > 0
+                ? localizeUi("settings.storageOptimization.found", {
+                    count: avatarStorageSummary.files,
+                    minutes: avatarStorageSummary.minimumAgeMinutes,
+                    size: formatStorageBytes(avatarStorageSummary.bytes),
+                  })
+                : localizeUi("settings.storageOptimization.clean")}
+            </div>
+          )}
+          {avatarStorageSummary && avatarStorageSummary.files > 0 && (
+            <button
+              type="button"
+              onClick={() => void handleDeleteAbandonedAvatars()}
+              disabled={cleanAvatarStorage.isPending || scanAvatarStorage.isPending}
+              className={cn(SETTINGS_PRIMARY_BUTTON_CLASS, "w-full justify-center gap-1.5")}
+            >
+              {cleanAvatarStorage.isPending ? (
+                <Loader2 size="0.8125rem" className="animate-spin" />
+              ) : (
+                <Trash2 size="0.8125rem" />
+              )}
+              {cleanAvatarStorage.isPending
+                ? localizeUi("settings.storageOptimization.deleting")
+                : localizeUi("settings.storageOptimization.action.delete")}
+            </button>
+          )}
+        </SearchableSettingTarget>
       </SettingsSection>
 
       <SettingsSection
@@ -7614,20 +8507,26 @@ function AdvancedSettings() {
               disabled={isClearing}
               className={cn(SETTINGS_BUTTON_CLASS, "w-full px-3 py-2 text-xs")}
             >
-              {isAllScopesSelected ?localizeUi("ui.panels.advancedsettings.clearSelection") :localizeUi("ui.panels.advancedsettings.selectAll")}
+              {isAllScopesSelected
+                ? localizeUi("ui.panels.advancedsettings.clearSelection")
+                : localizeUi("ui.panels.advancedsettings.selectAll")}
             </button>
             <button
               onClick={() => setConfirmAction("selected")}
               disabled={selectedScopes.length === 0 || isClearing}
               className={cn(SETTINGS_BUTTON_CLASS, "w-full px-3 py-2 text-xs")}
             >
-              <Trash2 size="0.8125rem" />{localizeUi("ui.panels.advancedsettings.clearSelectedData")}</button>
+              <Trash2 size="0.8125rem" />
+              {localizeUi("ui.panels.advancedsettings.clearSelectedData")}
+            </button>
             <button
               onClick={() => setConfirmAction("all")}
               disabled={isClearing}
               className={cn(SETTINGS_BUTTON_CLASS, "w-full px-3 py-2 text-xs")}
             >
-              <Trash2 size="0.8125rem" />{localizeUi("ui.panels.advancedsettings.clearAllData")}</button>
+              <Trash2 size="0.8125rem" />
+              {localizeUi("ui.panels.advancedsettings.clearAllData")}
+            </button>
           </div>
           {confirmAction && (
             <div className="flex flex-col gap-2 rounded-lg bg-[var(--background)]/55 p-2.5 ring-1 ring-[var(--border)]">
@@ -7637,7 +8536,7 @@ function AdvancedSettings() {
                   className="mt-0.5 shrink-0 text-[var(--marinara-chat-chrome-button-text-active)]"
                 />
                 {confirmAction === "all"
-                  ?localizeUi("ui.panels.advancedsettings.deleteAllSupportedDataCategoriesExceptProfessorMariThere")
+                  ? localizeUi("ui.panels.advancedsettings.deleteAllSupportedDataCategoriesExceptProfessorMariThere")
                   : localizeUi("ui.panels.advancedsettings.deleteSelectedDataCategories", {
                       count: selectedScopes.length,
                     })}
@@ -7647,13 +8546,17 @@ function AdvancedSettings() {
                   onClick={() => setConfirmAction(null)}
                   disabled={isClearing}
                   className={cn(SETTINGS_BUTTON_CLASS, "w-full px-3 py-2 text-xs")}
-                >{localizeUi("chat.delete.dialog.cancel")}</button>
+                >
+                  {localizeUi("chat.delete.dialog.cancel")}
+                </button>
                 <button
                   onClick={() => runExpunge(confirmAction)}
                   disabled={isClearing}
                   className={cn(SETTINGS_BUTTON_CLASS, "w-full px-3 py-2 text-xs")}
                 >
-                  {isClearing ? <Loader2 size="0.75rem" className="animate-spin" /> : <Trash2 size="0.75rem" />}{localizeUi("ui.panels.advancedsettings.confirmDelete")}</button>
+                  {isClearing ? <Loader2 size="0.75rem" className="animate-spin" /> : <Trash2 size="0.75rem" />}
+                  {localizeUi("ui.panels.advancedsettings.confirmDelete")}
+                </button>
               </div>
             </div>
           )}

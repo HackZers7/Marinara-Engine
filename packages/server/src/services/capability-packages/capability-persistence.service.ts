@@ -3,6 +3,9 @@ import {
   type CapabilityChatMetadataUpdate,
   type CapabilityChatRecord,
   type CapabilityCreateMessageWithSwipeInput,
+  type CapabilityGameStateRecord,
+  type CapabilityRoleplayEventInput,
+  type CapabilityRoleplayEventRecord,
   type CapabilityDocumentRecord,
   type CapabilityDocumentStore,
   type CapabilityMessageRecord,
@@ -14,6 +17,9 @@ import {
 } from "@marinara-engine/shared";
 import type { DB } from "../../db/connection.js";
 import { and, desc, eq, inArray, ne, or } from "../../db/file-query.js";
+import { IMPORTED_GAME_ENGINE_ANCHOR_PREFIX } from "../../db/file-backed-store.js";
+import { FileUniqueConstraintError } from "../../db/file-schema.js";
+import { engineEventOwner } from "./capability-roleplay-events.service.js";
 import { ensureTimestampAfter } from "../import/import-timestamps.js";
 import {
   chats,
@@ -56,6 +62,9 @@ function readTrimmedString(value: unknown): string | null {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
 }
 
+const MAX_ROLEPLAY_EVENT_TEXT_CHARS = 1_000;
+const MAX_ROLEPLAY_EVENT_PAYLOAD_CHARS = 8_000;
+
 function mapBranchMetadata(value: unknown): CapabilityChatRecord["branch"] {
   const metadata = parseMetadata(value);
   if (!metadata) return null;
@@ -81,16 +90,17 @@ function mapBranchMetadata(value: unknown): CapabilityChatRecord["branch"] {
 }
 
 function mapChat(row: typeof chats.$inferSelect): CapabilityChatRecord {
+  const branch = mapBranchMetadata(row.metadata);
   return {
     id: row.id,
-    name: row.name,
+    name: branch?.title ?? row.name,
     mode: row.mode,
     characterIds: parseStringArray(row.characterIds),
     groupId: row.groupId,
     personaId: row.personaId,
     connectionId: row.connectionId,
     metadata: row.metadata,
-    branch: mapBranchMetadata(row.metadata),
+    branch,
     lastMessageAt: row.lastMessageAt,
     updatedAt: row.updatedAt,
   };
@@ -106,6 +116,37 @@ function mapMessage(row: typeof messages.$inferSelect): CapabilityMessageRecord 
     activeSwipeIndex: row.activeSwipeIndex,
     extra: row.extra,
     createdAt: row.createdAt,
+  };
+}
+
+function parsePresentCharacterIds(value: unknown): string[] {
+  if (typeof value !== "string") return [];
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed.flatMap((entry) => {
+      if (!entry || typeof entry !== "object") return [];
+      const record = entry as { characterId?: unknown; id?: unknown };
+      const id = record.characterId ?? record.id;
+      return typeof id === "string" && id.trim().length > 0 ? [id] : [];
+    });
+  } catch {
+    return [];
+  }
+}
+
+function mapGameState(row: typeof gameStateSnapshots.$inferSelect): CapabilityGameStateRecord {
+  return {
+    snapshotId: row.id,
+    chatId: row.chatId,
+    messageId: row.messageId,
+    swipeIndex: row.swipeIndex,
+    date: row.date,
+    time: row.time,
+    location: row.location,
+    weather: row.weather,
+    temperature: row.temperature,
+    presentCharacterIds: parsePresentCharacterIds(row.presentCharacters),
   };
 }
 
@@ -356,6 +397,42 @@ function createPersistenceSession(db: DB): CapabilityPersistenceSession {
         .orderBy(messages.createdAt, messages.id);
       return rows.map(mapMessage);
     },
+    async getGameState(chatId) {
+      const rows = await db
+        .select()
+        .from(gameStateSnapshots)
+        .where(and(eq(gameStateSnapshots.chatId, chatId), eq(gameStateSnapshots.committed, 1)))
+        .orderBy(desc(gameStateSnapshots.createdAt), desc(gameStateSnapshots.id))
+        .limit(1);
+      return rows[0] ? mapGameState(rows[0]) : null;
+    },
+    async appendRoleplayEvent(input: CapabilityRoleplayEventInput): Promise<CapabilityRoleplayEventRecord | null> {
+      const scopedOwner = engineEventOwner(input.chatId);
+      const text = input.text.trim().slice(0, MAX_ROLEPLAY_EVENT_TEXT_CHARS);
+      if (!text || input.idempotencyKey.length === 0) return null;
+      const event = { ...input, text };
+      const data = JSON.stringify(event);
+      if (data.length > MAX_ROLEPLAY_EVENT_PAYLOAD_CHARS) return null;
+      const now = input.createdAt;
+      try {
+        await db.insert(capabilityDocuments).values({
+          id: input.id,
+          packageId: scopedOwner,
+          kind: "roleplay-event",
+          name: input.eventType,
+          description: input.sourcePackageId,
+          data,
+          idempotencyKey: input.idempotencyKey,
+          revision: 1,
+          createdAt: now,
+          updatedAt: now,
+        });
+      } catch (error) {
+        if (error instanceof FileUniqueConstraintError) return null;
+        throw error;
+      }
+      return event;
+    },
     async listExistingLorebookEntryIds(entryIds) {
       const requestedIds = Array.from(new Set(entryIds.filter((entryId) => entryId.length > 0)));
       if (requestedIds.length === 0) return [];
@@ -367,6 +444,20 @@ function createPersistenceSession(db: DB): CapabilityPersistenceSession {
       return requestedIds.filter((entryId) => existingIds.has(entryId));
     },
     async createMessageWithSwipe(input: CapabilityCreateMessageWithSwipeInput) {
+      // `imported:` is RESERVED for synthetic experience-state anchors (#5405), and this is the
+      // only message writer that takes a caller-supplied id — every other path builds one with
+      // newId() (nanoid, whose alphabet has no colon). The reservation is load-bearing: the
+      // messages -> game_engine_state cascade matches messageId ALONE and is never scoped by
+      // chatId, so a real message minted at "imported:X" would let ITS deletion destroy an
+      // imported campaign in a DIFFERENT chat — the exact cross-chat damage the synthetic anchor
+      // exists to prevent — and would also fall under the validate() dangling-ref exemption that
+      // assumes no such message can exist. Refuse before the transaction so nothing is written.
+      if (input.id.startsWith(IMPORTED_GAME_ENGINE_ANCHOR_PREFIX)) {
+        throw new Error(
+          `Message id ${JSON.stringify(input.id)} uses the reserved ` +
+            `"${IMPORTED_GAME_ENGINE_ANCHOR_PREFIX}" prefix, which belongs to imported experience-state anchors`,
+        );
+      }
       return db.transaction(async (tx) => {
         const chatRows = await tx
           .select({ lastMessageAt: chats.lastMessageAt })
@@ -402,6 +493,10 @@ function createPersistenceSession(db: DB): CapabilityPersistenceSession {
         .set({ committed: 1 })
         .where(and(eq(gameStateSnapshots.id, snapshotId), eq(gameStateSnapshots.chatId, chatId)));
     },
+    // Both metadata writers below replace the WHOLE blob and are not write-ordinal stamped
+    // (#5406) — same category as `chats.updateMetadata`: the mirror rides through untouched, so
+    // a key written here keeps a stale ordinal. Safe only while the keys packages order against
+    // are reachable solely through the chat metadata PATCH path.
     async updateChatActivity(input: CapabilityChatActivityUpdate) {
       await db.transaction(async (transaction) => {
         const rows = input.metadata

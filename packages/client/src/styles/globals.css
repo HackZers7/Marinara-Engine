@@ -194,8 +194,8 @@
   --muted-foreground: #d4adfc;
   --accent: #2a1a3e;
   --accent-foreground: #f0e8ff;
-  --destructive: #ff6b9d;
-  --destructive-foreground: #0a0a0a;
+  --destructive: var(--primary);
+  --destructive-foreground: var(--primary-foreground);
   --border: #d4adfc33;
   --input: #d4adfc33;
   --ring: #d4acfb;
@@ -206,7 +206,7 @@
   --sidebar-accent: #d4acfb1a;
   --sidebar-accent-foreground: #d4acfb;
   --glow-primary: color-mix(in srgb, var(--primary) 15%, transparent);
-  --glow-accent: rgba(212, 173, 252, 0.12);
+  --glow-accent: color-mix(in srgb, var(--primary) 12%, transparent);
 
   /* Theme hooks for shared chat, roleplay, and game chrome. */
   --marinara-topbar-surface: color-mix(in srgb, var(--card) 80%, transparent);
@@ -254,7 +254,7 @@
   );
   --marinara-chat-chrome-accent: var(--marinara-app-accent-solid);
   --marinara-chat-chrome-accent-gradient: var(--marinara-app-accent-gradient);
-  --marinara-chat-chrome-text: var(--foreground);
+  --marinara-chat-chrome-text: var(--card-foreground);
   --marinara-chat-chrome-button-text-base: var(--marinara-chat-chrome-accent);
   --marinara-chat-chrome-highlight-text-base: var(--marinara-chat-chrome-accent);
   --marinara-chat-chrome-surface-bg: var(--card);
@@ -301,6 +301,9 @@
   --marinara-chat-chrome-panel-title: color-mix(in srgb, var(--marinara-chat-chrome-text) 96%, transparent);
   --marinara-chat-chrome-panel-muted: color-mix(in srgb, var(--marinara-chat-chrome-text) 58%, transparent);
   --marinara-chat-chrome-panel-scrollbar: color-mix(in srgb, var(--marinara-chat-chrome-accent) 22%, transparent);
+  --marinara-chat-message-action-text: color-mix(in srgb, var(--marinara-chat-chrome-text) 40%, transparent);
+  --marinara-chat-message-action-text-hover: color-mix(in srgb, var(--marinara-chat-chrome-text) 70%, transparent);
+  --marinara-chat-message-action-bg-hover: color-mix(in srgb, var(--marinara-chat-chrome-text) 10%, transparent);
   --marinara-chat-chrome-highlight-bg: color-mix(in srgb, var(--marinara-chat-chrome-accent) 9%, transparent);
   --marinara-chat-chrome-highlight-bg-hover: color-mix(in srgb, var(--marinara-chat-chrome-accent) 13%, transparent);
   --marinara-chat-chrome-highlight-text: color-mix(
@@ -383,24 +386,24 @@
   --glass-bg: linear-gradient(
     135deg,
     color-mix(in srgb, var(--primary) 6%, transparent) 0%,
-    rgba(212, 173, 252, 0.06) 50%,
+    color-mix(in srgb, var(--primary) 6%, transparent) 50%,
     rgba(168, 216, 255, 0.06) 100%
   );
   --glass-border: rgba(255, 255, 255, 0.08);
   --glass-strong-bg: linear-gradient(
     135deg,
     color-mix(in srgb, var(--primary) 10%, transparent) 0%,
-    rgba(212, 173, 252, 0.1) 50%,
+    color-mix(in srgb, var(--primary) 10%, transparent) 50%,
     rgba(168, 216, 255, 0.1) 100%
   );
   --glass-strong-border: rgba(255, 255, 255, 0.12);
   --glass-strong-shadow: 0 8px 32px rgba(0, 0, 0, 0.3), inset 0 1px rgba(255, 255, 255, 0.1);
 
   --glow-color-1: color-mix(in srgb, var(--primary) 30%, transparent);
-  --glow-color-2: rgba(212, 173, 252, 0.2);
+  --glow-color-2: color-mix(in srgb, var(--primary) 20%, transparent);
   --glow-color-3: rgba(168, 216, 255, 0.1);
   --glow-sm-1: color-mix(in srgb, var(--primary) 20%, transparent);
-  --glow-sm-2: rgba(212, 173, 252, 0.1);
+  --glow-sm-2: color-mix(in srgb, var(--primary) 10%, transparent);
 
   --scrollbar-track: #1a1a2e40;
   --scrollbar-border: #0a0a0a66;
@@ -465,8 +468,8 @@
   --muted-foreground: #7a64a0;
   --accent: #ede4f7;
   --accent-foreground: #1a1025;
-  --destructive: #e84878;
-  --destructive-foreground: #ffffff;
+  --destructive: var(--primary);
+  --destructive-foreground: var(--primary-foreground);
   --border: #d4adfc44;
   --input: #d4adfc44;
   --ring: #d4acfb;
@@ -476,7 +479,7 @@
   --sidebar-accent: #d4acfb18;
   --sidebar-accent-foreground: #d4acfb;
   --glow-primary: color-mix(in srgb, var(--primary) 12%, transparent);
-  --glow-accent: rgba(212, 173, 252, 0.08);
+  --glow-accent: color-mix(in srgb, var(--primary) 8%, transparent);
   --marinara-music-player-shell-bg: color-mix(in srgb, var(--card) 94%, var(--secondary) 6%);
   --marinara-music-player-shell-border: color-mix(in srgb, var(--foreground) 14%, transparent);
   --marinara-music-player-text: color-mix(in srgb, var(--foreground) 96%, var(--primary) 4%);
@@ -518,12 +521,12 @@
   --glass-strong-shadow: 0 4px 16px rgba(0, 0, 0, 0.06), inset 0 1px rgba(255, 255, 255, 0.5);
 
   --glow-color-1: color-mix(in srgb, var(--primary) 20%, transparent);
-  --glow-color-2: rgba(212, 173, 252, 0.15);
+  --glow-color-2: color-mix(in srgb, var(--primary) 15%, transparent);
   --glow-color-3: rgba(168, 216, 255, 0.08);
   --glow-sm-1: color-mix(in srgb, var(--primary) 15%, transparent);
-  --glow-sm-2: rgba(212, 173, 252, 0.08);
+  --glow-sm-2: color-mix(in srgb, var(--primary) 8%, transparent);
 
-  --scrollbar-track: rgba(212, 173, 252, 0.1);
+  --scrollbar-track: color-mix(in srgb, var(--primary) 10%, transparent);
   --scrollbar-border: rgba(0, 0, 0, 0.1);
 
   --y2k-pink: var(--primary);
@@ -581,7 +584,7 @@
 }
 
 [data-theme="light"] ::-webkit-scrollbar-track {
-  background: rgba(212, 173, 252, 0.1);
+  background: var(--scrollbar-track);
 }
 [data-theme="light"] ::-webkit-scrollbar-thumb {
   background: linear-gradient(180deg, var(--y2k-pink) 0%, var(--y2k-purple) 100%);
@@ -697,6 +700,11 @@
   color: var(--marinara-chat-chrome-button-text-hover);
 }
 
+.mari-chrome-control:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 0.125rem var(--marinara-chat-chrome-focus-ring);
+}
+
 .mari-chrome-control:active {
   transform: scale(0.98);
 }
@@ -762,6 +770,73 @@
   border-color: color-mix(in srgb, var(--destructive) 40%, transparent);
   background: color-mix(in srgb, var(--destructive) 16%, transparent);
   color: var(--destructive);
+}
+
+/* Compact actions inside Chat Settings and downloadable Agent settings. */
+.mari-agent-settings-action {
+  display: inline-flex;
+  min-height: 1.75rem;
+  min-width: 0;
+  align-items: center;
+  justify-content: center;
+  gap: 0.375rem;
+  border: 1px solid var(--marinara-chat-chrome-button-border, var(--border));
+  border-radius: 0.5rem;
+  background: var(--marinara-chat-chrome-button-bg, var(--secondary));
+  padding: 0.375rem 0.625rem;
+  color: var(--marinara-chat-chrome-panel-text, var(--foreground));
+  font-size: 0.6875rem;
+  font-weight: 600;
+  line-height: 1;
+  transition:
+    background-color 150ms ease,
+    border-color 150ms ease,
+    color 150ms ease,
+    box-shadow 150ms ease,
+    transform 120ms ease;
+}
+
+.mari-agent-settings-action:hover {
+  border-color: var(--marinara-chat-chrome-button-border-hover, var(--border));
+  background: var(--marinara-chat-chrome-button-bg-hover, var(--accent));
+  color: var(--marinara-chat-chrome-button-text-hover, var(--foreground));
+}
+
+.mari-agent-settings-action:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 0.125rem var(--marinara-chat-chrome-focus-ring, var(--ring));
+}
+
+.mari-agent-settings-action:active {
+  transform: scale(0.98);
+}
+
+.mari-agent-settings-action:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.mari-agent-settings-action--primary {
+  border-color: var(--marinara-chat-chrome-button-border-active, color-mix(in srgb, var(--primary) 30%, transparent));
+  background: var(--marinara-chat-chrome-button-bg-active, color-mix(in srgb, var(--primary) 12%, transparent));
+  color: var(--marinara-chat-chrome-button-text-active, var(--primary));
+}
+
+.mari-agent-settings-action--danger {
+  border-color: color-mix(in srgb, var(--destructive) 30%, transparent);
+  background: color-mix(in srgb, var(--destructive) 10%, transparent);
+  color: var(--destructive);
+}
+
+.mari-agent-settings-action--danger:hover {
+  border-color: color-mix(in srgb, var(--destructive) 42%, transparent);
+  background: color-mix(in srgb, var(--destructive) 16%, transparent);
+  color: var(--destructive);
+}
+
+.mari-agent-settings-action--icon {
+  width: 1.75rem;
+  padding: 0;
 }
 
 .mari-chat-logo-mode--conversation {
@@ -977,6 +1052,29 @@
   font-size: 0.6875rem;
 }
 
+@media (max-width: 767px) {
+  .mari-suggestion-chips {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    overflow-y: hidden;
+    scroll-snap-type: x proximity;
+    scrollbar-width: none;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior-x: contain;
+    touch-action: pan-x;
+  }
+
+  .mari-suggestion-chips::-webkit-scrollbar {
+    display: none;
+  }
+
+  .mari-suggestion-chip {
+    flex: 0 0 auto;
+    max-width: calc(100% - 1rem);
+    scroll-snap-align: start;
+  }
+}
+
 .mari-suggestion-chip--neutral {
   --chip-tint: var(--muted-foreground);
 }
@@ -1095,6 +1193,15 @@
   border-radius: 0.75rem;
   background: var(--marinara-chat-chrome-button-bg);
   color: var(--marinara-chat-chrome-button-text-active);
+}
+
+.mari-chrome-segmented--two {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+}
+
+.mari-chrome-segmented--two > .mari-chrome-segmented__button {
+  width: auto;
+  justify-self: stretch;
 }
 
 .mari-chrome-segmented__button {
@@ -1224,6 +1331,20 @@
   color: var(--marinara-preset-select-option-selected-text, var(--marinara-chat-chrome-button-text-active)) !important;
 }
 
+.mari-chat-setup-wizard select {
+  color-scheme: dark;
+}
+
+[data-theme="light"] .mari-chat-setup-wizard select {
+  color-scheme: light;
+}
+
+.mari-chat-setup-wizard select option,
+.mari-chat-setup-wizard select optgroup {
+  background-color: var(--secondary) !important;
+  color: var(--foreground) !important;
+}
+
 .mari-editor-legacy-bridge .mari-preset-native-select {
   --marinara-preset-select-bg: var(--marinara-editor-control-bg);
   --marinara-preset-select-text: var(--marinara-editor-text);
@@ -1298,11 +1419,15 @@
 .mari-settings-panel-chrome {
   --accent: var(--marinara-chat-chrome-highlight-bg);
   --accent-foreground: var(--marinara-chat-chrome-highlight-text);
-  --foreground: var(--marinara-chat-chrome-panel-title);
+  --foreground: var(--marinara-chat-chrome-text);
   --muted-foreground: var(--marinara-chat-chrome-panel-muted);
   --sidebar-accent: var(--marinara-chat-chrome-highlight-bg);
   --sidebar-accent-foreground: var(--marinara-chat-chrome-panel-title);
   --sidebar-foreground: var(--marinara-chat-chrome-panel-text);
+}
+
+.mari-chrome-text-accent-scope {
+  --marinara-chat-chrome-accent: var(--marinara-chat-chrome-text);
 }
 
 .mari-settings-tab-label {
@@ -1325,6 +1450,10 @@
   color: var(--marinara-chat-chrome-panel-muted);
 }
 
+.mari-conversation-transcript-chrome-text {
+  color: var(--marinara-chat-chrome-text);
+}
+
 .mari-chrome-accent-surface {
   border-color: var(--marinara-chat-chrome-button-border-active);
   background: var(--marinara-chat-chrome-highlight-bg);
@@ -1337,6 +1466,15 @@
   color: var(--marinara-chat-chrome-button-text-hover);
 }
 
+.mari-chrome-accent-frame {
+  border-color: color-mix(in srgb, var(--marinara-chat-chrome-accent) 36%, var(--border));
+  box-shadow: 0 1.125rem 2.75rem -2.125rem color-mix(in srgb, var(--marinara-chat-chrome-accent) 70%, transparent);
+}
+
+.mari-chrome-accent-panel {
+  background: color-mix(in srgb, var(--marinara-chat-chrome-accent) 8%, var(--card));
+}
+
 .mari-chrome-accent-tile {
   background: var(--marinara-app-accent-gradient);
   color: var(--primary-foreground);
@@ -1344,9 +1482,17 @@
 }
 
 .mari-chrome-accent-soft-tile {
+  border-color: var(--marinara-chat-chrome-button-border-active);
   background: color-mix(in srgb, var(--marinara-chat-chrome-accent) 14%, transparent);
   color: var(--marinara-chat-chrome-button-text-active);
   box-shadow: inset 0 0 0 1px var(--marinara-chat-chrome-button-border);
+}
+
+.mari-chrome-accent-reticle {
+  border-color: var(--marinara-chat-chrome-accent);
+  box-shadow:
+    0 0 0 1px rgb(0 0 0 / 0.65),
+    0 0 0.875rem color-mix(in srgb, var(--marinara-chat-chrome-accent) 35%, transparent);
 }
 
 .mari-chrome-accent-dot,
@@ -1377,10 +1523,14 @@
   align-items: center;
   justify-content: center;
   border: 1px solid var(--marinara-chat-chrome-button-border);
-  border-radius: 999px;
+  border-radius: 0.625rem;
   background: var(--marinara-chat-chrome-button-bg);
   color: var(--marinara-chat-chrome-button-text);
   font-weight: 600;
+}
+
+.mari-chrome-tag {
+  border-radius: 0.625rem;
 }
 
 .mari-chat-option-field {
@@ -1450,8 +1600,8 @@
   color: var(--marinara-chat-chrome-button-text-active);
   stroke: currentColor;
   transition:
-    color 180ms linear,
-    stroke 180ms linear;
+    opacity 180ms linear,
+    transform 180ms linear;
 }
 
 .mari-topbar-active-underline {
@@ -1468,6 +1618,11 @@
     color-mix(in srgb, var(--marinara-app-accent-solid) 24%, transparent),
     color-mix(in srgb, var(--marinara-app-accent-solid) 12%, transparent)
   );
+}
+
+.mari-gallery-card {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 12rem;
 }
 
 .mari-settings-accent-dot {
@@ -1512,9 +1667,8 @@
     .mari-topbar-button
   ) {
   transition:
-    background-color 180ms linear,
-    border-color 180ms linear,
-    color 180ms linear;
+    opacity 180ms linear,
+    transform 180ms linear;
 }
 
 /* ─────────────────────────────────────────────
@@ -1546,6 +1700,22 @@
   flex: 1 1 18rem;
   align-items: center;
   gap: 0.75rem;
+}
+
+.mari-editor-header--with-nav {
+  flex-wrap: nowrap;
+}
+
+.mari-editor-header--with-nav .mari-editor-header-main {
+  flex: 0 1 18rem;
+}
+
+.mari-editor-header--with-nav .mari-editor-navigation {
+  flex: 0 1 auto;
+}
+
+.mari-editor-header--with-nav .mari-editor-actions {
+  margin-left: auto;
 }
 
 .mari-settings-search-header {
@@ -1680,6 +1850,7 @@
 
 .mari-editor-title-line .mari-editor-title-input {
   width: auto;
+  min-width: 4rem;
   max-width: 100%;
   flex: 0 1 auto;
   overflow: hidden;
@@ -1908,12 +2079,9 @@
   max-width: 48rem;
 }
 
-.mari-editor-tab-rail {
-  border-color: var(--marinara-editor-divider);
-  background: color-mix(in srgb, var(--marinara-editor-surface-bg) 58%, transparent);
-}
-
 .mari-editor-tab {
+  height: 2.25rem;
+  min-height: 2.25rem;
   color: var(--marinara-editor-muted);
 }
 
@@ -1936,6 +2104,42 @@
   color: var(--marinara-editor-text);
   font-size: 0.625rem;
   line-height: 1;
+}
+
+.mari-editor-navigation-select {
+  border-color: var(--marinara-editor-border);
+  background: var(--marinara-editor-control-bg);
+  color: var(--marinara-editor-text);
+}
+
+.mari-editor-navigation-compact {
+  display: none;
+}
+
+.mari-editor-navigation-select:hover {
+  border-color: var(--marinara-editor-border-strong);
+  background: var(--marinara-editor-control-bg-hover);
+}
+
+.mari-editor-navigation-select:focus-visible {
+  border-color: var(--marinara-editor-border-strong);
+  --tw-ring-color: var(--marinara-editor-focus-ring);
+}
+
+.mari-editor-navigation-menu {
+  border-color: var(--marinara-editor-border);
+  background: var(--marinara-editor-surface-bg);
+  color: var(--marinara-editor-text);
+}
+
+.mari-editor-navigation-menu-item {
+  color: var(--marinara-editor-muted);
+}
+
+.mari-editor-navigation-menu-item:hover,
+.mari-editor-navigation-menu-item[aria-checked="true"] {
+  background: var(--marinara-editor-control-bg-hover);
+  color: var(--marinara-editor-text);
 }
 
 .mari-editor-section-jumps {
@@ -2295,29 +2499,93 @@
     overscroll-behavior-y: contain;
     touch-action: pan-y;
   }
+}
 
-  .mari-editor-tab-rail {
-    width: 100%;
-    max-width: 100%;
-    flex-direction: row;
-    overflow-x: auto;
-    overflow-y: hidden;
-    border-right: 0;
-    border-bottom: 1px solid var(--marinara-editor-divider);
-    padding: 0.375rem;
-    -webkit-overflow-scrolling: touch;
-    overscroll-behavior-x: contain;
-    touch-action: pan-x;
-  }
-
+@container (min-width: 96.001rem) and (max-width: 108rem) {
   .mari-editor-tab {
-    flex: 0 0 auto;
-    white-space: nowrap;
-    padding: 0.375rem 0.625rem;
+    gap: 0.125rem;
+    padding-inline: 0.25rem;
+    font-size: 0.625rem;
   }
 
-  .mari-editor-tab-badge {
-    margin-left: 0.25rem;
+  .mari-editor-tab > svg {
+    display: none;
+  }
+}
+
+@container (min-width: 64.001rem) {
+  .mari-editor-header--with-nav .mari-editor-action {
+    height: 2.25rem;
+    min-height: 2.25rem;
+    line-height: 1;
+  }
+
+  .mari-editor-header--with-nav .mari-editor-header-main--identity {
+    max-width: 42rem;
+    flex-basis: auto;
+  }
+
+  .mari-editor-header-main--identity .mari-editor-byline {
+    max-width: 24rem;
+    flex: 0 1 24rem;
+  }
+}
+
+@container (min-width: 90rem) {
+  .mari-editor-header--with-nav .mari-editor-header-main--identity {
+    flex-shrink: 0;
+  }
+
+  .mari-editor-header-main--identity .mari-editor-byline {
+    flex-shrink: 0;
+  }
+}
+
+@container (max-width: 96rem) {
+  .mari-editor-navigation-tabs {
+    display: none;
+  }
+
+  .mari-editor-navigation-compact {
+    display: block;
+  }
+
+  .mari-editor-header--with-nav {
+    height: auto;
+    min-height: 3.8125rem;
+    flex-basis: auto;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    padding-inline: 0.75rem;
+  }
+
+  .mari-editor-header--with-nav .mari-editor-header-main {
+    width: 100%;
+    min-width: 100%;
+    flex: 1 0 100%;
+  }
+
+  .mari-editor-header--with-nav .mari-editor-navigation {
+    width: min(8rem, 100%);
+    flex: 1 1 6rem;
+    max-width: 8rem;
+  }
+
+  .mari-editor-header--with-nav .mari-editor-actions {
+    width: auto;
+    margin-left: 0;
+    justify-content: flex-end;
+    border-top: 0;
+    padding-top: 0;
+  }
+
+  .mari-editor-header--with-nav .mari-editor-action--primary {
+    margin-right: 0;
+    padding-inline: 0.5rem;
+  }
+
+  .mari-editor-header--with-nav .mari-editor-save-label {
+    display: none;
   }
 }
 
@@ -2683,6 +2951,698 @@ body {
   }
 }
 
+.mari-home-browser-starfield {
+  pointer-events: none;
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  overflow: hidden;
+  opacity: 0.86;
+}
+
+.mari-home-browser-chrome {
+  background-color: var(--marinara-topbar-surface);
+}
+
+.mari-home-browser-address-row {
+  background-color: color-mix(in srgb, var(--marinara-topbar-surface) 96%, black 4%);
+}
+
+.mari-home-browser-address {
+  background-color: color-mix(in srgb, var(--marinara-topbar-surface) 90%, black 10%);
+}
+
+.mari-home-feed-shell {
+  width: 100%;
+  container-type: inline-size;
+}
+
+.mari-home-feed-grid {
+  display: grid;
+  gap: clamp(0.65rem, 0.8vw, 0.95rem);
+  grid-auto-flow: dense;
+  grid-auto-rows: var(--home-grid-row-height, 13rem);
+  align-items: stretch;
+}
+
+.mari-home-widget,
+.mari-home-widget > :not(.mari-home-widget__drag-handle) {
+  min-width: 0;
+  height: 100%;
+}
+
+.mari-home-widget {
+  --mari-home-widget-hover-transform: translate3d(0, -0.18rem, 0) scale(1.015);
+  --mari-home-widget-hover-filter: brightness(1.055) saturate(1.045)
+    drop-shadow(
+      0 0.7rem 0.9rem color-mix(in srgb, var(--home-module-accent, var(--marinara-app-accent-solid)) 22%, transparent)
+    );
+  grid-column: span 1;
+  grid-row: span 1;
+
+  isolation: isolate;
+  container-type: inline-size;
+}
+
+.mari-home-professor-widget .mari-professor-pixel-scene [data-part="sprite"] {
+  width: 68%;
+}
+
+.mari-home-professor-widget .mari-professor-pixel-scene [data-part="laptop"] {
+  width: 76%;
+}
+
+@container (max-width: 19rem) {
+  .mari-home-professor-widget {
+    grid-template-columns: minmax(0, 1fr) minmax(4.5rem, 34%);
+    padding: 0.65rem;
+  }
+
+  .mari-home-professor-widget [data-home-professor-description] {
+    -webkit-line-clamp: 5;
+  }
+
+  .mari-home-professor-widget [data-home-professor-action] svg {
+    display: none;
+  }
+
+  .mari-home-widget--learn .mari-home-widget-shortcut,
+  .mari-home-widget--community .mari-home-widget-shortcut {
+    min-height: 2rem;
+    gap: 0.45rem;
+    padding-inline: 0.25rem;
+  }
+
+  .mari-home-widget--learn .mari-home-widget-shortcut__icon,
+  .mari-home-widget--community .mari-home-widget-shortcut__icon {
+    width: 1.35rem;
+    height: 1.35rem;
+  }
+
+  .mari-home-widget--learn .mari-home-widget-shortcut__title,
+  .mari-home-widget--community .mari-home-widget-shortcut__title {
+    font-size: 0.6875rem;
+  }
+
+  .mari-home-widget--learn .mari-home-widget-shortcut__description,
+  .mari-home-widget--community .mari-home-widget-shortcut__description {
+    font-size: 0.5625rem;
+  }
+
+  .mari-home-widget--learn .mari-home-widget-shortcut-list,
+  .mari-home-widget--community .mari-home-widget-shortcut-list {
+    gap: 0.125rem;
+  }
+}
+
+@media (max-height: 52rem) {
+  .mari-home-widget--learn .mari-home-widget-shortcut,
+  .mari-home-widget--community .mari-home-widget-shortcut {
+    min-height: 2rem;
+    gap: 0.45rem;
+    padding-inline: 0.25rem;
+  }
+
+  .mari-home-widget--learn .mari-home-widget-shortcut__icon,
+  .mari-home-widget--community .mari-home-widget-shortcut__icon {
+    width: 1.35rem;
+    height: 1.35rem;
+  }
+
+  .mari-home-widget--learn .mari-home-widget-shortcut__title,
+  .mari-home-widget--community .mari-home-widget-shortcut__title {
+    font-size: 0.6875rem;
+  }
+
+  .mari-home-widget--learn .mari-home-widget-shortcut__description,
+  .mari-home-widget--community .mari-home-widget-shortcut__description {
+    font-size: 0.5625rem;
+  }
+
+  .mari-home-widget--learn .mari-home-widget-shortcut-list,
+  .mari-home-widget--community .mari-home-widget-shortcut-list {
+    gap: 0.125rem;
+  }
+}
+
+[data-theme="light"] .mari-home-widget {
+  --mari-home-widget-hover-filter: brightness(1.012) saturate(1.035)
+    drop-shadow(
+      0 0.7rem 0.9rem color-mix(in srgb, var(--home-module-accent, var(--marinara-app-accent-solid)) 16%, transparent)
+    );
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .mari-home-widget > :not(.mari-home-widget__drag-handle) {
+    transform-origin: center;
+    transition:
+      transform 190ms cubic-bezier(0.16, 1, 0.3, 1),
+      filter 190ms cubic-bezier(0.16, 1, 0.3, 1);
+  }
+
+  html:not(.mari-home-widget-drag-active) .mari-home-widget:not(.mari-home-widget--dragging):hover {
+    z-index: 6;
+  }
+
+  html:not(.mari-home-widget-drag-active)
+    .mari-home-widget:not(.mari-home-widget--dragging):hover
+    > :not(.mari-home-widget__drag-handle) {
+    filter: var(--mari-home-widget-hover-filter);
+    transform: var(--mari-home-widget-hover-transform);
+  }
+}
+
+.mari-home-feed-grid[data-home-grid-columns="1"] .mari-home-widget--recent {
+  grid-column: span 1;
+  grid-row: span 2;
+}
+
+.mari-home-feed-grid:not([data-home-grid-columns="1"]) .mari-home-widget--recent {
+  grid-column: span 2;
+  grid-row: span 2;
+}
+
+@media (min-width: 48rem) {
+  @container (min-width: 36rem) {
+    .mari-home-widget--recent [data-component="RecentChats"] {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+
+    .mari-home-widget--recent [data-recent-chat-index="4"],
+    .mari-home-widget--recent [data-recent-chat-index="5"] {
+      display: block;
+    }
+  }
+}
+
+.mari-home-empty-slot {
+  pointer-events: none;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  border: 1px dashed transparent;
+  border-radius: 1rem;
+  transition:
+    border-color 160ms cubic-bezier(0.16, 1, 0.3, 1),
+    background-color 160ms cubic-bezier(0.16, 1, 0.3, 1),
+    box-shadow 160ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+html.mari-home-widget-drag-active .mari-home-empty-slot {
+  pointer-events: auto;
+  border-color: color-mix(in srgb, var(--marinara-app-accent-solid) 46%, var(--border));
+  background-color: color-mix(in srgb, var(--marinara-app-accent-solid) 5%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--marinara-app-accent-solid) 8%, transparent);
+}
+
+.mari-home-widget--dragging > :not(.mari-home-widget__drag-handle) {
+  opacity: 0.12;
+  filter: saturate(0.55);
+  transition:
+    opacity 140ms ease,
+    filter 140ms ease;
+}
+
+.mari-home-widget--dragging::after {
+  content: "";
+  pointer-events: none;
+  position: absolute;
+  inset: 0;
+  z-index: 15;
+  border: 2px dashed color-mix(in srgb, var(--marinara-app-accent-solid) 78%, white 8%);
+  border-radius: 1rem;
+  background: color-mix(in srgb, var(--marinara-app-accent-solid) 8%, transparent);
+  box-shadow:
+    inset 0 0 0 1px color-mix(in srgb, var(--marinara-app-accent-solid) 18%, transparent),
+    0 0 1.35rem -0.75rem var(--marinara-app-accent-solid);
+}
+
+.mari-home-widget-drag-preview {
+  pointer-events: none;
+  position: fixed;
+  inset: 0 auto auto 0;
+  z-index: 9999;
+  overflow: visible;
+  opacity: 0.96;
+  filter: drop-shadow(0 1.25rem 1.25rem rgb(0 0 0 / 0.34));
+  transform-origin: center;
+  will-change: transform, opacity;
+}
+
+.mari-home-widget-drag-preview > * {
+  min-width: 0;
+  width: 100%;
+  height: 100%;
+}
+
+html.mari-home-widget-drag-active,
+html.mari-home-widget-drag-active * {
+  cursor: grabbing !important;
+  user-select: none !important;
+}
+
+.mari-home-browser-star {
+  position: absolute;
+  display: block;
+  border-radius: 999px;
+  background: currentcolor;
+  box-shadow:
+    0 0 0.35rem currentcolor,
+    0 0 0.9rem color-mix(in srgb, currentcolor 48%, transparent);
+  opacity: 0.12;
+  transform: translate3d(-50%, -50%, 0) scale(0.58);
+  animation: mari-home-browser-twinkle 6s cubic-bezier(0.45, 0, 0.55, 1) infinite;
+  will-change: transform, opacity;
+  backface-visibility: hidden;
+  contain: strict;
+}
+
+.mari-home-browser-star:nth-child(5n) {
+  border-radius: 0;
+  transform: translate3d(-50%, -50%, 0) rotate(45deg) scale(0.6);
+}
+
+.mari-home-professor-popup {
+  transform-origin: bottom right;
+}
+
+.mari-home-professor-popup__sprite {
+  animation: mari-home-professor-arrive 900ms cubic-bezier(0.16, 1, 0.3, 1) both;
+  transform-origin: bottom center;
+}
+
+.mari-home-professor-popup__bubble {
+  animation: mari-home-professor-bubble-arrive 650ms 280ms cubic-bezier(0.16, 1, 0.3, 1) both;
+  transition: opacity 120ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.mari-home-professor-popup__bubble::before,
+.mari-home-professor-popup__bubble::after {
+  content: none;
+  display: none;
+}
+
+.mari-home-professor-popup__bubble-tail {
+  display: block;
+  position: absolute;
+  left: -0.82rem;
+  bottom: 1.1rem;
+  width: 0.9rem;
+  height: 1.25rem;
+  z-index: -1;
+  transform-origin: center;
+}
+
+.mari-home-professor-popup__bubble-tail::before,
+.mari-home-professor-popup__bubble-tail::after {
+  content: "";
+  position: absolute;
+  clip-path: polygon(0 50%, 100% 0, 100% 100%);
+}
+
+.mari-home-professor-popup__bubble-tail::before {
+  inset: 0;
+  background: color-mix(in srgb, var(--marinara-chat-chrome-accent) 48%, var(--border));
+}
+
+.mari-home-professor-popup__bubble-tail::after {
+  left: 0.2rem;
+  bottom: 0.09rem;
+  width: 0.72rem;
+  height: 1.05rem;
+  background: color-mix(in srgb, var(--marinara-chat-chrome-accent) 8%, var(--card));
+}
+
+.mari-home-professor-popup__bubble[data-tail-side="right"] .mari-home-professor-popup__bubble-tail {
+  right: -0.82rem;
+  left: auto;
+  transform: scaleX(-1);
+}
+
+.mari-home-professor-popup__arrival-frame {
+  background-position: 0% 0;
+  animation: mari-home-professor-frame-cycle 1.45s steps(3, end) 80ms both;
+  will-change: background-position;
+}
+
+.mari-home-professor-popup__drag-frame {
+  left: 45%;
+  top: 9%;
+  width: 120%;
+  height: 114%;
+  background-position: 3.1% 0;
+  animation:
+    mari-home-professor-drag-frame-cycle 680ms steps(1, end) infinite,
+    mari-home-professor-dangle-sway 680ms cubic-bezier(0.45, 0, 0.55, 1) infinite;
+  animation-play-state: paused;
+  backface-visibility: hidden;
+  contain: paint;
+  filter: brightness(0.97) saturate(0.66) hue-rotate(1deg) contrast(1.1);
+  image-rendering: pixelated;
+  opacity: 0;
+  transform-origin: 45% 12.2%;
+  transform: translate3d(-45%, -12.2%, 0);
+  visibility: hidden;
+  will-change: background-position, transform;
+}
+
+.mari-home-professor-popup[data-dragging="true"] .mari-home-professor-popup__drag-frame {
+  animation-play-state: running;
+  opacity: 1;
+  visibility: visible;
+}
+
+.mari-home-professor-popup[data-dragging="true"] .mari-home-professor-popup__rest-frame {
+  visibility: hidden;
+}
+
+.mari-home-professor-popup[data-dragging="true"] .mari-home-professor-popup__bubble {
+  pointer-events: none;
+}
+
+html.mari-home-professor-drag-active,
+html.mari-home-professor-drag-active * {
+  cursor: grabbing !important;
+  user-select: none !important;
+}
+
+.mari-home-professor-popup__idle-stage {
+  animation: mari-home-professor-idle 5.6s ease-in-out infinite;
+  animation-play-state: paused;
+  transform-origin: bottom center;
+}
+
+.mari-home-professor-popup__idle-stage--active {
+  animation-play-state: running;
+}
+
+.mari-home-professor-popup__idle {
+  opacity: 1;
+}
+
+.mari-home-professor-popup__blink {
+  opacity: 0;
+  animation: mari-home-professor-blink 5.6s steps(1, end) infinite;
+  animation-play-state: paused;
+}
+
+.mari-home-professor-popup__idle-stage--active .mari-home-professor-popup__blink {
+  animation-play-state: running;
+}
+
+.mari-home-professor-popup__state-image {
+  transform-origin: bottom center;
+  will-change: transform, opacity;
+}
+
+.mari-home-professor-popup__state-image--map {
+  animation: mari-home-professor-map 520ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.mari-home-professor-popup__state-image--shrug {
+  animation: mari-home-professor-shrug 480ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.mari-home-discovery-card {
+  animation: mari-home-discovery-swap 320ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+@keyframes mari-home-browser-twinkle {
+  0%,
+  100% {
+    opacity: 0.08;
+    transform: translate3d(-50%, -50%, 0) scale(0.5);
+  }
+  48% {
+    opacity: 0.82;
+    transform: translate3d(-50%, -50%, 0) scale(1.28);
+  }
+  62% {
+    opacity: 0.3;
+    transform: translate3d(-50%, -50%, 0) scale(0.86);
+  }
+}
+
+@keyframes mari-home-professor-drag-frame-cycle {
+  0%,
+  24.99% {
+    background-position: 3.1% 0;
+  }
+  25%,
+  49.99% {
+    background-position: 34.48% 0;
+  }
+  50%,
+  74.99% {
+    background-position: 66.12% 0;
+  }
+  75%,
+  100% {
+    background-position: 98.15% 0;
+  }
+}
+
+@keyframes mari-home-professor-dangle-sway {
+  0%,
+  100% {
+    transform: translate3d(-45%, -12.2%, 0) rotate(-0.7deg);
+  }
+  50% {
+    transform: translate3d(-45%, -12.2%, 0) rotate(0.7deg);
+  }
+}
+
+@keyframes mari-home-professor-arrive {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 4.5rem, 0) scale(0.94);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+}
+
+@keyframes mari-home-professor-bubble-arrive {
+  from {
+    opacity: 0;
+    transform: translate3d(0.75rem, 0.5rem, 0) scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+}
+
+@keyframes mari-home-professor-frame-cycle {
+  from {
+    background-position: 0% 0;
+  }
+  to {
+    background-position: 100% 0;
+  }
+}
+
+@keyframes mari-home-professor-idle {
+  0%,
+  100% {
+    transform: translate3d(0, 0, 0) scaleY(1);
+  }
+  50% {
+    transform: translate3d(0, -0.12rem, 0) scaleY(1.006);
+  }
+}
+
+@keyframes mari-home-professor-blink {
+  0%,
+  72%,
+  76%,
+  100% {
+    opacity: 0;
+  }
+  73%,
+  75% {
+    opacity: 1;
+  }
+}
+
+@keyframes mari-home-professor-map {
+  0% {
+    opacity: 1;
+    transform: translate3d(0, 0.5rem, 0) scale(0.9, 0.96);
+  }
+  72% {
+    opacity: 1;
+    transform: translate3d(0, -0.12rem, 0) scale(1.018, 1.01);
+  }
+  100% {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+}
+
+@keyframes mari-home-professor-shrug {
+  0% {
+    opacity: 1;
+    transform: translate3d(0, 0.4rem, 0) scale(0.94);
+  }
+  62% {
+    opacity: 1;
+    transform: translate3d(0, -0.16rem, 0) scale(1.015);
+  }
+  100% {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+}
+
+@keyframes mari-home-discovery-swap {
+  from {
+    opacity: 0;
+    transform: translate3d(0.35rem, 0, 0);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mari-home-widget {
+    --mari-home-widget-hover-filter: none;
+    --mari-home-widget-hover-transform: none;
+  }
+
+  .mari-home-widget > :not(.mari-home-widget__drag-handle) {
+    transition: none;
+  }
+
+  .mari-home-browser-star {
+    animation: none;
+    opacity: 0.24;
+  }
+
+  .mari-home-professor-popup {
+    animation: none;
+  }
+
+  .mari-home-professor-popup__sprite,
+  .mari-home-professor-popup__bubble,
+  .mari-home-professor-popup__arrival-frame,
+  .mari-home-professor-popup__drag-frame,
+  .mari-home-professor-popup__idle-stage,
+  .mari-home-professor-popup__blink,
+  .mari-home-professor-popup__state-image,
+  .mari-home-discovery-card {
+    animation: none;
+  }
+
+  .mari-home-professor-popup__arrival-frame {
+    background-position: 100% 0;
+  }
+}
+
+html[data-marinara-reduced-effects="true"] .mari-home-browser-star,
+html[data-marinara-effects-paused="true"] .mari-home-browser-star {
+  animation: none;
+  opacity: 0.18;
+}
+
+html[data-marinara-reduced-effects="true"] .mari-home-widget,
+html[data-marinara-effects-paused="true"] .mari-home-widget {
+  --mari-home-widget-hover-filter: none;
+  --mari-home-widget-hover-transform: none;
+}
+
+html[data-marinara-reduced-effects="true"] .mari-home-widget > :not(.mari-home-widget__drag-handle),
+html[data-marinara-effects-paused="true"] .mari-home-widget > :not(.mari-home-widget__drag-handle) {
+  transition: none;
+}
+
+html[data-marinara-reduced-effects="true"] .mari-home-professor-popup {
+  animation: none;
+}
+
+html[data-marinara-reduced-effects="true"] .mari-home-professor-popup__sprite,
+html[data-marinara-reduced-effects="true"] .mari-home-professor-popup__bubble,
+html[data-marinara-reduced-effects="true"] .mari-home-professor-popup__arrival-frame,
+html[data-marinara-reduced-effects="true"] .mari-home-professor-popup__drag-frame,
+html[data-marinara-reduced-effects="true"] .mari-home-professor-popup__idle-stage,
+html[data-marinara-reduced-effects="true"] .mari-home-professor-popup__blink,
+html[data-marinara-reduced-effects="true"] .mari-home-professor-popup__state-image,
+html[data-marinara-reduced-effects="true"] .mari-home-discovery-card {
+  animation: none;
+}
+
+html[data-marinara-reduced-effects="true"] .mari-home-professor-popup__arrival-frame {
+  background-position: 100% 0;
+}
+
+/* Preserve the current Mari frame while the browser tab/window is inactive.
+   App.tsx owns the single visibility/focus listener; Home only consumes it. */
+html[data-marinara-effects-paused="true"] .mari-home-professor-popup__sprite,
+html[data-marinara-effects-paused="true"] .mari-home-professor-popup__bubble,
+html[data-marinara-effects-paused="true"] .mari-home-professor-popup__arrival-frame,
+html[data-marinara-effects-paused="true"] .mari-home-professor-popup__drag-frame,
+html[data-marinara-effects-paused="true"] .mari-home-professor-popup__idle-stage,
+html[data-marinara-effects-paused="true"] .mari-home-professor-popup__blink,
+html[data-marinara-effects-paused="true"] .mari-home-professor-popup__state-image,
+html[data-marinara-effects-paused="true"] .mari-professor-pixel-scene [data-part="sprite"],
+html[data-marinara-effects-paused="true"] .mari-professor-pixel-scene [data-part="screen"] span,
+html[data-marinara-effects-paused="true"] .mari-professor-pixel-scene [data-part="base"] i {
+  animation-play-state: paused !important;
+}
+
+html[data-marinara-reduced-effects="true"] .retro-card,
+html[data-marinara-reduced-effects="true"] .y2k-star,
+html[data-marinara-reduced-effects="true"] .y2k-star-md,
+html[data-marinara-reduced-effects="true"] .y2k-star-lg,
+html[data-marinara-reduced-effects="true"] .pulse-glow,
+html[data-marinara-reduced-effects="true"] .mari-logo-gradient-text--active,
+html[data-marinara-reduced-effects="true"] .mari-rgb-toggle-track,
+html[data-marinara-reduced-effects="true"] .bunny-glow,
+html[data-marinara-reduced-effects="true"] .gradient-border::before,
+html[data-marinara-reduced-effects="true"] .pastel-gradient,
+html[data-marinara-reduced-effects="true"] .retro-divider,
+html[data-marinara-reduced-effects="true"] .roleplay-hud-scroll-track,
+html[data-marinara-reduced-effects="true"] .game-expression-reaction__halo,
+html[data-marinara-reduced-effects="true"] .game-expression-reaction__symbol,
+html[data-marinara-reduced-effects="true"] .shimmer,
+html[data-marinara-reduced-effects="true"] .animate-ping,
+html[data-marinara-reduced-effects="true"] .animate-pulse,
+html[data-marinara-reduced-effects="true"] .animate-float,
+html[data-marinara-reduced-effects="true"] .animate-pulse-ring,
+html[data-marinara-reduced-effects="true"] .glimmer-streaming,
+html[data-marinara-reduced-effects="true"] .rpg-streaming::after,
+html[data-marinara-reduced-effects="true"] .game-map-fog,
+html[data-marinara-reduced-effects="true"] .game-map-marquee-track,
+html[data-marinara-reduced-effects="true"] .game-party-marker,
+html[data-marinara-reduced-effects="true"] .game-campfire,
+html[data-marinara-reduced-effects="true"] .game-combat-border,
+html[data-marinara-reduced-effects="true"] .game-expression-reaction__bubble,
+html[data-marinara-reduced-effects="true"] .game-expression-reaction__drop,
+html[data-marinara-reduced-effects="true"] [class^="anim-text-"],
+html[data-marinara-reduced-effects="true"] [class*=" anim-text-"],
+html[data-marinara-reduced-effects="true"] .mari-professor-pixel-scene [data-part="sprite"],
+html[data-marinara-reduced-effects="true"] .mari-professor-pixel-scene [data-part="screen"] span,
+html[data-marinara-reduced-effects="true"] .mari-professor-pixel-scene [data-part="base"] i {
+  animation: none !important;
+}
+
+html[data-marinara-reduced-effects="true"] .bunny-glow,
+html[data-marinara-reduced-effects="true"] .pulse-glow,
+html[data-marinara-reduced-effects="true"] .glimmer-streaming {
+  box-shadow: none !important;
+  filter: none !important;
+}
+
+html[data-marinara-reduced-effects="true"] [class*="backdrop-blur"],
+html[data-marinara-reduced-effects="true"] .retro-card,
+html[data-marinara-reduced-effects="true"] .os-window {
+  -webkit-backdrop-filter: none !important;
+  backdrop-filter: none !important;
+}
+
 /* Tailwind v4 preflight does not restore italic/bold for semantic elements.
    Explicit rules ensure *italic* and **bold** markdown renders correctly
    across all browsers (fixes Opera GX and others). */
@@ -2707,6 +3667,13 @@ strong {
   max-width: 100%;
   overflow-wrap: anywhere;
   color: var(--foreground);
+}
+
+.mari-md-rule {
+  margin: 0.75em 0;
+  border: 0;
+  border-top: 1px solid currentcolor;
+  opacity: 0.3;
 }
 
 /* Hide <style> text inside inline SVGs (browser renders CSS text as visible SVG content) */
@@ -2771,12 +3738,47 @@ strong {
   color: #e8e6e3;
   overflow-wrap: anywhere;
   word-break: break-word;
+  /* Code is LTR syntax whatever surrounds it. The direction must live in CSS,
+     not only the renderer's dir attribute: the chat HTML path re-sanitizes
+     markup with an attribute allowlist that strips `dir`. */
+  direction: ltr;
+  unicode-bidi: isolate;
+}
+
+/* Mixed-direction defence, docs viewer only: links and bold runs frequently
+   hold LTR text (English UI labels, URLs) inside RTL prose; isolating them
+   keeps the bidi algorithm from dragging sentence punctuation around.
+   Scoped to .docs-reader-content because chat shares .mari-message-content
+   and isolation would change how existing RTL chat prose reorders. */
+.docs-reader-content a,
+.docs-reader-content strong {
+  unicode-bidi: isolate;
+}
+
+/* ==highlight== inside docs: inline padding severs cursive shaping across the
+   element boundary (Arabic contextual forms), so the docs reader drops it.
+   Chat keeps the padded look — same reasoning as the scoped rule above. */
+.docs-reader-content .mari-md-highlight {
+  padding: 0;
 }
 
 /* Strikethrough */
 .mari-message-content .mari-md-strikethrough {
   text-decoration: line-through;
   opacity: 0.7;
+}
+
+/* Discord-style inline underline and line-level subtext */
+.mari-md-underline {
+  text-decoration: underline;
+  text-underline-offset: 0.12em;
+}
+
+.mari-md-subtext {
+  display: block;
+  color: var(--muted-foreground);
+  font-size: 0.8125em;
+  line-height: 1.35;
 }
 
 /* Fenced code blocks */
@@ -2799,6 +3801,12 @@ strong {
   -webkit-overflow-scrolling: touch;
   white-space: pre;
   color: #d4d4d4;
+  /* Code is LTR even when the document around it is RTL. Lives in CSS, not
+     only the renderer's dir attribute, because the chat HTML path strips
+     attributes. No text-align here: direction alone realigns the block, and
+     text-align would override card/theme CSS that chat honors today. */
+  direction: ltr;
+  unicode-bidi: isolate;
 }
 .mari-message-content .mari-md-codeblock code {
   background: none;
@@ -2827,7 +3835,7 @@ strong {
 .mari-message-content .mari-md-codeblock-lang {
   position: absolute;
   top: 0;
-  right: 0;
+  inset-inline-end: 0;
   font-size: 0.7em;
   color: rgba(255, 255, 255, 0.3);
   padding: 0.25em 0.6em;
@@ -2849,7 +3857,7 @@ strong {
 /* Unordered lists */
 .mari-message-content .mari-md-ul {
   list-style: disc;
-  padding-left: 1.5em;
+  padding-inline-start: 1.5em;
   margin: 0.35em 0;
 }
 .mari-message-content .mari-md-ul .mari-md-ul {
@@ -2860,7 +3868,7 @@ strong {
 /* Ordered lists */
 .mari-message-content .mari-md-ol {
   list-style: decimal;
-  padding-left: 1.5em;
+  padding-inline-start: 1.5em;
   margin: 0.35em 0;
 }
 .mari-message-content .mari-md-ol .mari-md-ol {
@@ -2888,7 +3896,7 @@ strong {
 .mari-message-content .mari-md-table td {
   border: 1px solid rgba(255, 255, 255, 0.1);
   padding: 0.4em 0.75em;
-  text-align: left;
+  text-align: start;
 }
 .mari-message-content .mari-md-table th {
   background: rgba(255, 255, 255, 0.06);
@@ -2918,14 +3926,17 @@ strong {
   background-color: color-mix(in srgb, var(--primary) 24%, transparent);
   color: var(--foreground);
   border-radius: 2px;
-  padding: 0 0.1em;
+  /* No inset at all (native-find style): inline padding severs cursive
+     shaping across the mark boundary (Arabic contextual forms, lam-alef),
+     and a box-shadow substitute grows the tint vertically and double-paints
+     where two marks abut. The bare background hugs the glyphs safely. */
   font-weight: 500;
 }
 
 /* Task lists */
 .mari-message-content .mari-md-task-list {
   list-style: none;
-  padding-left: 0.25em;
+  padding-inline-start: 0.25em;
   margin: 0.35em 0;
 }
 .mari-message-content li.mari-md-task-item {
@@ -3173,6 +4184,45 @@ strong {
   --tracker-panel-base-line-height: 1.5rem;
 }
 
+/* Downloadable tracker panels render into light-DOM custom elements. Their
+   content stays package-owned, while this host shell keeps section material,
+   dividers, and constrained typography consistent with built-in trackers. */
+.mari-tracker-capability-section :is(.mn-tracker, .bh-tracker-launch) {
+  border-bottom: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.mari-tracker-capability-section .mn-tracker-veil {
+  display: none;
+}
+
+.mari-tracker-capability-section :is(.mn-tracker-title, .bh-tracker-launch__title) {
+  font-family: inherit;
+  font-size: 0.625rem;
+  font-weight: 600;
+  line-height: 0.75rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.mari-tracker-panel-scroll[data-tracker-content-constrained="true"]
+  .mari-tracker-capability-section
+  :is(.mn-tracker-title, .bh-tracker-launch__title) {
+  font-size: calc(0.625rem * var(--tracker-panel-font-scale));
+  line-height: calc(0.75rem * var(--tracker-panel-font-scale));
+}
+
+.mari-tracker-panel-scroll[data-tracker-content-constrained="true"] .mari-tracker-capability-section .mn-tracker-value {
+  font-size: calc(0.6875rem * var(--tracker-panel-font-scale));
+}
+
+.mari-tracker-panel-scroll[data-tracker-content-constrained="true"]
+  .mari-tracker-capability-section
+  .mn-tracker-value--empty {
+  line-height: calc(0.875rem * var(--tracker-panel-font-scale));
+}
+
 .mari-tracker-panel-scroll::-webkit-scrollbar {
   width: 0.25rem;
 }
@@ -3398,8 +4448,8 @@ strong {
   height: 0.1875rem;
   background: var(--y2k-purple);
   box-shadow:
-    0 0 10px 4px rgba(212, 173, 252, 0.6),
-    0 0 20px 8px rgba(212, 173, 252, 0.3);
+    0 0 10px 4px color-mix(in srgb, var(--y2k-purple) 60%, transparent),
+    0 0 20px 8px color-mix(in srgb, var(--y2k-purple) 30%, transparent);
   animation-duration: 5s;
 }
 
@@ -3417,12 +4467,12 @@ strong {
   0%,
   100% {
     box-shadow:
-      0 0 8px rgba(212, 173, 252, 0.15),
+      0 0 8px color-mix(in srgb, var(--primary) 15%, transparent),
       0 0 16px color-mix(in srgb, var(--primary) 10%, transparent);
   }
   50% {
     box-shadow:
-      0 0 12px rgba(212, 173, 252, 0.25),
+      0 0 12px color-mix(in srgb, var(--primary) 25%, transparent),
       0 0 24px color-mix(in srgb, var(--primary) 20%, transparent);
   }
 }
@@ -3451,7 +4501,7 @@ strong {
   color: transparent;
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
-  filter: drop-shadow(0 0 0.45rem rgba(236, 72, 153, 0.16));
+  filter: drop-shadow(0 0 0.45rem color-mix(in srgb, var(--mari-logo-title-pink) 16%, transparent));
 }
 
 .mari-logo-gradient-text--active {
@@ -3539,13 +4589,13 @@ strong {
   0%,
   100% {
     box-shadow:
-      0 0 8px rgba(236, 72, 153, 0.3),
-      0 0 16px rgba(168, 85, 247, 0.2);
+      0 0 8px color-mix(in srgb, var(--marinara-app-accent-solid) 30%, transparent),
+      0 0 16px color-mix(in srgb, var(--marinara-app-accent-solid) 20%, transparent);
   }
   50% {
     box-shadow:
-      0 0 12px rgba(236, 72, 153, 0.4),
-      0 0 24px rgba(168, 85, 247, 0.3);
+      0 0 12px color-mix(in srgb, var(--marinara-app-accent-solid) 40%, transparent),
+      0 0 24px color-mix(in srgb, var(--marinara-app-accent-solid) 30%, transparent);
   }
 }
 
@@ -3908,7 +4958,9 @@ strong {
   border-color: color-mix(in srgb, var(--mari-chat-drop-accent) 70%, transparent);
   background: color-mix(in srgb, var(--card) 92%, transparent);
   box-shadow: 0 0.5rem 1.5rem rgb(0 0 0 / 30%);
-  transition: transform 0.12s ease-out, box-shadow 0.12s ease-out;
+  transition:
+    transform 0.12s ease-out,
+    box-shadow 0.12s ease-out;
   animation: mari-chat-drop-card-in 0.16s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
@@ -4340,7 +5392,7 @@ strong {
   padding: 0.125rem;
   background: linear-gradient(135deg, var(--y2k-pink), var(--y2k-lavender), var(--y2k-purple));
   box-shadow:
-    0 0 12px rgba(var(--y2k-pink-rgb, 255, 143, 171), 0.25),
+    0 0 12px color-mix(in srgb, var(--y2k-pink) 25%, transparent),
     0 4px 12px rgba(0, 0, 0, 0.15);
   transition:
     box-shadow 0.3s,
@@ -4349,7 +5401,7 @@ strong {
 
 .glimmer-avatar-ring:hover {
   box-shadow:
-    0 0 20px rgba(var(--y2k-pink-rgb, 255, 143, 171), 0.4),
+    0 0 20px color-mix(in srgb, var(--y2k-pink) 40%, transparent),
     0 4px 16px rgba(0, 0, 0, 0.2);
   transform: scale(1.05);
 }
@@ -4381,7 +5433,7 @@ strong {
   pointer-events: none;
   opacity: 0;
   transition: opacity 0.3s;
-  box-shadow: 0 0 20px rgba(var(--y2k-pink-rgb, 255, 143, 171), 0.15);
+  box-shadow: 0 0 20px color-mix(in srgb, var(--y2k-pink) 15%, transparent);
 }
 
 .group:hover .glimmer-bubble::before {
@@ -4405,7 +5457,7 @@ strong {
   background: linear-gradient(135deg, color-mix(in srgb, var(--y2k-pink) 85%, var(--y2k-purple)), var(--y2k-purple));
   color: #fff;
   box-shadow:
-    0 2px 8px rgba(var(--y2k-pink-rgb, 255, 143, 171), 0.2),
+    0 2px 8px color-mix(in srgb, var(--y2k-pink) 20%, transparent),
     0 4px 16px rgba(0, 0, 0, 0.08);
   border: 1px solid rgba(255, 255, 255, 0.12);
 }
@@ -4413,7 +5465,7 @@ strong {
 .glimmer-streaming {
   box-shadow:
     0 0 0 2px color-mix(in srgb, var(--y2k-pink) 35%, transparent),
-    0 2px 8px rgba(var(--y2k-pink-rgb, 255, 143, 171), 0.2);
+    0 2px 8px color-mix(in srgb, var(--y2k-pink) 20%, transparent);
   animation: glimmer-pulse 2s ease-in-out infinite;
 }
 
@@ -4422,12 +5474,12 @@ strong {
   100% {
     box-shadow:
       0 0 0 2px color-mix(in srgb, var(--y2k-pink) 35%, transparent),
-      0 2px 8px rgba(var(--y2k-pink-rgb, 255, 143, 171), 0.2);
+      0 2px 8px color-mix(in srgb, var(--y2k-pink) 20%, transparent);
   }
   50% {
     box-shadow:
       0 0 0 3px color-mix(in srgb, var(--y2k-pink) 50%, transparent),
-      0 2px 16px rgba(var(--y2k-pink-rgb, 255, 143, 171), 0.35);
+      0 2px 16px color-mix(in srgb, var(--y2k-pink) 35%, transparent);
   }
 }
 
@@ -4716,7 +5768,11 @@ strong {
   position: absolute;
   inset: -0.1875rem;
   border-radius: 50%;
-  background: linear-gradient(135deg, rgba(168, 85, 247, 0.3), rgba(236, 72, 153, 0.3));
+  background: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--marinara-app-accent-solid) 30%, transparent),
+    color-mix(in srgb, var(--marinara-app-accent-solid) 18%, transparent)
+  );
   z-index: -1;
   filter: blur(6px);
   opacity: 0.6;
@@ -4728,7 +5784,12 @@ strong {
   position: absolute;
   inset: -0.125rem;
   border-radius: 0;
-  background: linear-gradient(180deg, rgba(168, 85, 247, 0.2), rgba(236, 72, 153, 0.16), rgba(251, 146, 60, 0.08));
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--marinara-app-accent-solid) 20%, transparent),
+    color-mix(in srgb, var(--marinara-app-accent-solid) 16%, transparent),
+    rgba(251, 146, 60, 0.08)
+  );
   z-index: -1;
   filter: blur(8px);
   opacity: 0.45;
@@ -4973,30 +6034,63 @@ strong {
     padding-right: max(4px, env(safe-area-inset-right)) !important;
   }
 
-  .mari-topbar-left {
-    flex: 1 1 auto;
-    gap: clamp(2px, 1vw, 8px) !important;
-  }
-
+  .mari-topbar-left,
   .mari-topbar-left-controls {
-    gap: clamp(1px, 0.75vw, 4px) !important;
+    display: contents;
   }
 
   .mari-topbar-panel-nav {
-    flex: 1 1 auto !important;
-    min-width: 0;
-    gap: clamp(0px, 0.5vw, 2px) !important;
-    padding: 2px !important;
+    display: contents;
   }
 
   .mari-topbar-action {
+    order: 10;
+    flex: 1 1 0;
     min-width: 0;
+    width: auto !important;
     padding: clamp(3px, 1.35vw, 7px) !important;
   }
 
   .mari-topbar-action > svg {
     width: clamp(13px, 3.9vw, 17px);
     height: clamp(13px, 3.9vw, 17px);
+  }
+
+  .mari-topbar-left-controls .mari-topbar-action {
+    order: 1;
+  }
+
+  .mari-topbar-action[data-topbar-hover-key="characters"] {
+    order: 3;
+  }
+
+  .mari-topbar-action[data-topbar-hover-key="personas"] {
+    order: 4;
+  }
+
+  .mari-topbar-action[data-topbar-hover-key="lorebooks"] {
+    order: 5;
+  }
+
+  .mari-topbar-action[data-topbar-hover-key="presets"] {
+    order: 6;
+  }
+
+  .mari-topbar-action[data-topbar-hover-key="connections"] {
+    order: 7;
+  }
+
+  .mari-topbar-action[data-topbar-hover-key="agents"] {
+    order: 8;
+  }
+
+  .mari-topbar-action[data-topbar-hover-key="settings"] {
+    order: 9;
+  }
+
+  .mari-topbar-action[data-topbar-hover-key="home"] > svg {
+    width: clamp(15px, 4.4vw, 18px);
+    height: clamp(15px, 4.4vw, 18px);
   }
 
   .mari-settings-tab-button {
@@ -5128,6 +6222,11 @@ strong {
   .mari-topbar-action > svg {
     width: clamp(12px, 3.8vw, 15px);
     height: clamp(12px, 3.8vw, 15px);
+  }
+
+  .mari-topbar-action[data-topbar-hover-key="home"] > svg {
+    width: clamp(14px, 4.4vw, 17px);
+    height: clamp(14px, 4.4vw, 17px);
   }
 
   .retro-badge {

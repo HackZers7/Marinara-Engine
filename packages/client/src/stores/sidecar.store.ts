@@ -106,12 +106,14 @@ interface SidecarState {
       Pick<
         SidecarConfig,
         | "useForTrackers"
+        | "useAsAgentsDefault"
         | "useForGameScene"
         | "contextSize"
         | "maxTokens"
         | "temperature"
         | "topP"
         | "topK"
+        | "maxParallelJobs"
         | "gpuLayers"
         | "enableNativeToolCalls"
         | "embeddingPooling"

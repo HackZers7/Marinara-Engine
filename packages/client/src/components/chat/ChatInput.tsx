@@ -36,6 +36,7 @@ import {
   PROFESSOR_MARI_ID,
   type MariSuggestionChip,
   type Message,
+  type Persona,
 } from "@marinara-engine/shared";
 import {
   matchSlashCommand,
@@ -46,7 +47,8 @@ import {
 } from "../../lib/slash-commands";
 import { createInputMacroResolverForChat, isPromptPreviewMacro } from "../../lib/chat-macros";
 import { parseChatMetadata } from "../../lib/chat-display";
-import { cn, getAvatarCropStyle, type AvatarCropValue } from "../../lib/utils";
+import type { AvatarCrop } from "@marinara-engine/shared";
+import { cn, getAvatarCropStyle } from "../../lib/utils";
 import { applyTextareaQuoteFormat } from "../../lib/textarea-quotes";
 import { translateDraftText } from "../../lib/draft-translation";
 import { prepareImageAttachment } from "../../lib/chat-attachment-images";
@@ -187,7 +189,7 @@ interface ChatInputProps {
     id: string;
     name: string;
     avatarUrl: string | null;
-    avatarCrop?: AvatarCropValue | null;
+    avatarCrop?: AvatarCrop | null;
   }>;
   onExpressionChange?: (
     characterId: string,
@@ -266,7 +268,7 @@ export const ChatInput = memo(function ChatInput({
   const isStreaming = hasActiveStream && !isBackgroundIllustration;
   const isInputBusy = isGenerationSendBlocked({
     streamActive: hasActiveStream,
-    agentsProcessing: interactionsLocked,
+    agentsProcessing: mode === "roleplay" ? false : interactionsLocked,
     backgroundIllustration: isBackgroundIllustration,
   });
   const responseQueue = useChatStore((s) =>
@@ -765,12 +767,19 @@ export const ChatInput = memo(function ChatInput({
     return {
       chatId: activeChatId,
       mode,
-      generate: generateWithNarrativeDirector,
+      generate: (params) =>
+        generateWithNarrativeDirector({
+          ...params,
+          ...(params.impersonate && canSubmitSpatialMove && pendingSpatialTransition
+            ? { pendingSpatialTransition: pendingSpatialTransition.transition }
+            : {}),
+        }),
       createMessage: async (data) => {
         await createMessage.mutateAsync(data);
         requestChatScrollToBottom({ chatId: activeChatId, behavior: "auto" });
       },
       invalidate: () => qc.invalidateQueries({ queryKey: chatKeys.all }),
+      invalidateCharacter: (characterId) => qc.invalidateQueries({ queryKey: characterKeys.detail(characterId) }),
       characterNames: activeCharacterNames,
       characters: activeChatCharacters,
       requiresManualGuideTarget,
@@ -790,6 +799,7 @@ export const ChatInput = memo(function ChatInput({
     createMessage,
     activeCharacterNames,
     activeChatCharacters,
+    canSubmitSpatialMove,
     requiresManualGuideTarget,
     removeFromResponseQueue,
     latestAssistantMessage,
@@ -797,6 +807,7 @@ export const ChatInput = memo(function ChatInput({
     onExpressionChange,
     onIllustrate,
     availableCapabilityIds,
+    pendingSpatialTransition,
     qc,
   ]);
 
@@ -970,7 +981,7 @@ export const ChatInput = memo(function ChatInput({
     }
 
     const cachedCharacters = qc.getQueryData<Array<{ id: string; data: unknown }>>(characterKeys.list());
-    const cachedPersonas = qc.getQueryData<Array<Record<string, unknown>>>(characterKeys.personas);
+    const cachedPersonas = qc.getQueryData<Persona[]>(characterKeys.personas);
     const resolveInputMacros = createInputMacroResolverForChat(chat, cachedCharacters, cachedPersonas, normalized);
     const chatMeta = parseChatMetadata(chat?.metadata);
     let message = applyToUserInput(normalized, {
@@ -1216,7 +1227,7 @@ export const ChatInput = memo(function ChatInput({
 
     const chat = useChatStore.getState().activeChat;
     const cachedCharacters = qc.getQueryData<Array<{ id: string; data: unknown }>>(characterKeys.list());
-    const cachedPersonas = qc.getQueryData<Array<Record<string, unknown>>>(characterKeys.personas);
+    const cachedPersonas = qc.getQueryData<Persona[]>(characterKeys.personas);
     const resolveInputMacros = createInputMacroResolverForChat(chat, cachedCharacters, cachedPersonas, normalized);
     const chatMeta = parseChatMetadata(chat?.metadata);
     let message = applyToUserInput(normalized, {
@@ -1457,17 +1468,20 @@ export const ChatInput = memo(function ChatInput({
     handleImpersonateQuickButton,
   ]);
 
-  const scheduleDraftPersistence = useCallback((chatId: string, text: string) => {
-    if (draftTimerRef.current) clearTimeout(draftTimerRef.current);
-    draftTimerRef.current = setTimeout(() => {
-      draftTimerRef.current = null;
-      if (text.trim()) {
-        setInputDraft(chatId, text);
-      } else {
-        clearInputDraft(chatId);
-      }
-    }, 300);
-  }, [clearInputDraft, setInputDraft]);
+  const scheduleDraftPersistence = useCallback(
+    (chatId: string, text: string) => {
+      if (draftTimerRef.current) clearTimeout(draftTimerRef.current);
+      draftTimerRef.current = setTimeout(() => {
+        draftTimerRef.current = null;
+        if (text.trim()) {
+          setInputDraft(chatId, text);
+        } else {
+          clearInputDraft(chatId);
+        }
+      }, 300);
+    },
+    [clearInputDraft, setInputDraft],
+  );
 
   const scheduleTextareaResize = useCallback((el: HTMLTextAreaElement, delay: number) => {
     if (resizeTimerRef.current) clearTimeout(resizeTimerRef.current);
@@ -1510,11 +1524,7 @@ export const ChatInput = memo(function ChatInput({
   }, [releaseHeldDeleteWork]);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (
-      mode === "roleplay" &&
-      (e.key === "Backspace" || e.key === "Delete") &&
-      !heldDeleteKeyRef.current
-    ) {
+    if (mode === "roleplay" && (e.key === "Backspace" || e.key === "Delete") && !heldDeleteKeyRef.current) {
       heldDeleteKeyRef.current = true;
       heldDeleteDraftRef.current = null;
       heldDeleteResizeRef.current = null;
@@ -1612,10 +1622,7 @@ export const ChatInput = memo(function ChatInput({
         resizeTimerRef.current = null;
       }
     } else {
-      scheduleTextareaResize(
-        el,
-        ROLEPLAY_INPUT_DELETE_RESIZE_IDLE_MS,
-      );
+      scheduleTextareaResize(el, ROLEPLAY_INPUT_DELETE_RESIZE_IDLE_MS);
     }
 
     // Slash command autocomplete
@@ -1725,7 +1732,8 @@ export const ChatInput = memo(function ChatInput({
     });
   }, [charPickerOpen]);
 
-  const showCharPicker = !!activeChatCharacters && activeChatCharacters.length > 1 && !!groupResponseOrder;
+  const showCharPicker =
+    !!chatCharacters && chatCharacters.length > 1 && !!activeChatCharacters?.length && !!groupResponseOrder;
   const showDraftTranslateButton = chatMetadata.showInputTranslateButton === true;
 
   const handleTranslateDraft = useCallback(async () => {
@@ -1862,6 +1870,7 @@ export const ChatInput = memo(function ChatInput({
           view="runtime"
           capabilityProps={{
             chatId: activeChatId,
+            chatMode: mode,
             disabled: isInputBusy,
             pendingTransition: pendingSpatialTransition,
             onPendingTransitionChange: (pending: unknown) => {

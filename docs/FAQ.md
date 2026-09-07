@@ -34,7 +34,7 @@ Replace `192.168.1.42` with your own host IP address.
 
 5. Sign in if the browser asks for the Basic Auth username and password. If you see an **Access blocked** page instead, finish step 2 on the host first.
 
-On the same computer (`127.0.0.1`), you never need a password. Other devices are blocked until you set up access control (Basic Auth or an IP allowlist). Each option is explained in [Remote Access](REMOTE_ACCESS.md).
+On ordinary desktop installs, the same computer (`127.0.0.1`) does not need a password. APK-managed Android installs add a private localhost login so another Android app cannot impersonate Marinara, but the Android wrapper creates and uses that credential automatically. Other devices are blocked until you set up access control (Basic Auth or an IP allowlist). Each option is explained in [Remote Access](REMOTE_ACCESS.md).
 
 If the two devices are not on the same network, a tool like Tailscale can help. Tailscale gives each device a stable private address. You can then connect from anywhere without exposing Marinara to the public internet. If you cannot connect, see [Troubleshooting](TROUBLESHOOTING.md).
 
@@ -42,7 +42,9 @@ If the two devices are not on the same network, a tool like Tailscale can help. 
 
 There is no separate native mobile app. On a phone or tablet, you use the same web app in a browser. Most mobile browsers offer an **Add to Home Screen** or **Install App** option that makes it feel like a real app, with no browser bar. This is called a PWA (Progressive Web App, a website you can install like an app).
 
-On Android, you can also install an APK, the installable app file for Android. It runs Marinara locally on the phone. See [Android Installation](installation/android-termux.md). On iPhone and iPad, see the [iOS PWA Guide](installation/ios-pwa.md).
+On Android, you can also [download the latest APK directly](https://github.com/Pasta-Devs/Marinara-Engine/releases/latest/download/marinara-engine-android.apk). It runs Marinara locally on the phone through Termux. Installing it does not require a signing key, password, or local-access secret; see [Android Installation](installation/android-termux.md) for the Android permission prompts. On iPhone and iPad, see the [iOS PWA Guide](installation/ios-pwa.md).
+
+The Android wrapper signs in automatically when it opens its APK-managed Termux server. The private credential is only visible to users who intentionally open the server in another browser on that phone: open `/android-login`, run `cat ~/.marinara-engine/android-secret` in Termux, and paste the displayed value. The local `mari` CLI reads that same launcher-managed secret automatically. Manual Termux installs keep the normal localhost and network-access rules.
 
 ## What are the three chat modes?
 
@@ -57,6 +59,16 @@ Each mode has its own getting-started guide. Start with the mode you want, then 
 ## How do I change the timezone used by Conversation schedules?
 
 Open a Conversation and choose **Schedule timezone** in Chat Settings, or choose it while creating schedules in the Conversation setup flow. Marinara starts with the timezone reported by your device, but you can select any supported IANA timezone or choose **Use device** to reset it. This is one global preference for all Conversation chats, including server-side autonomous messages, and it syncs to other devices connected to the same Marinara server.
+
+## Does each Conversation chat have its own schedule?
+
+No. A schedule belongs to the character, and every Conversation chat with that character uses the same one. Edit it in **Character Editor -> Convo -> Weekly schedule**, or from the schedule controls in Chat Settings; either way the change applies everywhere.
+
+To get instant replies in one chat, open its Chat Settings and turn **Conversation schedules** off. That switch is per chat. The character stays available in that chat, keeps its schedule, and your other chats do not change. An active manual status override still takes precedence and applies in that chat, including an override such as **dnd**.
+
+Existing chats that never used schedules stay off until you turn them on. New chats you start with a character that has a schedule use it from the start.
+
+A manual status override also belongs to the character. If you set a character to **online** in one chat, the character is online in every chat. Use **clear** to remove the override.
 
 ## Do I need an API key to use Marinara?
 
@@ -114,7 +126,7 @@ An **agent** is an optional AI helper that runs during a chat to do a focused jo
 
 ## How do I set up Noodle?
 
-Noodle is Marinara's local, fictional social network for your characters. Open the **Noodle** tab and open its **Settings**. Invite characters or character folders, choose a generation connection under **Refresh**, then select **Refresh now** to generate the first activity. You can also set automatic refresh times, image generation, random users, and carryover into your chats.
+Noodle is Marinara's local, fictional social network for your characters. First open **Agents** → **Download Agents** and install **Noodle & NoodleR**, then restart Marinara when prompted. Open **Home** → **Noodle**, enter its **Settings**, invite characters or character folders, choose a generation connection under **Refresh**, then select **Refresh now** to generate the first activity. You can also set automatic refresh times, image generation, random users, and carryover into your chats.
 
 See [Noodle: The In-App Social Timeline](noodle/overview.md) and [Noodle Settings and Chat Carryover](noodle/settings.md) for the full guides.
 
@@ -166,13 +178,13 @@ Professor Mari can still edit ordinary Marinara source files. Dependency files, 
 
 Note: on an ordinary remote address, Professor Mari's data-changing actions need both Basic Auth and an admin secret. Trusted or allowlisted network routes can use the bypasses described in [Remote Access](REMOTE_ACCESS.md).
 
-## How do storyboard animations work?
+## What is the Storyboard Agent, and how do I use it in Game Mode?
 
-A **storyboard** turns completed story text into a short sequence of keyframe images and can add animated clips. In **Game Mode**, it follows one finished game master narration turn. In **Roleplay**, the Storyboard Agent combines newly completed exchanges into an inline episode after a configurable number of user and assistant messages.
+The downloadable **Storyboard** Agent turns completed story text into an ordered sequence of keyframe images and can animate each keyframe into a short clip. In **Game Mode**, it storyboards one finished GM narration turn and displays the frames in a floating viewer or as the Game background. In **Roleplay**, it combines newly completed exchanges into an inline episode.
 
-To make one by hand, open the **Gallery** and click **Create storyboard**. Game Mode can reopen its viewer with **View storyboard**; Roleplay displays the result below the assistant response that ends the episode.
+To use it in Game Mode, install **Storyboard** from **Agents > Download Agents**. Open the Game, go to **Chat Settings > Agents**, turn on **Enable Agents** and **Enable Storyboards**, and set an image connection in the Game or the global Storyboard setup. Finish a GM narration turn, then open the **Gallery** and click **Create storyboard**. Use **View storyboard** to reopen its viewer.
 
-To make them automatically, open **Chat Settings**, go to **Agents**, and find the **Storyboards** card. Game Mode has separate illustration and animation toggles. Roleplay offers **Manual only**, **Still images**, or **Animations**, plus **Messages per episode**, which counts both user and assistant messages. Video clips need a Video Generation connection. For both workflows, see [Storyboard Engine Guide](game/storyboard.md).
+For automatic Game Storyboards, turn on **Automatic Storyboard Illustrations**. Also turn on **Automatic Storyboard Animations** and select a Video Generation connection when you want clips. The new-game wizard's **Storyboard Optimized** presentation only shapes GM narration; it does not install or activate the Agent. For Game and Roleplay setup, prompts, viewers, migration behavior, and troubleshooting, see the [Storyboard Agent Guide](game/storyboard.md).
 
 ## Can characters talk out loud in a call?
 
@@ -182,7 +194,7 @@ If you want to talk back with your microphone and the browser's own speech recog
 
 ## Can Marinara generate images?
 
-Yes. Add an image generation connection, for example **Pollinations** (needs no key) or a paid provider. Marinara can then create character avatars, scene art, selfies, and Game Mode storyboards. See [Connecting to an AI Provider](connections/connecting-to-a-provider.md) to add one.
+Yes. Add an image generation connection, for example **Pollinations** (needs no key) or a paid provider. Marinara can then create character avatars, scene art, selfies, and Storyboard Agent keyframes in Roleplay or Game Mode. See [Connecting to an AI Provider](connections/connecting-to-a-provider.md) to add one.
 
 ## How do I read the documentation inside the app?
 

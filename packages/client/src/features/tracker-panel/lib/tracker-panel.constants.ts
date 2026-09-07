@@ -1,4 +1,3 @@
-import { BUILT_IN_AGENTS } from "@marinara-engine/shared";
 import type { TrackerPanelSection, TrackerStatDensity } from "../tracker-panel.types";
 export {
   DEFAULT_TRACKER_CARD_PORTRAIT_FOCUS_X as TRACKER_PORTRAIT_DEFAULT_FOCUS_X,
@@ -9,14 +8,11 @@ export {
   MAX_TRACKER_CARD_PORTRAIT_ZOOM as TRACKER_PORTRAIT_MAX_ZOOM,
 } from "../../../lib/tracker-card-colors";
 
-export const TRACKER_AGENT_TYPE_IDS = new Set(
-  BUILT_IN_AGENTS.filter((agent) => agent.category === "tracker").map((agent) => agent.id),
-);
-
 export const TRACKER_SECTION_AGENT_TYPES: Partial<Record<TrackerPanelSection, string>> = {
   world: "world-state",
   persona: "persona-stats",
   characters: "character-tracker",
+  inventory: "inventory-tracker",
   quests: "quest",
   custom: "custom-tracker",
 };
@@ -25,6 +21,7 @@ export const TRACKER_SECTION_RERUN_TITLES: Partial<Record<TrackerPanelSection, s
   world: "Re-run world state tracker",
   persona: "Re-run persona tracker",
   characters: "Re-run character tracker",
+  inventory: "Re-run inventory tracker",
   quests: "Re-run quest tracker",
   custom: "Re-run custom tracker",
 };

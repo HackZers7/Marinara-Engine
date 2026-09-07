@@ -5,6 +5,7 @@
 
 import type { DaySummaryEntry, WeekSummaryEntry } from "@marinara-engine/shared";
 import type { BaseLLMProvider } from "../llm/base-provider.js";
+import { tryParseJsonRecord } from "../../lib/json-repair.js";
 import { stripConversationPromptTimestamps } from "./transcript-sanitize.js";
 import { formatZonedConversationDate, toZonedWallClockDate } from "./timezone.js";
 
@@ -72,6 +73,7 @@ interface GenerateMissingConversationSummariesOptions {
   rolloverHour?: number;
   timeZone?: string;
   timeoutMs?: number;
+  maxTokens?: number;
   maxMissingDays?: number;
 }
 
@@ -235,23 +237,22 @@ function cleanJsonishResponse(raw: string): string {
   if (fenceMatch) return fenceMatch[1]!.trim();
   const first = trimmed.indexOf("{");
   const last = trimmed.lastIndexOf("}");
-  if (first >= 0 && last > first) return trimmed.slice(first, last + 1);
+  if (first >= 0) return trimmed.slice(first, last > first ? last + 1 : undefined);
   return trimmed;
 }
 
-function parseSummaryResponse(raw: string): DaySummaryEntry {
+export function parseSummaryResponse(raw: string): DaySummaryEntry {
   const trimmed = raw.trim();
-  try {
-    const parsed = JSON.parse(cleanJsonishResponse(trimmed)) as Record<string, unknown>;
+  const parsed = tryParseJsonRecord(cleanJsonishResponse(trimmed));
+  if (parsed) {
     return {
       summary: (typeof parsed.summary === "string" ? parsed.summary : trimmed).trim(),
       keyDetails: Array.isArray(parsed.keyDetails)
         ? parsed.keyDetails.filter((detail): detail is string => typeof detail === "string" && detail.trim().length > 0)
         : [],
     };
-  } catch {
-    return { summary: trimmed, keyDetails: [] };
   }
+  return { summary: trimmed, keyDetails: [] };
 }
 
 function dailySummarySystemPrompt(date: string, scope: string): string {
@@ -325,6 +326,7 @@ async function summarizeDayBucket(
   model: string,
   bucket: ConversationSummaryDayBucket,
   timeoutMs: number,
+  maxTokens: number,
 ): Promise<DaySummaryEntry> {
   const transcriptLines = bucket.msgs.map((message) => `${message.author}: ${message.content}`);
   const chunks = chunkTranscriptLines(transcriptLines, DAILY_TRANSCRIPT_CHUNK_CHARS);
@@ -336,6 +338,7 @@ async function summarizeDayBucket(
       dailySummarySystemPrompt(bucket.date, "a full day's"),
       chunks[0] ?? "",
       timeoutMs,
+      maxTokens,
     );
   }
 
@@ -347,7 +350,7 @@ async function summarizeDayBucket(
       dailySummarySystemPrompt(bucket.date, `part ${i + 1} of ${chunks.length} of a long day's`),
       chunks[i]!,
       timeoutMs,
-      2048,
+      maxTokens,
     );
     if (partial.summary || partial.keyDetails.length > 0) partials.push(partial);
   }
@@ -370,6 +373,7 @@ async function summarizeDayBucket(
     ].join("\n"),
     combinedInput,
     timeoutMs,
+    maxTokens,
   );
 }
 
@@ -403,7 +407,10 @@ function errorMessage(error: unknown): string {
 }
 
 function storedSummaryFailureError(error: string): string {
-  const sanitized = error.replace(/[\u0000-\u001f\u007f]+/gu, " ").replace(/\s+/gu, " ").trim();
+  const sanitized = error
+    .replace(/[\u0000-\u001f\u007f]+/gu, " ")
+    .replace(/\s+/gu, " ")
+    .trim();
   if (!sanitized) return "Summary generation failed";
   return sanitized.length > MAX_STORED_SUMMARY_FAILURE_ERROR_CHARS
     ? `${sanitized.slice(0, MAX_STORED_SUMMARY_FAILURE_ERROR_CHARS - 1)}…`
@@ -450,6 +457,7 @@ export async function generateMissingConversationSummaries(
 ): Promise<ConversationSummaryRunResult> {
   const rolloverHour = Math.max(0, Math.min(11, Math.floor(options.rolloverHour ?? 4)));
   const timeoutMs = options.timeoutMs ?? DEFAULT_SUMMARY_TIMEOUT_MS;
+  const maxTokens = options.maxTokens ?? 4096;
   const now = options.now ?? new Date();
   const todayDateKey = logicalDateKey(now, rolloverHour, options.timeZone);
   const daySummaries = normalizeDaySummaries(options.metadata.daySummaries);
@@ -467,8 +475,7 @@ export async function generateMissingConversationSummaries(
   const pastBuckets = buckets.filter((bucket) => bucket.date !== todayDateKey);
   const missingBuckets = pastBuckets.filter(
     (bucket) =>
-      !daySummaries[bucket.date] &&
-      !shouldSkipFailedSummary(summaryFailures.days[bucket.date], options.model, now),
+      !daySummaries[bucket.date] && !shouldSkipFailedSummary(summaryFailures.days[bucket.date], options.model, now),
   );
   const maxMissingDays =
     typeof options.maxMissingDays === "number" && Number.isFinite(options.maxMissingDays)
@@ -483,7 +490,7 @@ export async function generateMissingConversationSummaries(
 
   for (const bucket of bucketsToProcess) {
     try {
-      const entry = await summarizeDayBucket(options.provider, options.model, bucket, timeoutMs);
+      const entry = await summarizeDayBucket(options.provider, options.model, bucket, timeoutMs, maxTokens);
       if (entry.summary || entry.keyDetails.length > 0) {
         daySummaries[bucket.date] = entry;
         newlyGeneratedDays[bucket.date] = entry;
@@ -547,6 +554,7 @@ export async function generateMissingConversationSummaries(
         weekSummarySystemPrompt(rangeLabel),
         dayBlocks.join("\n\n"),
         timeoutMs,
+        maxTokens,
       );
       if (entry.summary || entry.keyDetails.length > 0) {
         weekSummaries[weekKey] = entry;

@@ -9,8 +9,10 @@ import {
 } from "react";
 import { MoreHorizontal } from "lucide-react";
 import { cn } from "../../lib/utils";
+import { CHAT_SUMMARY_OPEN_REQUEST_EVENT, requestChatSummaryOpen } from "../../lib/chat-floating-ui-events";
+import { CHAT_HELP_CLOSE_EVENT, CHAT_HELP_OPEN_REQUEST_EVENT, readChatHelpEventMode } from "../../lib/chat-help-events";
 import { useLocalizedUiText } from "../../localization/use-localized-ui-text";
-import { ROLEPLAY_POPOVER_SHELL } from "./roleplay-popover-styles";
+import { NEUTRAL_PANEL_SHELL } from "../ui/neutral-surface-styles";
 import { useTranslation as useUiTranslation } from "react-i18next";
 
 type ChatToolbarButtonClassInput = {
@@ -21,7 +23,7 @@ type ChatToolbarButtonClassInput = {
   sizeClassName?: string;
 };
 
-export type ChatToolbarPanelAction = "gallery" | "settings" | "summary";
+export type ChatToolbarPanelAction = "gallery" | "search" | "settings" | "summary";
 
 export const CHAT_TOOLBAR_ICON_GAP_CLASS = "gap-0.5";
 export const CHAT_TOOLBAR_DEFAULT_BUTTON_SIZE_CLASS = "h-8 w-8";
@@ -29,7 +31,7 @@ export const CHAT_TOOLBAR_IDENTITY_PILL_SIZE_CLASS = "h-8 w-auto max-md:h-9";
 export const CHAT_TOOLBAR_MOBILE_OVERFLOW_HEIGHT_CLASS = "max-md:h-9";
 export const CHAT_TOOLBAR_OVERFLOW_BUTTON_SIZE_CLASS = "h-8 w-8 max-md:h-9 max-md:w-9";
 export const CHAT_TOOLBAR_OVERFLOW_MENU_CLASS = cn(
-  ROLEPLAY_POPOVER_SHELL,
+  NEUTRAL_PANEL_SHELL,
   "marinara-chat-toolbar-overflow-menu flex w-9 flex-col items-center p-1",
   CHAT_TOOLBAR_ICON_GAP_CLASS,
 );
@@ -57,16 +59,16 @@ export function getChatFloatingPanelDesktopRight(anchor: ChatToolbarFloatingPane
 
 function readChatToolbarPanelAction(target: EventTarget | null): ChatToolbarPanelAction | null {
   if (!(target instanceof Element)) return null;
-  const value = target.closest(`[${CHAT_TOOLBAR_PANEL_ACTION_ATTRIBUTE}]`)?.getAttribute(
-    CHAT_TOOLBAR_PANEL_ACTION_ATTRIBUTE,
-  );
-  return value === "gallery" || value === "settings" || value === "summary" ? value : null;
+  const value = target
+    .closest(`[${CHAT_TOOLBAR_PANEL_ACTION_ATTRIBUTE}]`)
+    ?.getAttribute(CHAT_TOOLBAR_PANEL_ACTION_ATTRIBUTE);
+  return value === "gallery" || value === "search" || value === "settings" || value === "summary" ? value : null;
 }
 
 export function readAnnouncedChatToolbarPanelAction(event: Event): ChatToolbarPanelAction | null {
   if (!(event instanceof CustomEvent)) return null;
   const value = (event.detail as { panelAction?: unknown } | null)?.panelAction;
-  return value === "gallery" || value === "settings" || value === "summary" ? value : null;
+  return value === "gallery" || value === "search" || value === "settings" || value === "summary" ? value : null;
 }
 
 export function isChatToolbarPanelTrigger(target: EventTarget | null, panelAction: ChatToolbarPanelAction) {
@@ -87,7 +89,10 @@ export function readChatToolbarFloatingPanelAnchor(trigger: HTMLElement | null):
     if (!overflowMenu) return null;
     const menuRect = overflowMenu.getBoundingClientRect();
     const minimumPanelWidth = Math.min(160, Math.max(96, window.innerWidth - CHAT_FLOATING_PANEL_PADDING * 2));
-    const rightEdge = Math.max(CHAT_FLOATING_PANEL_PADDING + minimumPanelWidth, menuRect.left - CHAT_FLOATING_PANEL_PADDING);
+    const rightEdge = Math.max(
+      CHAT_FLOATING_PANEL_PADDING + minimumPanelWidth,
+      menuRect.left - CHAT_FLOATING_PANEL_PADDING,
+    );
     return {
       right: Math.max(CHAT_FLOATING_PANEL_PADDING, window.innerWidth - rightEdge),
       rightInset: 0,
@@ -131,6 +136,7 @@ export function ChatToolbarButton({
   icon,
   title,
   onClick,
+  helpTarget,
   panelAction,
   size,
 }: {
@@ -138,6 +144,7 @@ export function ChatToolbarButton({
   icon: ReactNode;
   title: string;
   onClick: (event: ReactMouseEvent<HTMLButtonElement>) => void;
+  helpTarget?: string;
   panelAction?: ChatToolbarPanelAction;
   size?: "sm";
 }) {
@@ -151,6 +158,7 @@ export function ChatToolbarButton({
         announceChatToolbarAction(panelAction ?? null);
         onClick(event);
       }}
+      data-chat-help={helpTarget ?? panelAction}
       data-chat-toolbar-panel-action={panelAction}
       className={getChatToolbarButtonClass({ className, compact: size === "sm" })}
       title={localizedTitle}
@@ -166,11 +174,13 @@ export function ChatToolbarMenu({
   className,
   desktopChildren,
   mobileChildren,
+  openSummaryOnRequest = false,
 }: {
   children?: ReactNode;
   className?: string;
   desktopChildren?: ReactNode;
   mobileChildren?: ReactNode;
+  openSummaryOnRequest?: boolean;
 }) {
   const { t: localizeUi } = useUiTranslation();
   const [open, setOpen] = useState(false);
@@ -179,6 +189,7 @@ export function ChatToolbarMenu({
   const desktopRef = useRef<HTMLDivElement>(null);
   const btnRef = useRef<HTMLDivElement>(null);
   const popRef = useRef<HTMLDivElement>(null);
+  const pendingSummaryChatIdRef = useRef<string | null>(null);
   const neededDesktopWidthRef = useRef(0);
   const lastViewportWidthRef = useRef(typeof window === "undefined" ? 0 : window.innerWidth);
   const [pos, setPos] = useState<{ top: number; right: number }>({ top: 0, right: 0 });
@@ -247,6 +258,7 @@ export function ChatToolbarMenu({
     if (!open) return;
     const handle = (event: MouseEvent) => {
       const target = event.target as Node;
+      if (target instanceof Element && target.closest("[data-chat-help-overlay]")) return;
       if (target instanceof Element && target.closest(`[data-chat-branch-popover],${CHAT_FLOATING_PANEL_SELECTOR}`)) {
         return;
       }
@@ -255,6 +267,50 @@ export function ChatToolbarMenu({
     };
     document.addEventListener("mousedown", handle);
     return () => document.removeEventListener("mousedown", handle);
+  }, [open]);
+
+  useEffect(() => {
+    const handleHelpOpen = (event: Event) => {
+      const root = rootRef.current;
+      if (!root || root.getBoundingClientRect().width <= 1) return;
+      const mode = root.closest<HTMLElement>("[data-chat-mode]")?.dataset.chatMode;
+      if (readChatHelpEventMode(event) !== mode) return;
+      if (window.innerWidth < 768 || overflowCollapsed) setOpen(true);
+    };
+    const handleHelpClose = (event: Event) => {
+      const mode = rootRef.current?.closest<HTMLElement>("[data-chat-mode]")?.dataset.chatMode;
+      if (readChatHelpEventMode(event) === mode) setOpen(false);
+    };
+    window.addEventListener(CHAT_HELP_OPEN_REQUEST_EVENT, handleHelpOpen);
+    window.addEventListener(CHAT_HELP_CLOSE_EVENT, handleHelpClose);
+    return () => {
+      window.removeEventListener(CHAT_HELP_OPEN_REQUEST_EVENT, handleHelpOpen);
+      window.removeEventListener(CHAT_HELP_CLOSE_EVENT, handleHelpClose);
+    };
+  }, [overflowCollapsed]);
+
+  useEffect(() => {
+    const handleSummaryOpenRequest = (event: Event) => {
+      if (!openSummaryOnRequest || !(event instanceof CustomEvent)) return;
+      const chatId = (event.detail as { chatId?: unknown } | null)?.chatId;
+      const root = rootRef.current;
+      if (typeof chatId !== "string" || !root || root.getBoundingClientRect().width <= 0) return;
+      const hasVisibleSummaryAction = Array.from(
+        document.querySelectorAll<HTMLElement>('[data-chat-toolbar-panel-action="summary"]'),
+      ).some((action) => action.getBoundingClientRect().width > 0);
+      if (hasVisibleSummaryAction) return;
+      pendingSummaryChatIdRef.current = chatId;
+      setOpen(true);
+    };
+    window.addEventListener(CHAT_SUMMARY_OPEN_REQUEST_EVENT, handleSummaryOpenRequest);
+    return () => window.removeEventListener(CHAT_SUMMARY_OPEN_REQUEST_EVENT, handleSummaryOpenRequest);
+  }, [openSummaryOnRequest]);
+
+  useEffect(() => {
+    const chatId = pendingSummaryChatIdRef.current;
+    if (!open || !chatId) return;
+    pendingSummaryChatIdRef.current = null;
+    requestAnimationFrame(() => requestChatSummaryOpen(chatId));
   }, [open]);
 
   return (

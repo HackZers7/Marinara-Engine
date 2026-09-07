@@ -6,6 +6,7 @@ import {
   noodleInteractions,
   noodlePostUnlocks,
 } from "../../db/schema/noodle.js";
+import { remapNoodlerReservePolicyFingerprint } from "../storage/noodle.storage.js";
 import { newId } from "../../utils/id-generator.js";
 import { ProfileImportRequestError } from "./profile-import-errors.js";
 
@@ -16,9 +17,7 @@ export type ProfileNoodleImportWarning = {
   path?: string;
   message: string;
 };
-type ProfileImportWarning =
-  | ProfileNoodleImportWarning
-  | { type: "missing_asset"; path: string; message: string };
+type ProfileImportWarning = ProfileNoodleImportWarning | { type: "missing_asset"; path: string; message: string };
 
 type AccountIdentity = { platform: string; kind: string; entityId: string };
 
@@ -128,6 +127,8 @@ function remapSnapshotRows(snapshot: Snapshot, accountMap: ReadonlyMap<string, s
     "noodle_interactions",
     "noodle_activity_digests",
     "noodle_refresh_runs",
+    "noodler_prepared_posts",
+    "noodler_creator_reply_claims",
   ]) {
     const sourceRows = snapshot.tables[tableName];
     if (!sourceRows) continue;
@@ -151,6 +152,15 @@ function remapSnapshotRows(snapshot: Snapshot, accountMap: ReadonlyMap<string, s
         row.accountIds = remapJsonArray(row.accountIds, accountMap);
       } else if (tableName === "noodle_refresh_runs") {
         row.activeAccountIds = remapJsonArray(row.activeAccountIds, accountMap);
+      } else if (tableName === "noodler_prepared_posts" || tableName === "noodler_creator_reply_claims") {
+        // Reserve rows and reply claims point at the creator account; left unremapped they dangle
+        // or attach to whichever creator happens to hold the source ID after the collision rename.
+        row.creatorAccountId = accountMap.get(String(row.creatorAccountId)) ?? row.creatorAccountId;
+        // The prepared row's policy fingerprint embeds the linked source account ID too, and a
+        // stale one makes reconciliation discard the restored reserve on the next poll.
+        if (tableName === "noodler_prepared_posts") {
+          row.policyFingerprint = remapNoodlerReservePolicyFingerprint(row.policyFingerprint, accountMap);
+        }
       }
       return row;
     });

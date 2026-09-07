@@ -34,36 +34,44 @@ export function normalizeAgentPhaseForType(
   return normalizeAgentPhaseValue(configuredPhase, fallback);
 }
 
+/** Ordered vocabulary of result types that agents can produce. */
+export const AGENT_RESULT_TYPE_VALUES = [
+  "game_state_update",
+  "text_rewrite",
+  "sprite_change",
+  "echo_message",
+  "quest_update",
+  "image_prompt",
+  "context_injection",
+  "continuity_check",
+  "director_event",
+  "lorebook_update",
+  "character_card_update",
+  "character_card_create",
+  "background_change",
+  "character_tracker_update",
+  "persona_stats_update",
+  "custom_tracker_update",
+  "inventory_tracker_update",
+  "spotify_control",
+  "youtube_control",
+  "local_music_control",
+  "haptic_command",
+  "cyoa_choices",
+  "secret_plot",
+  "game_master_narration",
+  "party_action",
+  "game_map_update",
+  "game_state_transition",
+  "prompt_patch",
+  "character_activity_update",
+  "frontend_theme_update",
+  "about_me_update",
+  "memory_nag",
+] as const;
+
 /** The result type an agent can produce. */
-export type AgentResultType =
-  | "game_state_update"
-  | "text_rewrite"
-  | "sprite_change"
-  | "echo_message"
-  | "quest_update"
-  | "image_prompt"
-  | "context_injection"
-  | "continuity_check"
-  | "director_event"
-  | "lorebook_update"
-  | "character_card_update"
-  | "background_change"
-  | "character_tracker_update"
-  | "persona_stats_update"
-  | "custom_tracker_update"
-  | "spotify_control"
-  | "youtube_control"
-  | "local_music_control"
-  | "haptic_command"
-  | "cyoa_choices"
-  | "secret_plot"
-  | "game_master_narration"
-  | "party_action"
-  | "game_map_update"
-  | "game_state_transition"
-  | "prompt_patch"
-  | "frontend_theme_update"
-  | "about_me_update";
+export type AgentResultType = (typeof AGENT_RESULT_TYPE_VALUES)[number];
 
 /** Configuration for a single agent. */
 export interface AgentConfig {
@@ -268,7 +276,7 @@ export interface AgentResult {
   error: string | null;
 }
 
-export type AgentWriteApprovalKind = "lorebook_update" | "summary_update";
+export type AgentWriteApprovalKind = "character_card_create" | "lorebook_update" | "summary_update";
 
 export interface AgentWriteApprovalProposal {
   kind: AgentWriteApprovalKind;
@@ -300,7 +308,8 @@ export interface AgentCallDebugEvent {
   agentName: string;
   phase: string;
   model: string;
-  temperature: number;
+  /** Effective sampling value sent to the provider; omitted when connection/model policy suppresses it. */
+  temperature?: number;
   maxTokens: number;
   messageCount: number;
   messages?: AgentCallDebugMessage[];
@@ -310,7 +319,10 @@ export interface AgentCallDebugEvent {
   completionTokens?: number;
   reasoningTokens?: number;
   totalTokens?: number;
+  /** Duration of this provider request. */
   durationMs?: number;
+  /** Cumulative elapsed time for a multi-round agent run. */
+  elapsedMs?: number;
   finishReason?: string | null;
   response?: string;
   responsePreview?: string;
@@ -352,6 +364,8 @@ export interface AgentContext {
   characters: Array<{
     id: string;
     name: string;
+    /** Persisted character-card world name, when configured. */
+    world?: string;
     description: string;
     personality?: string;
     scenario?: string;
@@ -365,6 +379,12 @@ export interface AgentContext {
     avatarPath?: string | null;
     avatarCrop?: unknown;
     rpgStats?: import("./character.js").RPGStatsConfig;
+  }>;
+  /** Every character attached to the chat, with only the data needed for activity routing. */
+  chatCharacters?: Array<{
+    id: string;
+    name: string;
+    active: boolean;
   }>;
   /** Latest known tracker entries, including recurring characters that are currently absent. */
   characterTrackerHistory?: import("./game-state.js").PresentCharacter[];
@@ -397,6 +417,8 @@ export interface AgentContext {
     id: string;
     content: string;
   }>;
+  /** Per-lorebook total entry counts (for {{lorebooksize::ID}} macro in agent prompts). */
+  lorebookEntryCounts?: Record<string, number>;
   /**
    * Semantic source material resolved for custom agents that opt into vector access.
    * The runtime keeps this out of ordinary agent prompts and injects it only for
@@ -524,6 +546,7 @@ export const MIN_AGENT_MAX_TOKENS = 128;
 export const MAX_AGENT_MAX_TOKENS = 32768;
 
 export const CUSTOM_AGENT_CAPABILITY_IDS = [
+  "create_characters",
   "create_lorebooks",
   "edit_lorebooks",
   "edit_messages",
@@ -537,6 +560,7 @@ export const CUSTOM_AGENT_CAPABILITY_IDS = [
   "trigger_image_generation",
   "access_vectors",
   "edit_main_prompt",
+  "manage_chat_characters",
 ] as const;
 
 export type CustomAgentCapability = (typeof CUSTOM_AGENT_CAPABILITY_IDS)[number];
@@ -603,15 +627,18 @@ export function createImportedAgentType(sourceType: string): string {
 const CUSTOM_AGENT_CAPABILITY_SET = new Set<string>(CUSTOM_AGENT_CAPABILITY_IDS);
 
 const CUSTOM_AGENT_RESULT_CAPABILITY: Partial<Record<AgentResultType, CustomAgentCapability>> = {
+  character_card_create: "create_characters",
   text_rewrite: "edit_messages",
   lorebook_update: "edit_lorebooks",
   character_tracker_update: "edit_trackers",
   persona_stats_update: "edit_trackers",
   custom_tracker_update: "edit_trackers",
+  inventory_tracker_update: "edit_trackers",
   quest_update: "edit_trackers",
   game_state_update: "edit_trackers",
   image_prompt: "trigger_image_generation",
   prompt_patch: "edit_main_prompt",
+  character_activity_update: "manage_chat_characters",
   frontend_theme_update: "change_frontend_styling",
   background_change: "change_backgrounds",
   sprite_change: "change_sprites",
@@ -677,7 +704,11 @@ export function isExternallyImportedAgent(type: unknown, settings: unknown): boo
   const source = parsed[CUSTOM_AGENT_IMPORT_SOURCE_SETTING];
   if (source === "file" || source === "folder" || source === "repository") return true;
   if (parsed.customAgentRepositorySource && typeof parsed.customAgentRepositorySource === "object") return true;
-  return typeof type === "string" && (type.startsWith("custom-import-") || type.startsWith("repo-"));
+  // Repository-backed Agents predate explicit provenance and retain a stable
+  // repo-* identity. File/folder imports always persist provenance now, so a
+  // locally authored Agent whose slug happens to begin with "import" must not
+  // be disabled as an external import.
+  return typeof type === "string" && type.startsWith("repo-");
 }
 
 export function getDefaultBuiltInAgentSettings(agentType: string): Record<string, unknown> {
@@ -710,6 +741,18 @@ const OBSOLETE_BUILT_IN_PROMPT_TEMPLATE_IDS: Record<string, ReadonlySet<string>>
   illustrator: new Set(["illustration", "sketch"]),
 };
 
+const ADDITIONAL_BUILT_IN_PROMPT_TEMPLATE_COLLECTION_KEYS: Record<string, readonly string[]> = {
+  storyboard: [
+    "illustrationTemplates",
+    "videoTemplates",
+    "animationRefinementTemplates",
+    "roleplayEpisodeTemplates",
+    "roleplayStyleTemplates",
+    "roleplayAnimationTemplates",
+    "roleplayOutputTemplates",
+  ],
+};
+
 const RETIRED_BUILT_IN_AGENT_TOOLS: Record<string, ReadonlySet<string>> = {
   expression: new Set(["set_expression"]),
 };
@@ -719,6 +762,30 @@ export function normalizeBuiltInAgentEnabledTools(agentType: string, value: unkn
   const enabledTools = value.filter((tool): tool is string => typeof tool === "string");
   const retiredTools = RETIRED_BUILT_IN_AGENT_TOOLS[agentType];
   return retiredTools ? enabledTools.filter((tool) => !retiredTools.has(tool)) : enabledTools;
+}
+
+function mergeBuiltInPromptTemplateCollection(
+  defaultValue: unknown,
+  savedValue: unknown,
+  obsoleteIds: ReadonlySet<string> = new Set(),
+): AgentPromptTemplateOption[] {
+  const defaultOptions = normalizeAgentPromptTemplateOptions(defaultValue);
+  const savedOptions = normalizeAgentPromptTemplateOptions(savedValue);
+  const savedOptionsById = new Map(
+    savedOptions.filter((entry) => !obsoleteIds.has(entry.id)).map((entry) => [entry.id, entry]),
+  );
+  const usedIds = new Set<string>();
+  const mergedDefaultOptions = defaultOptions.map((defaultOption) => {
+    usedIds.add(defaultOption.id);
+    const savedOption = savedOptionsById.get(defaultOption.id);
+    return savedOption ? { ...defaultOption, ...savedOption } : defaultOption;
+  });
+  const customOptions = savedOptions.filter((entry) => {
+    if (obsoleteIds.has(entry.id) || usedIds.has(entry.id)) return false;
+    usedIds.add(entry.id);
+    return true;
+  });
+  return [...mergedDefaultOptions, ...customOptions];
 }
 
 export function mergeBuiltInAgentSettings(agentType: string, settings: unknown): Record<string, unknown> {
@@ -735,29 +802,19 @@ export function mergeBuiltInAgentSettings(agentType: string, settings: unknown):
     ...normalizedSettings,
   };
 
-  const defaultPromptTemplates = normalizeAgentPromptTemplateOptions(defaults.promptTemplates);
-  const savedPromptTemplates = normalizeAgentPromptTemplateOptions(normalizedSettings.promptTemplates);
-  const obsoleteIds = OBSOLETE_BUILT_IN_PROMPT_TEMPLATE_IDS[agentType] ?? new Set<string>();
-  const savedPromptTemplatesById = new Map(
-    savedPromptTemplates.filter((entry) => !obsoleteIds.has(entry.id)).map((entry) => [entry.id, entry]),
-  );
-  const usedIds = new Set<string>();
-  const mergedDefaultPromptTemplates = defaultPromptTemplates.map((defaultOption) => {
-    usedIds.add(defaultOption.id);
-    const savedOption = savedPromptTemplatesById.get(defaultOption.id);
-    return savedOption ? { ...defaultOption, ...savedOption } : defaultOption;
-  });
-  const customPromptTemplates = savedPromptTemplates.filter((entry) => {
-    if (obsoleteIds.has(entry.id) || usedIds.has(entry.id)) return false;
-    usedIds.add(entry.id);
-    return true;
-  });
-  const promptTemplates = [...mergedDefaultPromptTemplates, ...customPromptTemplates];
-
-  if (promptTemplates.length) {
-    merged.promptTemplates = promptTemplates;
-  } else {
-    delete merged.promptTemplates;
+  const promptTemplateCollectionKeys = [
+    "promptTemplates",
+    ...(ADDITIONAL_BUILT_IN_PROMPT_TEMPLATE_COLLECTION_KEYS[agentType] ?? []),
+  ];
+  for (const key of promptTemplateCollectionKeys) {
+    const obsoleteIds =
+      key === "promptTemplates" ? (OBSOLETE_BUILT_IN_PROMPT_TEMPLATE_IDS[agentType] ?? new Set<string>()) : undefined;
+    const promptTemplates = mergeBuiltInPromptTemplateCollection(defaults[key], normalizedSettings[key], obsoleteIds);
+    if (promptTemplates.length) {
+      merged[key] = promptTemplates;
+    } else {
+      delete merged[key];
+    }
   }
 
   return merged;
@@ -789,6 +846,8 @@ export interface LorebookUpdateResult {
     content: string;
     keys: string[];
     tag?: string;
+    /** Optional lorebook injection priority. Omission preserves the existing/default order. */
+    order?: number;
   };
 }
 

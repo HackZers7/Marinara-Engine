@@ -90,6 +90,20 @@ export interface SpritePlacement {
   y: number;
 }
 
+/** Optional display overrides for one character or persona's roleplay sprites. */
+export interface SpriteCharacterVisualSettings {
+  /** Preferred default side for this subject when no freeform placement is saved. */
+  spritePosition?: SpriteSide;
+  /** Expression sprite scale multiplier. */
+  expressionSpriteScale?: number;
+  /** Full-body sprite scale multiplier. */
+  fullBodySpriteScale?: number;
+  /** Expression sprite opacity multiplier. */
+  expressionSpriteOpacity?: number;
+  /** Full-body sprite opacity multiplier. */
+  fullBodySpriteOpacity?: number;
+}
+
 /** A single chat conversation. */
 export interface Chat {
   id: string;
@@ -156,6 +170,7 @@ export const CHAT_SUMMARY_PROMPT_SETTINGS_KEY = "chat-summary-prompts";
 export interface ChatSummaryPromptSettings {
   templates: ChatSummaryPromptTemplate[];
   activeTemplateId: string | null;
+  combinePrompt: string;
 }
 
 /** Rolling summary entry category. Extensible beyond rolling summaries later. */
@@ -230,10 +245,7 @@ export type GameStoryboardViewerDisplayMode = "floating" | "background";
 /** Extra metadata stored on a chat. */
 export interface ChatMetadata {
   /** Chat-local tracker icon overrides keyed by persona id, unique character id, or tracker character slot. */
-  trackerStatIconOverrides?: Record<
-    string,
-    import("../constants/stat-icons.js").TrackerStatIconAssignment[]
-  >;
+  trackerStatIconOverrides?: Record<string, import("../constants/stat-icons.js").TrackerStatIconAssignment[]>;
   /** Compiled enabled rolling summary text for context injection. Derived from summaryEntries when present. */
   summary: string | null;
   /** Display label for a branch; absent on root chats and older branches. */
@@ -252,6 +264,8 @@ export interface ChatMetadata {
   summaryRunInterval?: number;
   /** Whether the Chat Summary popover should automatically generate rolling Roleplay summaries. */
   automaticSummaryEnabled?: boolean;
+  /** Keep recent automatic summaries in context while retrieving relevant older Conversation weeks or Roleplay entries. */
+  semanticSummaryRetrievalEnabled?: boolean;
   /** Last assistant message ID processed by the automatic Roleplay summary updater. */
   lastAutomaticSummaryMessageId?: string | null;
   /** Chat-scoped manual summary prompt templates. Missing or empty uses the built-in default. */
@@ -311,6 +325,10 @@ export interface ChatMetadata {
   gameImageDynamicPromptEnabled?: boolean;
   /** Per-chat source overrides for knowledge agents. */
   knowledgeAgentSources?: Partial<Record<"knowledge-retrieval" | "knowledge-router", KnowledgeAgentSourceSettings>>;
+  /** Per-chat image settings overrides for custom image agents, keyed by agent type. */
+  customAgentImageSettings?: Partial<
+    Record<string, { imageConnectionId?: string | null; styleProfileId?: string | null }>
+  >;
   /** Narrative Director mode used when Push Story is armed. */
   narrativeDirectorMode?: "natural" | "random";
   /** Whether Narrative Director maintains a hidden Secret Plot arc for this roleplay chat. */
@@ -331,6 +349,8 @@ export interface ChatMetadata {
   presetChoices: Record<string, string | string[]>;
   /** Chat-wide string variables persisted by agent tool calls (key → value). */
   agentVariables?: Record<string, string>;
+  /** SillyTavern-compatible local macro variables persisted in this chat. */
+  macroVariables?: Record<string, string>;
   /** Group chat mode: "merged" (narrator) or "individual" (separate characters) */
   groupChatMode?: GroupChatMode;
   /** Group individual mode: color dialogues with speaker tags */
@@ -378,6 +398,8 @@ export interface ChatMetadata {
   fullBodySpriteOpacity?: number;
   /** Saved freeform positions for enabled roleplay sprites. */
   spritePlacements?: Record<string, SpritePlacement>;
+  /** Per-character or per-persona sprite layout overrides. Missing values inherit the chat-wide layout. */
+  spriteCharacterVisualSettings?: Record<string, SpriteCharacterVisualSettings>;
   /** When true, roleplay message avatars use the per-message Expression Engine sprite when one is available. */
   expressionAvatarsEnabled?: boolean;
   /** Non-empty text replaces individual character card scenarios for this group chat. */
@@ -392,6 +414,8 @@ export interface ChatMetadata {
   proseGuardianHoldForRewrite?: boolean;
   /** When true, tracker agents only run when the user manually triggers them (not after every generation) */
   manualTrackers?: boolean;
+  /** When true, Roleplay tracker agents receive lorebook entries activated for the main generation. */
+  attachLorebooksToTrackers?: boolean;
   /** Per-agent manual tracker mode overrides (agent type → manual). */
   manualTrackerAgentTypes?: Record<string, boolean>;
   /** Whether to recall memories from this chat during generation. Default: true for conversation/scenes, false for roleplay. */
@@ -444,7 +468,7 @@ export interface ChatMetadata {
   roleplayDmCommandsEnabled?: boolean;
   /** Chat-scoped Intiface Central WebSocket URL for haptic manual and auto-connect. */
   hapticIntifaceUrl?: string | null;
-  /** Roleplay haptic intensity scaling. Missing = standard. */
+  /** Haptic response style for any chat mode. Missing = standard. */
   hapticSensitivity?: HapticFeedbackSensitivity;
   /** When true, very brief accidental brushes may trigger small haptic feedback. Missing/false = only deliberate contact. */
   hapticIncidentalContact?: boolean;
@@ -486,6 +510,8 @@ export interface ChatMetadata {
   conversationCharactersCanCall?: boolean;
   /** Ask call models to include TTS/video voice cues in bracket tags. Default: true. */
   conversationCallVoiceCues?: boolean;
+  /** Text connection used to summarize completed calls. Null/omitted uses the Agent default, then chat. */
+  conversationCallSummaryConnectionId?: string | null;
   /** Chat-scoped generated schedules for conversation characters. */
   characterSchedules?: Record<string, unknown>;
   /** Chat-scoped manual status overrides for conversation characters. */
@@ -601,6 +627,10 @@ export interface ChatMetadata {
   gameStoryboardAnimationPromptTemplateId?: string | null;
   /** Chat-local storyboard prompt templates, merged with built-in storyboard prompt modes. */
   gameStoryboardPromptTemplates?: import("./agent.js").AgentPromptTemplateOption[];
+  /** Chat-level toggle for Stage 3 image-aware storyboard motion refinement. */
+  storyboardAgentImageAwareShotPlanningEnabled?: boolean | null;
+  /** Chat-level Stage 3 image-aware planner selection. Null/omitted uses the Storyboard Agent default. */
+  storyboardAgentAnimationRefinementTemplateId?: string | null;
   /** Use native NovelAI V4/V4.5 per-character captions for multi-character storyboard illustrations. Defaults to true. */
   gameStoryboardUseNovelAiCharacterPrompts?: boolean;
   /** Last generated scene-video record ID for this game. */
@@ -742,6 +772,8 @@ export interface MessageExtra {
   generationInfo: GenerationInfo | null;
   /** User-uploaded or generated attachments associated with this message. */
   attachments?: MessageAttachment[] | null;
+  /** Client-generated ID that correlates a submitted user turn with its durable row. */
+  submissionId?: string | null;
   /** Persisted translated text for this message, if the user generated one. */
   translation?: string | null;
   /** User hid the persisted translation from display without deleting it. */
@@ -750,6 +782,8 @@ export interface MessageExtra {
   reactions?: MessageReaction[] | null;
   /** When true, this message marks the "new start" of the conversation — all earlier messages are excluded from context */
   isConversationStart?: boolean;
+  /** Character IDs whose individual Roleplay context begins at this message. */
+  conversationStartForCharacterIds?: string[];
   /** Model's reasoning/thinking content (if available) */
   thinking?: string | null;
   /** Original assistant message before a post-processing rewrite, retained for version comparison. */
@@ -766,6 +800,10 @@ export interface MessageExtra {
   conversationCommandContent?: string | null;
   /** Professor Mari workspace trace shown on the home assistant transcript. */
   mariWorkspaceTimeline?: MariWorkspaceTraceItem[] | null;
+  /** Mutation kinds Professor Mari has explicitly asked the user to approve. */
+  mariPendingMutationCategories?: string[] | null;
+  /** Fingerprints binding Professor Mari approval to the exact proposed commands. */
+  mariPendingMutationSignatures?: string[] | null;
   /** Per-swipe sprite expressions from the Expression Engine agent */
   spriteExpressions?: Record<string, string> | null;
   /** Per-swipe CYOA choices from the CYOA Choices agent */
@@ -831,9 +869,13 @@ export interface GenerationInfo {
   temperature: number | null;
   tokensPrompt: number | null;
   tokensCompletion: number | null;
+  /** Provider-reported hidden reasoning-token usage, when available. */
+  tokensReasoning?: number | null;
   tokensCachedPrompt?: number | null;
   tokensCacheWritePrompt?: number | null;
   durationMs: number | null;
+  /** Time from generation start until reasoning yielded to visible output. */
+  reasoningDurationMs?: number | null;
   finishReason: string | null;
 }
 
@@ -851,6 +893,8 @@ export interface MessageSwipe {
 export interface GenerateRequest {
   chatId: string;
   userMessage: string | null;
+  /** Client-generated ID used to confirm that this exact user turn was persisted. */
+  submissionId?: string | null;
   /** If set, regenerate the message at this ID */
   regenerateMessageId: string | null;
   /** If set, append the generated continuation to this assistant message */

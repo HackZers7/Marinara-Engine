@@ -33,12 +33,15 @@ import {
 import { handleFolderRenameKeyDown, useFolderRenameGesture } from "../../hooks/use-folder-rename-gesture";
 import { useTouchFolderDrag } from "../../hooks/use-touch-folder-drag";
 import { useAgentConfigs, useCreateAgent, useUpdateAgent } from "../../hooks/use-agents";
-import { useInstalledCapabilityPackages } from "../../hooks/use-capability-packages";
+import {
+  selectVisibleTrackerCapabilityAgents,
+  useCapabilityAgentRegistry,
+  useInstalledCapabilityPackages,
+} from "../../hooks/use-capability-packages";
 import { useChatStore } from "../../stores/chat.store";
 import { useUIStore, type ConnectionPanelSort } from "../../stores/ui.store";
 import { GEMMA_RESTART_MESSAGE, useSidecarStore } from "../../stores/sidecar.store";
 import {
-  BUILT_IN_AGENTS,
   LOCAL_SIDECAR_CONNECTION_ID,
   getDefaultAgentPrompt,
   type ConnectionFolder,
@@ -70,6 +73,7 @@ import {
   Sparkles,
   ImageIcon,
   Film,
+  Music,
   Mic,
   Loader2,
   HardDriveDownload,
@@ -95,7 +99,7 @@ import { TouchDragHandle } from "../ui/TouchDragHandle";
 import { useLocalizedUiText } from "../../localization/use-localized-ui-text";
 import { useTranslation as useUiTranslation } from "react-i18next";
 import { clearActiveChatResourceDrag, writeChatResourceDragPayload } from "../../lib/chat-resource-drag";
-import { isLanguageGenerationConnection } from "../../lib/connection-filters";
+import { createLocalSidecarConnectionOption, isLanguageGenerationConnection } from "../../lib/connection-filters";
 import { ChatResourceActionButton } from "../chat/ChatResourceActionButton";
 
 const CONNECTION_ICON_COLORS = {
@@ -117,15 +121,18 @@ const PROVIDER_COLORS: Record<string, { from: string; to: string; ring: string; 
   openrouter: CONNECTION_ICON_COLORS,
   nanogpt: CONNECTION_ICON_COLORS,
   xai: CONNECTION_ICON_COLORS,
+  arli: CONNECTION_ICON_COLORS,
   custom: CONNECTION_ICON_COLORS,
   image_generation: CONNECTION_ICON_COLORS,
   video_generation: CONNECTION_ICON_COLORS,
+  audio: CONNECTION_ICON_COLORS,
 };
 const DEFAULT_COLOR = CONNECTION_ICON_COLORS;
 
 function getConnectionFallbackIcon(provider: string) {
   if (provider === "image_generation") return <ImageIcon size="1rem" />;
   if (provider === "video_generation") return <Film size="1rem" />;
+  if (provider === "audio") return <Music size="1rem" />;
   return <Link size="1rem" />;
 }
 
@@ -198,6 +205,7 @@ function getDroppedConnectionIds(event: DragEvent<HTMLElement>, fallbackId: stri
 function SidecarCard() {
   const { t: localizeUi } = useUiTranslation();
   const { data: agentConfigs } = useAgentConfigs();
+  const { data: capabilityAgents } = useCapabilityAgentRegistry();
   const { data: installedCapabilityPackages } = useInstalledCapabilityPackages();
   const createAgent = useCreateAgent();
   const updateAgentConnection = useUpdateAgent();
@@ -248,10 +256,7 @@ function SidecarCard() {
   const backendLabel = config.backend === "mlx" ? "MLX" : "GGUF";
   const nativeToolLabel =
     config.backend === "llama_cpp" ? ` • Native tools ${config.enableNativeToolCalls ? "on" : "off"}` : "";
-  const trackerAgents = useMemo(
-    () => BUILT_IN_AGENTS.filter((agent) => agent.category === "tracker" && !agent.libraryHidden),
-    [],
-  );
+  const trackerAgents = useMemo(() => selectVisibleTrackerCapabilityAgents(capabilityAgents), [capabilityAgents]);
   const trackerLocalCount = useMemo(() => {
     const configs = (agentConfigs ?? []) as Array<{ type: string; connectionId: string | null }>;
     const byType = new Map(configs.map((cfg) => [cfg.type, cfg.connectionId]));
@@ -278,7 +283,9 @@ function SidecarCard() {
       await deleteSpeechModel();
       toast.success(localizeUi("ui.panels.sidecarcard.localWhisperModelDeleted"));
     } catch (error) {
-      toast.error(error instanceof Error ? error.message :localizeUi("ui.panels.sidecarcard.failedToDeleteTheLocalWhisperModel"));
+      toast.error(
+        error instanceof Error ? error.message : localizeUi("ui.panels.sidecarcard.failedToDeleteTheLocalWhisperModel"),
+      );
     } finally {
       setDeletingSpeechModel(false);
     }
@@ -320,7 +327,11 @@ function SidecarCard() {
 
       toast.success(localizeUi("ui.panels.sidecarcard.allBuiltInTrackerAgentsNowPointToThe"));
     } catch (error) {
-      toast.error(error instanceof Error ? error.message :localizeUi("ui.panels.sidecarcard.failedToUpdateTrackerAgentConnections"));
+      toast.error(
+        error instanceof Error
+          ? error.message
+          : localizeUi("ui.panels.sidecarcard.failedToUpdateTrackerAgentConnections"),
+      );
     } finally {
       setAssigningTrackers(false);
     }
@@ -339,9 +350,7 @@ function SidecarCard() {
       }
     } catch (error) {
       toast.error(
-        error instanceof Error
-          ? error.message
-          : localizeUi("ui.panels.sidecarcard.failedToChangeLocalModelLoadState"),
+        error instanceof Error ? error.message : localizeUi("ui.panels.sidecarcard.failedToChangeLocalModelLoadState"),
       );
     } finally {
       setChangingModelLoadState(false);
@@ -393,7 +402,9 @@ function SidecarCard() {
   const handleDownloadWhisper = async () => {
     if (!activeSpeechModel || speechDownloading) return;
     if (await startSpeechDownload(activeSpeechModel.id)) {
-      toast.success(localizeUi("ui.panels.sidecarcard.whisperDownloadedCompletelyRestartMarinaraEngineBeforeUsingCalls"));
+      toast.success(
+        localizeUi("ui.panels.sidecarcard.whisperDownloadedCompletelyRestartMarinaraEngineBeforeUsingCalls"),
+      );
     }
   };
 
@@ -405,9 +416,13 @@ function SidecarCard() {
       )}
     >
       <div
-        className={cn("flex items-center gap-2.5", !isDownloaded && "cursor-pointer")}
+        className="flex cursor-pointer items-center gap-2.5"
         onClick={() => {
-          if (!isDownloaded) setExpanded(true);
+          // Header click toggles in every state. Gating this on the model not
+          // being downloaded left the card body — including the tracker
+          // assignment button — reachable only through the small chevron for
+          // exactly the users who have the model installed (#5538).
+          setExpanded((current) => !current);
         }}
       >
         <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-sky-400 to-blue-500 text-white shadow-sm">
@@ -436,7 +451,18 @@ function SidecarCard() {
               setExpanded((v) => !v);
             }}
             className="mari-chrome-control mari-chrome-control--small h-8 min-h-0 w-8 p-0"
-            title={expanded ?localizeUi("ui.panels.ttsconfigcard.collapse") :localizeUi("ui.panels.ttsconfigcard.expand")}
+            title={
+              expanded ? localizeUi("ui.panels.ttsconfigcard.collapse") : localizeUi("ui.panels.ttsconfigcard.expand")
+            }
+            aria-label={
+              expanded ? localizeUi("ui.panels.ttsconfigcard.collapse") : localizeUi("ui.panels.ttsconfigcard.expand")
+            }
+            aria-expanded={expanded}
+            aria-controls={
+              // The body is conditionally rendered, so the IDREF resolves only
+              // while expanded; a dangling aria-controls is an authoring error.
+              expanded ? "local-model-card-content" : undefined
+            }
           >
             {expanded ? <ChevronUp size="0.875rem" /> : <ChevronDown size="0.875rem" />}
           </button>
@@ -444,114 +470,131 @@ function SidecarCard() {
       </div>
       {/* Local model actions (only when model is downloaded) */}
       {expanded && (
-        <>
+        <div id="local-model-card-content">
           <div className="mt-2.5 rounded-lg border border-[var(--warning)]/30 bg-[var(--warning)]/10 p-2.5">
             <div className="flex items-center gap-2 text-xs font-semibold text-[var(--warning)]">
-              <AlertTriangle size="0.875rem" className="shrink-0" />{localizeUi("ui.panels.sidecarcard.localModelIsNotForRoleplay")}</div>
-            <p className="mt-1 text-[0.6875rem] leading-relaxed text-[var(--muted-foreground)]">{localizeUi("ui.panels.sidecarcard.theBundledLocalModelIsIntentionallySmallUseIt")}</p>
+              <AlertTriangle size="0.875rem" className="shrink-0" />
+              {localizeUi("ui.panels.sidecarcard.localModelIsNotForRoleplay")}
+            </div>
+            <p className="mt-1 text-[0.6875rem] leading-relaxed text-[var(--muted-foreground)]">
+              {localizeUi("ui.panels.sidecarcard.theBundledLocalModelIsIntentionallySmallUseIt")}
+            </p>
           </div>
           {callsPackageInstalled && (
-          <div className="mt-2.5 rounded-lg border border-sky-400/15 bg-sky-400/5 p-2.5">
-            <div className="flex items-start gap-2">
-              <div className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-sky-400 to-blue-500 text-white shadow-sm">
-                <Mic size="0.875rem" />
-              </div>
-              <div className="min-w-0 flex-1">
-                <div className="flex items-center justify-between gap-2">
-                  <div className="text-xs font-semibold text-[var(--foreground)]">{localizeUi("ui.panels.sidecarcard.localSpeechModel")}</div>
-                  {speechModelDownloaded && (
-                    <button
-                      type="button"
-                      onClick={() => void handleDeleteSpeechModel()}
-                      disabled={deletingSpeechModel}
-                      className="mari-chrome-control mari-chrome-control--small p-1"
-                      title={localizeUi("ui.panels.sidecarcard.deleteLocalWhisper")}
-                    >
-                      {deletingSpeechModel ? (
-                        <Loader2 size="0.75rem" className="animate-spin" />
-                      ) : (
-                        <Trash2 size="0.75rem" />
+            <div className="mt-2.5 rounded-lg border border-sky-400/15 bg-sky-400/5 p-2.5">
+              <div className="flex items-start gap-2">
+                <div className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-sky-400 to-blue-500 text-white shadow-sm">
+                  <Mic size="0.875rem" />
+                </div>
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="text-xs font-semibold text-[var(--foreground)]">
+                      {localizeUi("ui.panels.sidecarcard.localSpeechModel")}
+                    </div>
+                    {speechModelDownloaded && (
+                      <button
+                        type="button"
+                        onClick={() => void handleDeleteSpeechModel()}
+                        disabled={deletingSpeechModel}
+                        className="mari-chrome-control mari-chrome-control--small p-1"
+                        title={localizeUi("ui.panels.sidecarcard.deleteLocalWhisper")}
+                      >
+                        {deletingSpeechModel ? (
+                          <Loader2 size="0.75rem" className="animate-spin" />
+                        ) : (
+                          <Trash2 size="0.75rem" />
+                        )}
+                      </button>
+                    )}
+                  </div>
+                  <div className="mt-0.5 text-[0.6875rem] text-[var(--muted-foreground)]">{speechStatusLabel}</div>
+                  {!speechAvailable && (
+                    <div className="mt-1 space-y-1">
+                      <p className="text-[0.6875rem] leading-relaxed text-[var(--muted-foreground)]">
+                        {speechUnavailableMessage}
+                      </p>
+                      {speechRuntime && (
+                        <p className="text-[0.59375rem] leading-relaxed text-[var(--muted-foreground)]/80">
+                          {localizeUi("ui.panels.sidecarcard.node")} {speechRuntime.nodeVersion}{" "}
+                          {localizeUi("ui.panels.sidecarcard.at")} {speechRuntime.nodeExecPath}
+                        </p>
                       )}
-                    </button>
+                    </div>
+                  )}
+                  {!speechModelDownloaded && speechAvailable && (
+                    <div className="mt-2 flex flex-col gap-2">
+                      <select
+                        value={speechModelChoice}
+                        onChange={(event) => setSpeechModelChoice(event.target.value as SidecarSpeechModelId)}
+                        className="mari-chrome-field h-8 text-xs"
+                        disabled={speechDownloading || speechModels.length === 0}
+                      >
+                        {speechModels.map((model) => (
+                          <option key={model.id} value={model.id}>
+                            {model.label}
+                          </option>
+                        ))}
+                      </select>
+                      {activeSpeechModel && (
+                        <p className="text-[0.625rem] leading-relaxed text-[var(--muted-foreground)]">
+                          {activeSpeechModel.description} {localizeUi("ui.noodle.stageprofileview.about")}{" "}
+                          {formatBytes(activeSpeechModel.sizeBytes)} {localizeUi("ui.panels.sidecarcard.download")}{" "}
+                          {formatBytes(activeSpeechModel.ramBytes)}{" "}
+                          {localizeUi("ui.panels.sidecarcard.ramWhileRunning")}
+                        </p>
+                      )}
+                      <button
+                        type="button"
+                        onClick={handleDownloadWhisper}
+                        disabled={speechDownloading || !activeSpeechModel}
+                        className="mari-chrome-control w-full justify-center px-3 py-2 text-xs"
+                      >
+                        {speechDownloading ? (
+                          <>
+                            <HardDriveDownload size="0.8125rem" className="animate-pulse" />
+                            {localizeUi("ui.panels.sidecarcard.downloadingWhisper")}
+                          </>
+                        ) : (
+                          <>
+                            <HardDriveDownload size="0.8125rem" />
+                            {localizeUi("ui.panels.sidecarcard.downloadWhisper")}
+                          </>
+                        )}
+                      </button>
+                    </div>
+                  )}
+                  {speechDownloading && speechDownloadProgress && (
+                    <div className="mt-2">
+                      <div className="h-1.5 overflow-hidden rounded-full bg-sky-400/10">
+                        <div
+                          className="h-full rounded-full bg-sky-300 transition-[width]"
+                          style={{
+                            width: `${
+                              speechDownloadProgress.total > 0
+                                ? Math.min(
+                                    100,
+                                    Math.round(
+                                      (speechDownloadProgress.downloaded / speechDownloadProgress.total) * 100,
+                                    ),
+                                  )
+                                : 12
+                            }%`,
+                          }}
+                        />
+                      </div>
+                      <div className="mt-1 truncate text-[0.625rem] text-[var(--muted-foreground)]">
+                        {speechDownloadProgress.label ?? "Downloading Local Whisper"}
+                      </div>
+                    </div>
+                  )}
+                  {speechError && (
+                    <div className="mt-2 rounded-md border border-[var(--destructive)]/20 bg-[var(--destructive)]/10 px-2 py-1.5 text-[0.625rem] text-[var(--destructive)]">
+                      {speechError}
+                    </div>
                   )}
                 </div>
-                <div className="mt-0.5 text-[0.6875rem] text-[var(--muted-foreground)]">{speechStatusLabel}</div>
-                {!speechAvailable && (
-                  <div className="mt-1 space-y-1">
-                    <p className="text-[0.6875rem] leading-relaxed text-[var(--muted-foreground)]">
-                      {speechUnavailableMessage}
-                    </p>
-                    {speechRuntime && (
-                      <p className="text-[0.59375rem] leading-relaxed text-[var(--muted-foreground)]/80">{localizeUi("ui.panels.sidecarcard.node")} {speechRuntime.nodeVersion} {localizeUi("ui.panels.sidecarcard.at")} {speechRuntime.nodeExecPath}
-                      </p>
-                    )}
-                  </div>
-                )}
-                {!speechModelDownloaded && speechAvailable && (
-                  <div className="mt-2 flex flex-col gap-2">
-                    <select
-                      value={speechModelChoice}
-                      onChange={(event) => setSpeechModelChoice(event.target.value as SidecarSpeechModelId)}
-                      className="mari-chrome-field h-8 text-xs"
-                      disabled={speechDownloading || speechModels.length === 0}
-                    >
-                      {speechModels.map((model) => (
-                        <option key={model.id} value={model.id}>
-                          {model.label}
-                        </option>
-                      ))}
-                    </select>
-                    {activeSpeechModel && (
-                      <p className="text-[0.625rem] leading-relaxed text-[var(--muted-foreground)]">
-                        {activeSpeechModel.description} {localizeUi("ui.noodle.stageprofileview.about")} {formatBytes(activeSpeechModel.sizeBytes)} {localizeUi("ui.panels.sidecarcard.download")}{" "}
-                        {formatBytes(activeSpeechModel.ramBytes)} {localizeUi("ui.panels.sidecarcard.ramWhileRunning")}</p>
-                    )}
-                    <button
-                      type="button"
-                      onClick={handleDownloadWhisper}
-                      disabled={speechDownloading || !activeSpeechModel}
-                      className="mari-chrome-control w-full justify-center px-3 py-2 text-xs"
-                    >
-                      {speechDownloading ? (
-                        <>
-                          <HardDriveDownload size="0.8125rem" className="animate-pulse" />{localizeUi("ui.panels.sidecarcard.downloadingWhisper")}</>
-                      ) : (
-                        <>
-                          <HardDriveDownload size="0.8125rem" />{localizeUi("ui.panels.sidecarcard.downloadWhisper")}</>
-                      )}
-                    </button>
-                  </div>
-                )}
-                {speechDownloading && speechDownloadProgress && (
-                  <div className="mt-2">
-                    <div className="h-1.5 overflow-hidden rounded-full bg-sky-400/10">
-                      <div
-                        className="h-full rounded-full bg-sky-300 transition-[width]"
-                        style={{
-                          width: `${
-                            speechDownloadProgress.total > 0
-                              ? Math.min(
-                                  100,
-                                  Math.round((speechDownloadProgress.downloaded / speechDownloadProgress.total) * 100),
-                                )
-                              : 12
-                          }%`,
-                        }}
-                      />
-                    </div>
-                    <div className="mt-1 truncate text-[0.625rem] text-[var(--muted-foreground)]">
-                      {speechDownloadProgress.label ?? "Downloading Local Whisper"}
-                    </div>
-                  </div>
-                )}
-                {speechError && (
-                  <div className="mt-2 rounded-md border border-[var(--destructive)]/20 bg-[var(--destructive)]/10 px-2 py-1.5 text-[0.625rem] text-[var(--destructive)]">
-                    {speechError}
-                  </div>
-                )}
               </div>
             </div>
-          </div>
           )}
           {isDownloaded && (
             <div className="mt-2.5 flex flex-col gap-1.5 border-t border-sky-400/10 pt-2.5">
@@ -581,8 +624,12 @@ function SidecarCard() {
                 className="mari-chrome-control w-full justify-between gap-3 px-3 py-2 text-left"
               >
                 <div className="min-w-0 flex-1">
-                  <div className="text-xs font-medium">{localizeUi("ui.panels.sidecarcard.useLocalModelForAllTrackerAgents")}</div>
-                  <div className="mt-0.5 text-[0.625rem] text-[var(--muted-foreground)]">{localizeUi("ui.panels.sidecarcard.assignsTheBuiltInLocalModelAsTheConnection")}</div>
+                  <div className="text-xs font-medium">
+                    {localizeUi("ui.panels.sidecarcard.useLocalModelForAllTrackerAgents")}
+                  </div>
+                  <div className="mt-0.5 text-[0.625rem] text-[var(--muted-foreground)]">
+                    {localizeUi("ui.panels.sidecarcard.assignsTheBuiltInLocalModelAsTheConnection")}
+                  </div>
                 </div>
                 {assigningTrackers ? (
                   <BrainCircuit size="0.875rem" className="animate-pulse text-sky-300" />
@@ -591,7 +638,9 @@ function SidecarCard() {
                 )}
               </button>
               <p className="px-0.5 text-[0.625rem] text-[var(--muted-foreground)]">
-                {trackerLocalCount}/{trackerAgents.length} {localizeUi("ui.panels.sidecarcard.builtInTrackerAgentsCurrentlyPointAtTheLocal")}</p>
+                {trackerLocalCount}/{trackerAgents.length}{" "}
+                {localizeUi("ui.panels.sidecarcard.builtInTrackerAgentsCurrentlyPointAtTheLocal")}
+              </p>
               <SettingsSwitch
                 label={localizeUi("ui.panels.sidecarcard.useForTrackerAgentsRoleplay")}
                 checked={config.useForTrackers}
@@ -616,23 +665,30 @@ function SidecarCard() {
                 disabled={isDownloading}
                 className="mari-chrome-control w-full px-3 py-2 text-xs"
               >
-                {isDownloading ?localizeUi("ui.panels.sidecarcard.downloading") :localizeUi("ui.panels.sidecarcard.downloadNow")}
+                {isDownloading
+                  ? localizeUi("ui.panels.sidecarcard.downloading")
+                  : localizeUi("ui.panels.sidecarcard.downloadNow")}
               </button>
               <button
                 type="button"
                 onClick={openLocalModelSettings}
                 className="mari-chrome-control mari-chrome-control--compact w-full text-center"
-              >{localizeUi("ui.panels.sidecarcard.chooseModelOptions")}</button>
+              >
+                {localizeUi("ui.panels.sidecarcard.chooseModelOptions")}
+              </button>
             </div>
           )}
           {status === "server_error" && (
             <div className="mt-2.5 rounded-lg border border-amber-500/20 bg-amber-500/5 p-2.5">
-              <div className="text-[0.6875rem] font-medium text-amber-200">{localizeUi("ui.panels.sidecarcard.localRuntimeUnavailable")}</div>
+              <div className="text-[0.6875rem] font-medium text-amber-200">
+                {localizeUi("ui.panels.sidecarcard.localRuntimeUnavailable")}
+              </div>
               <div className="mt-1 text-[0.6875rem] text-[var(--muted-foreground)]/75">
                 {startupError ?? "Marinara will keep running without the local model until you retry."}
               </div>
               {failedRuntimeVariant && (
-                <div className="mt-1 text-[0.6875rem] text-[var(--muted-foreground)]/60">{localizeUi("ui.panels.sidecarcard.runtime")} {formatRuntimeVariantLabel(failedRuntimeVariant)}
+                <div className="mt-1 text-[0.6875rem] text-[var(--muted-foreground)]/60">
+                  {localizeUi("ui.panels.sidecarcard.runtime")} {formatRuntimeVariantLabel(failedRuntimeVariant)}
                 </div>
               )}
               <button
@@ -640,10 +696,12 @@ function SidecarCard() {
                   openLocalModelSettings();
                 }}
                 className="mari-chrome-control mari-chrome-control--small mt-2 text-[0.6875rem]"
-              >{localizeUi("ui.game.gamesurfacecomponent.openLocalAiModel")}</button>
+              >
+                {localizeUi("ui.game.gamesurfacecomponent.openLocalAiModel")}
+              </button>
             </div>
           )}
-        </>
+        </div>
       )}
     </div>
   );
@@ -746,6 +804,7 @@ function ConnectionDefaultPair({
   fallbackField,
   primaryEmptyLabel,
   fallbackModelLabel,
+  includeLocalSidecar,
 }: {
   title: string;
   icon: ReactNode;
@@ -754,15 +813,30 @@ function ConnectionDefaultPair({
   fallbackField: ConnectionDefaultField;
   primaryEmptyLabel: string;
   fallbackModelLabel: string;
+  /** Offer the local sidecar pseudo-connection as the primary default (#5539).
+   *  The sidecar has no connection row to carry the role flag, so selecting it
+   *  writes the sidecar config's useAsAgentsDefault instead. */
+  includeLocalSidecar?: boolean;
 }) {
   const { t: localizeUi } = useUiTranslation();
   const openConnectionDetail = useUIStore((state) => state.openConnectionDetail);
   const updateConnection = useUpdateConnection();
   const queryClient = useQueryClient();
+  const sidecarModelDownloaded = useSidecarStore((state) => state.modelDownloaded);
+  const sidecarModelDisplayName = useSidecarStore((state) => state.modelDisplayName);
+  const sidecarAsAgentsDefault = useSidecarStore((state) => state.config.useAsAgentsDefault);
+  const updateSidecarConfig = useSidecarStore((state) => state.updateConfig);
   const primaryConnection = connections.find((connection) => isEnabledConnectionRole(connection[primaryField])) ?? null;
   const fallbackConnection =
     connections.find((connection) => isEnabledConnectionRole(connection[fallbackField])) ?? null;
   const hasConnections = connections.length > 0;
+  // Keep the option visible while the flag is set even if the model was
+  // deleted, so the stale default can still be seen and cleared here.
+  const offerLocalSidecar =
+    includeLocalSidecar === true &&
+    import.meta.env.VITE_MARINARA_LITE !== "true" &&
+    (sidecarModelDownloaded || sidecarAsAgentsDefault);
+  const localSidecarSelected = includeLocalSidecar === true && sidecarAsAgentsDefault;
 
   const handleRoleChange = (
     field: ConnectionDefaultField,
@@ -770,6 +844,16 @@ function ConnectionDefaultPair({
     event: ChangeEvent<HTMLSelectElement>,
   ) => {
     const nextConnectionId = event.target.value;
+    if (field === primaryField && includeLocalSidecar) {
+      if (nextConnectionId === LOCAL_SIDECAR_CONNECTION_ID) {
+        if (localSidecarSelected) return;
+        void updateSidecarConfig({ useAsAgentsDefault: true });
+        // The sidecar default replaces any row-flag default; keep one source.
+        if (currentConnection) updateConnection.mutate({ id: currentConnection.id, [field]: false });
+        return;
+      }
+      if (localSidecarSelected) void updateSidecarConfig({ useAsAgentsDefault: false });
+    }
     if (nextConnectionId === currentConnection?.id) return;
     if (!nextConnectionId) {
       if (currentConnection) updateConnection.mutate({ id: currentConnection.id, [field]: false });
@@ -791,16 +875,27 @@ function ConnectionDefaultPair({
         <div className="text-xs font-semibold text-[var(--foreground)]">{title}</div>
         <div className="flex flex-col gap-2">
           <label className="min-w-0">
-            <span className="mb-1 block text-[0.625rem] font-medium text-[var(--muted-foreground)]">{localizeUi("ui.noodle.noodlehome.default")}</span>
+            <span className="mb-1 block text-[0.625rem] font-medium text-[var(--muted-foreground)]">
+              {localizeUi("ui.noodle.noodlehome.default")}
+            </span>
             <div className="flex items-center gap-1">
               <select
-                value={primaryConnection?.id ?? ""}
+                value={localSidecarSelected ? LOCAL_SIDECAR_CONNECTION_ID : (primaryConnection?.id ?? "")}
                 onChange={(event) => handleRoleChange(primaryField, primaryConnection, event)}
-                disabled={updateConnection.isPending || (!hasConnections && !primaryConnection)}
+                disabled={updateConnection.isPending || (!hasConnections && !primaryConnection && !offerLocalSidecar)}
                 className="mari-chrome-field h-9 min-w-0 flex-1 px-2 py-0 text-[0.6875rem]"
                 aria-label={localizeUi("ui.panels.connectiondefaultpair.defaultConnectionForValue1", { value1: title })}
               >
-                <option value="">{hasConnections ? primaryEmptyLabel :localizeUi("ui.panels.connectiondefaultpair.noCompatibleConnections")}</option>
+                <option value="">
+                  {hasConnections || offerLocalSidecar
+                    ? primaryEmptyLabel
+                    : localizeUi("ui.panels.connectiondefaultpair.noCompatibleConnections")}
+                </option>
+                {offerLocalSidecar && (
+                  <option value={LOCAL_SIDECAR_CONNECTION_ID}>
+                    {createLocalSidecarConnectionOption(sidecarModelDisplayName).name}
+                  </option>
+                )}
                 {connections
                   .filter((connection) => connection.id !== fallbackConnection?.id)
                   .map((connection) => (
@@ -814,8 +909,12 @@ function ConnectionDefaultPair({
                   type="button"
                   onClick={() => openFreshConnectionDetail(primaryConnection.id)}
                   className="mari-chrome-control h-9 min-h-9 w-9 shrink-0 p-0"
-                  title={localizeUi("ui.panels.connectiondefaultpair.openDefaultConnectionForValue1", { value1: title })}
-                  aria-label={localizeUi("ui.panels.connectiondefaultpair.openDefaultConnectionForValue1", { value1: title })}
+                  title={localizeUi("ui.panels.connectiondefaultpair.openDefaultConnectionForValue1", {
+                    value1: title,
+                  })}
+                  aria-label={localizeUi("ui.panels.connectiondefaultpair.openDefaultConnectionForValue1", {
+                    value1: title,
+                  })}
                 >
                   <Settings2 size="0.75rem" />
                 </button>
@@ -823,14 +922,18 @@ function ConnectionDefaultPair({
             </div>
           </label>
           <label className="min-w-0">
-            <span className="mb-1 block text-[0.625rem] font-medium text-[var(--muted-foreground)]">{localizeUi("ui.panels.connectiondefaultpair.fallback")}</span>
+            <span className="mb-1 block text-[0.625rem] font-medium text-[var(--muted-foreground)]">
+              {localizeUi("ui.panels.connectiondefaultpair.fallback")}
+            </span>
             <div className="flex items-center gap-1">
               <select
                 value={fallbackConnection?.id ?? ""}
                 onChange={(event) => handleRoleChange(fallbackField, fallbackConnection, event)}
                 disabled={updateConnection.isPending || (!hasConnections && !fallbackConnection)}
                 className="mari-chrome-field h-9 min-w-0 flex-1 px-2 py-0 text-[0.6875rem]"
-                aria-label={localizeUi("ui.panels.connectiondefaultpair.fallbackConnectionForValue1", { value1: title })}
+                aria-label={localizeUi("ui.panels.connectiondefaultpair.fallbackConnectionForValue1", {
+                  value1: title,
+                })}
               >
                 <option value="">{localizeUi("ui.game.gamesurfacecomponent.none")}</option>
                 {connections
@@ -846,8 +949,12 @@ function ConnectionDefaultPair({
                   type="button"
                   onClick={() => openFreshConnectionDetail(fallbackConnection.id)}
                   className="mari-chrome-control h-9 min-h-9 w-9 shrink-0 p-0"
-                  title={localizeUi("ui.panels.connectiondefaultpair.openFallbackConnectionForValue1", { value1: title })}
-                  aria-label={localizeUi("ui.panels.connectiondefaultpair.openFallbackConnectionForValue1", { value1: title })}
+                  title={localizeUi("ui.panels.connectiondefaultpair.openFallbackConnectionForValue1", {
+                    value1: title,
+                  })}
+                  aria-label={localizeUi("ui.panels.connectiondefaultpair.openFallbackConnectionForValue1", {
+                    value1: title,
+                  })}
                 >
                   <Settings2 size="0.75rem" />
                 </button>
@@ -866,7 +973,10 @@ function ConnectionDefaultsSection({ connectionsList }: { connectionsList: Conne
   const languageConnections = useMemo(
     () =>
       connectionsList.filter(
-        (connection) => connection.provider !== "image_generation" && connection.provider !== "video_generation",
+        (connection) =>
+          connection.provider !== "image_generation" &&
+          connection.provider !== "video_generation" &&
+          connection.provider !== "audio",
       ),
     [connectionsList],
   );
@@ -876,6 +986,10 @@ function ConnectionDefaultsSection({ connectionsList }: { connectionsList: Conne
   );
   const videoConnections = useMemo(
     () => connectionsList.filter((connection) => connection.provider === "video_generation"),
+    [connectionsList],
+  );
+  const audioConnections = useMemo(
+    () => connectionsList.filter((connection) => connection.provider === "audio"),
     [connectionsList],
   );
 
@@ -891,15 +1005,23 @@ function ConnectionDefaultsSection({ connectionsList }: { connectionsList: Conne
           <Settings2 size="1rem" />
         </div>
         <div className="min-w-0 flex-1">
-          <div className="text-sm font-medium text-[var(--foreground)]">{localizeUi("ui.panels.connectiondefaultssection.defaults")}</div>
-          <div className="text-[0.6875rem] text-[var(--muted-foreground)]">{localizeUi("ui.panels.connectiondefaultssection.mainAgentsImagesAndVideosDefaultsAndFallbacks")}</div>
+          <div className="text-sm font-medium text-[var(--foreground)]">
+            {localizeUi("ui.panels.connectiondefaultssection.defaults")}
+          </div>
+          <div className="text-[0.6875rem] text-[var(--muted-foreground)]">
+            {localizeUi("ui.panels.connectiondefaultssection.mainAgentsImagesAndVideosDefaultsAndFallbacks")}
+          </div>
         </div>
         <button
           type="button"
           onClick={() => setOpen((current) => !current)}
           className="mari-chrome-control mari-chrome-control--small h-8 min-h-0 w-8 p-0"
-          title={open ?localizeUi("ui.panels.ttsconfigcard.collapse") :localizeUi("ui.panels.ttsconfigcard.expand")}
-          aria-label={open ?localizeUi("ui.panels.connectiondefaultssection.collapseConnectionDefaults") :localizeUi("ui.panels.connectiondefaultssection.expandConnectionDefaults")}
+          title={open ? localizeUi("ui.panels.ttsconfigcard.collapse") : localizeUi("ui.panels.ttsconfigcard.expand")}
+          aria-label={
+            open
+              ? localizeUi("ui.panels.connectiondefaultssection.collapseConnectionDefaults")
+              : localizeUi("ui.panels.connectiondefaultssection.expandConnectionDefaults")
+          }
           aria-expanded={open}
           aria-controls="connection-defaults-content"
         >
@@ -925,6 +1047,7 @@ function ConnectionDefaultsSection({ connectionsList }: { connectionsList: Conne
             fallbackField="fallbackForAgents"
             primaryEmptyLabel="Use the active chat connection"
             fallbackModelLabel="No model set"
+            includeLocalSidecar
           />
           <ConnectionDefaultPair
             title={localizeUi("ui.panels.connectiondefaultssection.images")}
@@ -943,6 +1066,15 @@ function ConnectionDefaultsSection({ connectionsList }: { connectionsList: Conne
             fallbackField="fallbackForAgents"
             primaryEmptyLabel="No default video connection"
             fallbackModelLabel="Video generation"
+          />
+          <ConnectionDefaultPair
+            title={localizeUi("ui.panels.connectiondefaultssection.audio")}
+            icon={<Music size="0.875rem" />}
+            connections={audioConnections}
+            primaryField="defaultForAgents"
+            fallbackField="fallbackForAgents"
+            primaryEmptyLabel={localizeUi("ui.panels.connectiondefaultssection.noDefaultAudioConnection")}
+            fallbackModelLabel={localizeUi("ui.panels.connectiondefaultssection.audioGeneration")}
           />
         </div>
       </SmoothFolderContent>
@@ -1050,8 +1182,16 @@ function ConnectionRow({
           "relative flex h-10 w-10 shrink-0 items-center justify-center overflow-visible rounded-xl text-white",
           "transition-transform hover:scale-105 focus:outline-none focus:ring-2 focus:ring-[var(--marinara-chat-chrome-focus-ring)]",
         )}
-        title={conn.imagePath ?localizeUi("ui.panels.connectionrow.replaceConnectionPicture") :localizeUi("ui.panels.connectionrow.uploadConnectionPicture")}
-        aria-label={conn.imagePath ?localizeUi("ui.panels.connectionrow.replaceConnectionPicture") :localizeUi("ui.panels.connectionrow.uploadConnectionPicture")}
+        title={
+          conn.imagePath
+            ? localizeUi("ui.panels.connectionrow.replaceConnectionPicture")
+            : localizeUi("ui.panels.connectionrow.uploadConnectionPicture")
+        }
+        aria-label={
+          conn.imagePath
+            ? localizeUi("ui.panels.connectionrow.replaceConnectionPicture")
+            : localizeUi("ui.panels.connectionrow.uploadConnectionPicture")
+        }
       >
         <span className={iconFrameClasses}>
           {iconContent}
@@ -1070,7 +1210,7 @@ function ConnectionRow({
           </div>
         )}
       </button>
-      <div className="min-w-0 flex-1 pr-0 transition-[padding] max-md:pr-32 [@media(pointer:coarse)]:pr-32 [@media(pointer:fine)]:group-hover:pr-32">
+      <div className="min-w-0 flex-1 pr-0 max-md:pr-32 [@media(pointer:coarse)]:pr-32">
         <div className="truncate text-sm font-medium leading-5" title={conn.name}>
           {conn.name}
         </div>
@@ -1078,7 +1218,7 @@ function ConnectionRow({
           {conn.provider} • {conn.model || "No model set"}
         </div>
       </div>
-      <div className="absolute right-2 top-1/2 -translate-y-1/2 flex shrink-0 items-center gap-0.5 rounded-lg bg-[var(--sidebar)] px-1 py-0.5 opacity-0 shadow-sm ring-1 ring-foreground/10 transition-opacity group-hover:opacity-100 max-md:opacity-100">
+      <div className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 flex shrink-0 items-center gap-0.5 rounded-lg bg-[var(--sidebar)] px-1 py-0.5 opacity-0 shadow-sm ring-1 ring-foreground/10 transition-opacity group-hover:opacity-100 [@media(pointer:fine)]:group-focus-within:opacity-100 max-md:opacity-100 [@media(pointer:coarse)]:opacity-100 group-hover:[&_button]:pointer-events-auto [@media(pointer:fine)]:group-focus-within:[&_button]:pointer-events-auto max-md:[&_button]:pointer-events-auto [@media(pointer:coarse)]:[&_button]:pointer-events-auto">
         <ChatResourceActionButton
           payload={{
             version: 1,
@@ -1088,21 +1228,27 @@ function ConnectionRow({
             ...(isLanguageGenerationConnection(conn) ? {} : { unsupported: "connection-kind" as const }),
           }}
         />
-        <button
-          onClick={(e) => {
-            e.stopPropagation();
-            updateConnection.mutate({ id: conn.id, useForRandom: !inRandomPool });
-          }}
-          className={cn(
-            "rounded-lg p-1.5 transition-all active:scale-90",
-            inRandomPool
-              ? "bg-foreground/10 text-foreground/75 ring-1 ring-foreground/20"
-              : "text-foreground/45 hover:bg-foreground/10 hover:text-foreground/75",
-          )}
-          title={inRandomPool ?localizeUi("ui.panels.connectionrow.inRandomPoolClickToRemove") :localizeUi("ui.panels.connectionrow.addToRandomPool")}
-        >
-          <Shuffle size="0.75rem" />
-        </button>
+        {conn.provider !== "audio" && (
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              updateConnection.mutate({ id: conn.id, useForRandom: !inRandomPool });
+            }}
+            className={cn(
+              "rounded-lg p-1.5 transition-all active:scale-90",
+              inRandomPool
+                ? "bg-foreground/10 text-foreground/75 ring-1 ring-foreground/20"
+                : "text-foreground/45 hover:bg-foreground/10 hover:text-foreground/75",
+            )}
+            title={
+              inRandomPool
+                ? localizeUi("ui.panels.connectionrow.inRandomPoolClickToRemove")
+                : localizeUi("ui.panels.connectionrow.addToRandomPool")
+            }
+          >
+            <Shuffle size="0.75rem" />
+          </button>
+        )}
         <button
           onClick={(e) => {
             e.stopPropagation();
@@ -1122,9 +1268,9 @@ function ConnectionRow({
             e.stopPropagation();
             if (
               !(await showConfirmDialog({
-                title:localizeUi("ui.panels.connectionrow.deleteConnection"),
-                message:localizeUi("ui.panels.characterspanel.deleteValue1ThisCannotBeUndone", { value1: conn.name }),
-                confirmLabel:localizeUi("lorebook.editor.batch.delete"),
+                title: localizeUi("ui.panels.connectionrow.deleteConnection"),
+                message: localizeUi("ui.panels.characterspanel.deleteValue1ThisCannotBeUndone", { value1: conn.name }),
+                confirmLabel: localizeUi("lorebook.editor.batch.delete"),
                 tone: "destructive",
               }))
             ) {
@@ -1221,7 +1367,12 @@ function ConnectionFolderRow({
         role="button"
         tabIndex={0}
         aria-expanded={isExpanded}
-        aria-label={localizeUi("ui.panels.agentspanel.value1FolderValue2DoubleTapOrPressF2To", { value1: isExpanded ?localizeUi("ui.panels.ttsconfigcard.collapse") :localizeUi("ui.panels.ttsconfigcard.expand"), value2: folder.name })}
+        aria-label={localizeUi("ui.panels.agentspanel.value1FolderValue2DoubleTapOrPressF2To", {
+          value1: isExpanded
+            ? localizeUi("ui.panels.ttsconfigcard.collapse")
+            : localizeUi("ui.panels.ttsconfigcard.expand"),
+          value2: folder.name,
+        })}
         title={localizeUi("ui.panels.backgroundpicker.doubleClickDoubleTapOrPressF2ToRename")}
         onClick={(event) =>
           handleFolderRenameGesture(folder.id, event, {
@@ -1278,19 +1429,26 @@ function ConnectionFolderRow({
             {folder.name}
           </span>
         )}
-        {entries.length > 0 && (
-          <span className="text-[0.5625rem] text-[var(--muted-foreground)]">{entries.length}</span>
-        )}
-        <button
-          onClick={(e) => {
-            e.stopPropagation();
-            onDelete(folder);
-          }}
-          className="mari-chrome-control mari-chrome-control--small shrink-0 p-1 opacity-0 transition-opacity group-hover:opacity-100 max-md:opacity-100"
-          title={localizeUi("ui.panels.backgroundpicker.deleteFolder")}
+        <div
+          data-folder-actions
+          className="flex shrink-0 items-center gap-0.5 rounded-lg bg-[var(--sidebar)] px-1 py-0.5 ring-1 ring-transparent transition-[opacity,box-shadow] group-hover:ring-[var(--border)] max-md:ring-[var(--border)] [@media(pointer:coarse)]:ring-[var(--border)]"
         >
-          <Trash2 size="0.75rem" />
-        </button>
+          {entries.length > 0 && (
+            <span data-folder-item-count="actions" className="px-1 text-[0.5625rem] text-[var(--muted-foreground)]">
+              {entries.length}
+            </span>
+          )}
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              onDelete(folder);
+            }}
+            className="mari-chrome-control mari-chrome-control--small pointer-events-none shrink-0 p-1 opacity-0 transition-opacity group-hover:pointer-events-auto group-hover:opacity-100 [@media(pointer:fine)]:group-focus-within:pointer-events-auto [@media(pointer:fine)]:group-focus-within:opacity-100 max-md:pointer-events-auto max-md:opacity-100 [@media(pointer:coarse)]:pointer-events-auto [@media(pointer:coarse)]:opacity-100"
+            title={localizeUi("ui.panels.backgroundpicker.deleteFolder")}
+          >
+            <Trash2 size="0.75rem" />
+          </button>
+        </div>
       </div>
       {/* Folder contents */}
       <SmoothFolderContent
@@ -1584,7 +1742,11 @@ export function ConnectionsPanel() {
           await uploadConnectionImage.mutateAsync({ id: connectionId, image });
           toast.success(localizeUi("ui.panels.connectionspanel.connectionPictureUpdated"));
         } catch (error) {
-          toast.error(error instanceof Error ? error.message :localizeUi("ui.panels.connectionspanel.failedToUploadConnectionPicture"));
+          toast.error(
+            error instanceof Error
+              ? error.message
+              : localizeUi("ui.panels.connectionspanel.failedToUploadConnectionPicture"),
+          );
         } finally {
           imageTargetConnectionIdRef.current = null;
         }
@@ -1598,29 +1760,37 @@ export function ConnectionsPanel() {
     [uploadConnectionImage, localizeUi],
   );
 
-  const exportConnections = useCallback(async (connectionsToExport: ConnectionRowData[]) => {
-    if (connectionsToExport.length === 0) return;
+  const exportConnections = useCallback(
+    async (connectionsToExport: ConnectionRowData[]) => {
+      if (connectionsToExport.length === 0) return;
 
-    const confirmed = await showConfirmDialog({
-      title:localizeUi("ui.panels.connectionspanel.exportConnectionData"),
-      message: CONNECTION_EXPORT_WARNING,
-      confirmLabel:localizeUi("ui.characters.spritestab.export"),
-      cancelLabel: "Close",
-    });
-    if (!confirmed) return;
+      const confirmed = await showConfirmDialog({
+        title: localizeUi("ui.panels.connectionspanel.exportConnectionData"),
+        message: CONNECTION_EXPORT_WARNING,
+        confirmLabel: localizeUi("ui.characters.spritestab.export"),
+        cancelLabel: "Close",
+      });
+      if (!confirmed) return;
 
-    const envelope = createConnectionExportEnvelope(connectionsToExport as ConnectionTransferRow[]);
-    if (connectionsToExport.length > 1) {
-      downloadZipFile(
-        [{ path: "marinara-connections.json", content: JSON.stringify(envelope, null, 2) }],
-        "marinara-connections.zip",
+      const envelope = createConnectionExportEnvelope(connectionsToExport as ConnectionTransferRow[]);
+      if (connectionsToExport.length > 1) {
+        downloadZipFile(
+          [{ path: "marinara-connections.json", content: JSON.stringify(envelope, null, 2) }],
+          "marinara-connections.zip",
+        );
+      } else {
+        const filename = `${sanitizeExportFilenamePart(connectionsToExport[0]?.name, "connection")}.connection.json`;
+        downloadJsonFile(envelope, filename);
+      }
+      toast.success(
+        localizeUi("ui.panels.connectionspanel.exportedValue1ConnectionValue2", {
+          value1: connectionsToExport.length,
+          value2: connectionsToExport.length === 1 ? "" : localizeUi("ui.noodle.stageprofileview.s"),
+        }),
       );
-    } else {
-      const filename = `${sanitizeExportFilenamePart(connectionsToExport[0]?.name, "connection")}.connection.json`;
-      downloadJsonFile(envelope, filename);
-    }
-    toast.success(localizeUi("ui.panels.connectionspanel.exportedValue1ConnectionValue2", { value1: connectionsToExport.length, value2: connectionsToExport.length === 1 ? "" :localizeUi("ui.noodle.stageprofileview.s") }));
-  }, [localizeUi]);
+    },
+    [localizeUi],
+  );
 
   const handleExportSelected = useCallback(async () => {
     if (selectedConnectionIds.size === 0) return;
@@ -1638,9 +1808,12 @@ export function ConnectionsPanel() {
 
     if (
       !(await showConfirmDialog({
-        title:localizeUi("ui.panels.connectionspanel.deleteConnections"),
-        message:localizeUi("ui.panels.connectionspanel.deleteValue1ConnectionValue2ThisCannotBeUndone", { value1: ids.length, value2: ids.length === 1 ? "" :localizeUi("ui.noodle.stageprofileview.s") }),
-        confirmLabel:localizeUi("lorebook.editor.batch.delete"),
+        title: localizeUi("ui.panels.connectionspanel.deleteConnections"),
+        message: localizeUi("ui.panels.connectionspanel.deleteValue1ConnectionValue2ThisCannotBeUndone", {
+          value1: ids.length,
+          value2: ids.length === 1 ? "" : localizeUi("ui.noodle.stageprofileview.s"),
+        }),
+        confirmLabel: localizeUi("lorebook.editor.batch.delete"),
         tone: "destructive",
       }))
     ) {
@@ -1652,12 +1825,22 @@ export function ConnectionsPanel() {
     const deletedCount = ids.length - failedIds.length;
 
     if (deletedCount > 0) {
-      toast.success(localizeUi("ui.panels.connectionspanel.deletedValue1ConnectionValue2", { value1: deletedCount, value2: deletedCount === 1 ? "" :localizeUi("ui.noodle.stageprofileview.s") }));
+      toast.success(
+        localizeUi("ui.panels.connectionspanel.deletedValue1ConnectionValue2", {
+          value1: deletedCount,
+          value2: deletedCount === 1 ? "" : localizeUi("ui.noodle.stageprofileview.s"),
+        }),
+      );
     }
 
     if (failedIds.length > 0) {
       setSelectedConnectionIds(new Set(failedIds));
-      toast.error(localizeUi("ui.panels.connectionspanel.failedToDeleteValue1ConnectionValue2", { value1: failedIds.length, value2: failedIds.length === 1 ? "" :localizeUi("ui.noodle.stageprofileview.s") }));
+      toast.error(
+        localizeUi("ui.panels.connectionspanel.failedToDeleteValue1ConnectionValue2", {
+          value1: failedIds.length,
+          value2: failedIds.length === 1 ? "" : localizeUi("ui.noodle.stageprofileview.s"),
+        }),
+      );
       return;
     }
 
@@ -1760,7 +1943,11 @@ export function ConnectionsPanel() {
             "mari-chrome-control mari-chrome-control--primary flex-1 text-xs",
             selectionMode && "mari-chrome-control--selected",
           )}
-          aria-label={selectionMode ?localizeUi("ui.panels.connectionspanel.exitConnectionSelectionMode") :localizeUi("ui.panels.connectionspanel.selectConnections")}
+          aria-label={
+            selectionMode
+              ? localizeUi("ui.panels.connectionspanel.exitConnectionSelectionMode")
+              : localizeUi("ui.panels.connectionspanel.selectConnections")
+          }
           title={localizeUi("settings.common.select")}
         >
           <Check size="0.8125rem" />
@@ -1809,11 +1996,15 @@ export function ConnectionsPanel() {
             onClick={handleCreateFolder}
             className="mari-chrome-control mari-chrome-control--small flex-1 justify-start text-[0.6875rem]"
           >
-            <FolderPlus size="0.75rem" />{localizeUi("ui.panels.backgroundpicker.newFolder")}</button>
+            <FolderPlus size="0.75rem" />
+            {localizeUi("ui.panels.backgroundpicker.newFolder")}
+          </button>
         </div>
 
         {sortedFolders.length > 0 && (
-          <p className="mari-folder-helper">{localizeUi("ui.panels.connectionspanel.dragAndDropConnectionsToFoldersDoubleClickOr")}</p>
+          <p className="mari-folder-helper">
+            {localizeUi("ui.panels.connectionspanel.dragAndDropConnectionsToFoldersDoubleClickOr")}
+          </p>
         )}
       </div>
 
@@ -1847,20 +2038,25 @@ export function ConnectionsPanel() {
           <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-[var(--secondary)] text-[var(--muted-foreground)] ring-1 ring-[var(--border)]">
             <Search size="1.25rem" />
           </div>
-          <p className="mari-chrome-text-muted text-xs">{localizeUi("ui.panels.connectionspanel.noConnectionsMatchYourSearch")}</p>
+          <p className="mari-chrome-text-muted text-xs">
+            {localizeUi("ui.panels.connectionspanel.noConnectionsMatchYourSearch")}
+          </p>
         </div>
       )}
 
       {/* LinkAPI recommendation banner */}
       {!isLoading && (!connections || (connections as unknown[]).length === 0) && !linkApiBannerDismissed && (
         <div className="rounded-xl border border-sky-400/20 bg-gradient-to-br from-sky-400/5 to-blue-500/5 p-3 flex flex-col gap-2">
-          <p className="text-xs text-[var(--muted-foreground)]">{localizeUi("ui.panels.connectionspanel.lookingToTryNewModelsFromATrustedProvider")}{" "}
+          <p className="text-xs text-[var(--muted-foreground)]">
+            {localizeUi("ui.panels.connectionspanel.lookingToTryNewModelsFromATrustedProvider")}{" "}
             <a
               href="https://linkapi.ai/"
               target="_blank"
               rel="noopener noreferrer"
               className="font-medium text-sky-400 underline decoration-sky-400/30 hover:text-sky-300 transition-colors"
-            >{localizeUi("ui.panels.connectionspanel.linkapi")}</a>
+            >
+              {localizeUi("ui.panels.connectionspanel.linkapi")}
+            </a>
             !
           </p>
           <div className="grid min-w-0 grid-cols-2 gap-2">
@@ -1928,13 +2124,17 @@ export function ConnectionsPanel() {
         )}
       >
         {draggedConnectionId && (
-          <div className="pointer-events-none px-2 py-1 text-[0.625rem] text-[var(--marinara-chat-chrome-button-text-active)]">{localizeUi("ui.panels.agentspanel.dropHereToMoveOutOfFolder")}</div>
+          <div className="pointer-events-none px-2 py-1 text-[0.625rem] text-[var(--marinara-chat-chrome-button-text-active)]">
+            {localizeUi("ui.panels.agentspanel.dropHereToMoveOutOfFolder")}
+          </div>
         )}
         {unfiledConnections.map(renderConnectionRow)}
       </div>
 
       {activeChat && (
-        <p className="px-1 text-[0.625rem] text-[var(--muted-foreground)]/60">{localizeUi("ui.panels.connectionspanel.clickToEditSetActiveConnectionInChatSettings")}</p>
+        <p className="px-1 text-[0.625rem] text-[var(--muted-foreground)]/60">
+          {localizeUi("ui.panels.connectionspanel.clickToEditSetActiveConnectionInChatSettings")}
+        </p>
       )}
 
       {selectionMode && (

@@ -67,7 +67,7 @@ type LorebooksStore = {
 
 type AgentsStore = unknown;
 
-type ResolveGenerationToolsArgs = {
+export type ResolveGenerationToolsArgs = {
   requestBody: Record<string, unknown>;
   chatId: string;
   chatMetadata: Record<string, unknown>;
@@ -86,6 +86,10 @@ type ResolveGenerationToolsArgs = {
   gameSpotifyMusicEnabled: boolean;
   agentContext: AgentContext;
   emitMetadataPatch(patch: Record<string, unknown>): void;
+};
+
+export type ResolveAgentGenerationToolsArgs = ResolveGenerationToolsArgs & {
+  observeSpotifyPlaybackBeforePlay?: boolean;
 };
 
 export type ResolvedGenerationTools = {
@@ -111,7 +115,11 @@ const CONVERSATION_ONLY_TOOL_NAMES = new Set(["update_about_me"]);
 
 // Tools that are off unless the user explicitly enables them via activeToolIds
 // (excluded from the "no filter set = all tools on" default).
-const DEFAULT_OFF_TOOL_NAMES = new Set(["update_about_me"]);
+const DEFAULT_OFF_TOOL_NAMES = new Set(["update_about_me", ...(DEFAULT_AGENT_TOOLS.spotify ?? [])]);
+
+export function isChatToolEnabledByDefault(toolName: string): boolean {
+  return !AGENT_ONLY_TOOL_NAMES.has(toolName) && !DEFAULT_OFF_TOOL_NAMES.has(toolName);
+}
 
 function parseExtra(extra: unknown): Record<string, unknown> {
   if (!extra) return {};
@@ -431,10 +439,7 @@ async function loadToolDefinitions(args: {
           (toolDef) =>
             args.activeToolIds.includes(toolDef.function.name) && !AGENT_ONLY_TOOL_NAMES.has(toolDef.function.name),
         )
-      : allToolDefs.filter(
-          (toolDef) =>
-            !AGENT_ONLY_TOOL_NAMES.has(toolDef.function.name) && !DEFAULT_OFF_TOOL_NAMES.has(toolDef.function.name),
-        );
+      : allToolDefs.filter((toolDef) => isChatToolEnabledByDefault(toolDef.function.name));
   }
 
   return { toolDefs, allToolDefs, customToolDefs };
@@ -516,7 +521,19 @@ function createLorebookEntryWriter(
     ) as any;
     const keys = Array.from(new Set(entry.keys.map((key) => key.trim()).filter(Boolean)));
 
-    if (!existing || entry.mode === "create") {
+    if (existing && entry.mode === "create") {
+      return {
+        applied: false,
+        action: "exists",
+        lorebookId: writableLorebookId,
+        lorebookName: (targetLorebook as any).name,
+        entryId: existing.id,
+        name: entry.name,
+        sourceAgentId: agent.id,
+      };
+    }
+
+    if (!existing) {
       const created = await lorebooksStore.createEntry({
         lorebookId: writableLorebookId,
         name: entry.name,
@@ -581,6 +598,8 @@ function resetSpotifyAgentRuntime(agent: ResolvedAgent): void {
   spotifyAgent.__spotifyPlayUris = [];
   spotifyAgent.__spotifyCandidateTracks = [];
   spotifyAgent.__spotifyCurrentAfterPlayUri = null;
+  spotifyAgent.__spotifyCurrentBeforePlayUri = null;
+  spotifyAgent.__spotifyRepeatAfterPlayState = null;
   spotifyAgent.__spotifyPlayDisplay = null;
   spotifyAgent.__spotifyPlayReason = null;
   spotifyAgent.__spotifyQueued = null;
@@ -616,43 +635,51 @@ async function attachSpotifyCurrentPlaybackContext(args: {
   }
 }
 
-export async function resolveGenerationTools({
-  requestBody,
-  chatId,
-  chatMetadata,
-  chats,
-  agentsStore,
-  customToolsStore,
-  lorebooksStore,
-  resolvedAgents,
-  enabledConfigs,
-  promptCharacterIds,
-  personaId,
-  activeLorebookIds,
-  excludedLorebookIds,
-  excludedSourceAgentIds,
-  gameState,
-  gameSpotifyMusicEnabled,
-  agentContext,
-  emitMetadataPatch,
-}: ResolveGenerationToolsArgs): Promise<ResolvedGenerationTools> {
-  const chatToolsExplicitlyDisabled = booleanFalseText(chatMetadata.enableTools);
-  const enableChatTools =
-    requestBody.enableTools === true || (!chatToolsExplicitlyDisabled && booleanText(chatMetadata.enableTools));
+async function resolveToolRuntime(
+  {
+    requestBody,
+    chatId,
+    chatMetadata,
+    chats,
+    agentsStore,
+    customToolsStore,
+    lorebooksStore,
+    resolvedAgents,
+    enabledConfigs,
+    promptCharacterIds,
+    personaId,
+    activeLorebookIds,
+    excludedLorebookIds,
+    excludedSourceAgentIds,
+    gameState,
+    gameSpotifyMusicEnabled,
+    agentContext,
+    emitMetadataPatch,
+    observeSpotifyPlaybackBeforePlay,
+  }: ResolveAgentGenerationToolsArgs,
+  options: {
+    enableChatTools: boolean;
+    preloadSpotifyPlayback: boolean;
+    restoreSpotifyAgentDefaultTools: boolean;
+  },
+): Promise<ResolvedGenerationTools> {
+  const { enableChatTools } = options;
   const spotifyToolNames = new Set(DEFAULT_AGENT_TOOLS.spotify ?? []);
   for (const agent of resolvedAgents) {
     const agentSettings = parseSettings(agent.settings);
     const agentEnabledNames = Array.isArray(agentSettings.enabledTools) ? (agentSettings.enabledTools as string[]) : [];
-    if (isSpotifyMusicAgent(agent) && agentEnabledNames.length === 0 && spotifyToolNames.size > 0) {
+    if (
+      options.restoreSpotifyAgentDefaultTools &&
+      isSpotifyMusicAgent(agent) &&
+      agentEnabledNames.length === 0 &&
+      spotifyToolNames.size > 0
+    ) {
       agent.settings = { ...agentSettings, enabledTools: [...spotifyToolNames] };
     }
   }
   const enableAgentTools = resolvedAgents.some((agent) => {
     const agentSettings = parseSettings(agent.settings);
-    return (
-      (Array.isArray(agentSettings.enabledTools) && agentSettings.enabledTools.length > 0) ||
-      (agent.type === "spotify" && (DEFAULT_AGENT_TOOLS.spotify?.length ?? 0) > 0)
-    );
+    return Array.isArray(agentSettings.enabledTools) && agentSettings.enabledTools.length > 0;
   });
   const activeToolIds: string[] = Array.isArray(chatMetadata.activeToolIds)
     ? (chatMetadata.activeToolIds as string[])
@@ -805,30 +832,19 @@ export async function resolveGenerationTools({
     onUpdateMetadata: updateChatMetadataForTools,
   };
 
-  await attachSpotifyCurrentPlaybackContext({
-    agentContext,
-    resolvedAgents,
-    spotify: spotifyCreds,
-  });
+  if (options.preloadSpotifyPlayback) {
+    await attachSpotifyCurrentPlaybackContext({
+      agentContext,
+      resolvedAgents,
+      spotify: spotifyCreds,
+    });
+  }
 
   for (const agent of resolvedAgents) {
     if (agent.toolContext) continue;
 
     const agentSettings = parseSettings(agent.settings);
-    let agentEnabledNames = Array.isArray(agentSettings.enabledTools) ? (agentSettings.enabledTools as string[]) : [];
-    // YouTube-mode Music DJ has no tools by design (pure-JSON); only backfill the
-    // Spotify tools when the agent is actually in Spotify mode.
-    if (
-      agent.type === "spotify" &&
-      agentSettings.musicProvider !== "youtube" &&
-      agentSettings.musicPlayerSource !== "youtube" &&
-      agentSettings.musicProvider !== "custom" &&
-      agentSettings.musicPlayerSource !== "custom" &&
-      agentEnabledNames.length === 0
-    ) {
-      agentEnabledNames = [...spotifyToolNames];
-      agent.settings = { ...agentSettings, enabledTools: agentEnabledNames };
-    }
+    const agentEnabledNames = Array.isArray(agentSettings.enabledTools) ? (agentSettings.enabledTools as string[]) : [];
     if (agentEnabledNames.length === 0) continue;
 
     const allowSpotifyAgentTools = agent.type === "spotify";
@@ -864,15 +880,31 @@ export async function resolveGenerationTools({
             allowed: Array.from(allowedToolNames),
           });
         }
-        const result = await executeToolCallForModel(call, {
+        const executionContext = {
           ...baseToolExecutionContext,
           saveLorebookEntry,
           replaceChatMessageContent: replaceChatMessageContentForAgent,
-        });
+        };
+        const spotifyAgent = agent as SpotifyRuntimeAgent;
+        if (observeSpotifyPlaybackBeforePlay && agent.type === "spotify" && call.function.name === "spotify_play") {
+          const beforeRaw = await executeToolCallForModel(
+            {
+              id: `spotify-before-play-${Date.now()}`,
+              type: "function",
+              function: { name: "spotify_get_current_playback", arguments: "{}" },
+            },
+            executionContext,
+          );
+          try {
+            spotifyAgent.__spotifyCurrentBeforePlayUri = readSpotifyPlaybackTrackUri(JSON.parse(beforeRaw));
+          } catch {
+            spotifyAgent.__spotifyCurrentBeforePlayUri = null;
+          }
+        }
+        const result = await executeToolCallForModel(call, executionContext);
         if (agent.type === "spotify" && call.function.name === "spotify_play") {
           try {
             const parsed = JSON.parse(result) as Record<string, unknown>;
-            const spotifyAgent = agent as SpotifyRuntimeAgent;
             if (typeof parsed.error === "string") {
               spotifyAgent.__spotifyToolError = parsed.error;
             }
@@ -882,6 +914,8 @@ export async function resolveGenerationTools({
               spotifyAgent.__spotifyPlaybackPending = parsed.playbackPending === true;
               spotifyAgent.__spotifyPlayUris = readSpotifyTrackUris(parsed);
               spotifyAgent.__spotifyCurrentAfterPlayUri = readSpotifyPlaybackTrackUri(parsed);
+              spotifyAgent.__spotifyRepeatAfterPlayState =
+                readSpotifyStringField(parsed, "repeatState") || readSpotifyStringField(parsed, "repeat") || null;
               spotifyAgent.__spotifyPlayDisplay = readSpotifyStringField(parsed, "display") || null;
               spotifyAgent.__spotifyPlayReason = readSpotifyStringField(parsed, "reason") || null;
               spotifyAgent.__spotifyQueued = readSpotifyNumberField(parsed, "queued");
@@ -890,7 +924,7 @@ export async function resolveGenerationTools({
               spotifyAgent.__spotifyPlayError = parsed.error;
             }
           } catch {
-            (agent as SpotifyRuntimeAgent).__spotifyPlayError = "spotify_play returned an unparseable response";
+            spotifyAgent.__spotifyPlayError = "spotify_play returned an unparseable response";
             // Leave the raw tool result for the model; downstream fallback can now stop instead of replaying.
           }
         } else if (agent.type === "spotify" && spotifyToolNames.has(call.function.name)) {
@@ -916,4 +950,26 @@ export async function resolveGenerationTools({
     baseToolExecutionContext,
     updateChatMetadataForTools,
   };
+}
+
+export async function resolveAgentGenerationTools(
+  args: ResolveAgentGenerationToolsArgs,
+): Promise<ResolvedGenerationTools> {
+  return resolveToolRuntime(args, {
+    enableChatTools: false,
+    preloadSpotifyPlayback: false,
+    restoreSpotifyAgentDefaultTools: args.gameSpotifyMusicEnabled,
+  });
+}
+
+export async function resolveGenerationTools(args: ResolveGenerationToolsArgs): Promise<ResolvedGenerationTools> {
+  const chatToolsExplicitlyDisabled = booleanFalseText(args.chatMetadata.enableTools);
+  const enableChatTools =
+    args.requestBody.enableTools === true ||
+    (!chatToolsExplicitlyDisabled && booleanText(args.chatMetadata.enableTools));
+  return resolveToolRuntime(args, {
+    enableChatTools,
+    preloadSpotifyPlayback: true,
+    restoreSpotifyAgentDefaultTools: true,
+  });
 }

@@ -1,17 +1,18 @@
 // ──────────────────────────────────────────────
 // Layout: Main App Shell (Discord-like three-column)
 // ──────────────────────────────────────────────
+import { useQueryClient } from "@tanstack/react-query";
 import { ChatSidebar } from "./ChatSidebar";
 import { TopBar } from "./TopBar";
 import { SpotifyMobileWidget } from "../spotify/SpotifyMiniPlayer";
 import { YouTubeMobileWidget } from "../chat/YouTubePlayer";
 import { LocalMusicMobileWidget } from "../chat/LocalMusicPlayer";
-import { MusicDjUnavailablePlayer } from "../music/MusicDjUnavailablePlayer";
 import { ProfessorMariFloatingAssistantHost } from "../chat/ProfessorMariFloatingAssistantHost";
 import { ChatResourceMobileDropDock } from "../chat/ChatResourceMobileDropDock";
 import { hasProfessorMariFloatingFollowup } from "../chat/professor-mari-floating-events";
 import {
   getTrackerPanelWidthForProfile,
+  MOBILE_SHELL_MEDIA_QUERY,
   RIGHT_PANEL_WIDTH_MAX,
   RIGHT_PANEL_WIDTH_MIN,
   SIDEBAR_WIDTH_MAX,
@@ -22,6 +23,7 @@ import {
 import { useChatStore } from "../../stores/chat.store";
 import { useBackgroundAutonomousPolling } from "../../hooks/use-background-autonomous";
 import { useClearAutonomousUnread, useUpdateChatMetadata } from "../../hooks/use-chats";
+import { lorebookKeys } from "../../hooks/use-lorebooks";
 import { useIdleDetection } from "../../hooks/use-idle-detection";
 import { dispatchChatVisualViewportChange } from "../../hooks/use-visual-viewport-chat-bottom";
 import { usePageActivity } from "../../hooks/use-page-activity";
@@ -29,9 +31,11 @@ import { useCapabilityAgentRegistry, useCapabilityClientModules } from "../../ho
 import { CapabilityElement } from "../capabilities/CapabilityElement";
 import { FeatureAgentDetailHost } from "../agents/FeatureAgentDetailHost";
 import { getCssBackgroundStyle } from "../../lib/css-colors";
+import { resolveFeatureAgentPackage } from "../../lib/feature-agent-package";
 import { showConfirmDialog } from "../../lib/app-dialogs";
 import { cn } from "../../lib/utils";
 import { parseChatMetadata } from "../../lib/chat-display";
+import { requestChatSummaryOpen } from "../../lib/chat-floating-ui-events";
 import { resolveTrackerPanelContentScale, resolveTrackerPanelDesktopWidth } from "../../lib/tracker-panel-layout";
 import {
   closeTrackerPanelWindow,
@@ -90,7 +94,6 @@ const BotBrowserView = lazy(() =>
 const GameAssetsBrowserView = lazy(() =>
   import("../game-assets/GameAssetsBrowserView").then((module) => ({ default: module.GameAssetsBrowserView })),
 );
-const NoodleView = lazy(() => import("../noodle/NoodleView").then((module) => ({ default: module.NoodleView })));
 const RightPanel = lazy(() => import("./RightPanel").then((module) => ({ default: module.RightPanel })));
 const TrackerDataSidebar = lazy(() =>
   import("./TrackerDataSidebar").then((module) => ({ default: module.TrackerDataSidebar })),
@@ -122,6 +125,7 @@ const TRACKER_PANEL_ANCHOR_SELECTOR = '[data-tracker-panel-anchor="roleplay-hud"
 const ROLEPLAY_CHAT_COLUMN_SELECTOR = '[data-roleplay-chat-column="true"]';
 const TOP_BAR_SELECTOR = '[data-component="TopBar"]';
 const MOBILE_SHELL_PANEL_TOP_CLASS = "top-[calc(env(safe-area-inset-top)_+_3rem)]";
+const MOBILE_SHELL_PANEL_BOTTOM_PADDING_CLASS = "pb-[min(max(env(safe-area-inset-bottom),0.5rem),3rem)]";
 const CENTER_COMPACT_WIDTH = 768;
 const CENTER_COMPACT_HYSTERESIS = 80;
 const CENTER_COMPACT_SCAN_DEPTH = 6;
@@ -222,14 +226,13 @@ function SidePanelFallback() {
 
 export function AppShell() {
   const { t: localizeUi } = useUiTranslation();
+  const queryClient = useQueryClient();
   const capabilityAgents = useCapabilityAgentRegistry();
   const installedCapabilities = useCapabilityClientModules();
   const updateChatMetadata = useUpdateChatMetadata();
-  const musicPlayerEnabled = useUIStore((state) => state.musicPlayerEnabled);
   const musicDjInstalled = (installedCapabilities.data ?? []).some(
     (capability) => capability.id === "spotify" && capability.status === "active",
   );
-  const showMusicDjUnavailablePlayer = musicPlayerEnabled && !installedCapabilities.isLoading && !musicDjInstalled;
 
   // Background autonomous polling for inactive conversation chats
   useBackgroundAutonomousPolling();
@@ -350,10 +353,26 @@ export function AppShell() {
   const setEditorDirty = useUIStore((s) => s.setEditorDirty);
   const openLorebookDetail = useUIStore((s) => s.openLorebookDetail);
   const closeAgentDetail = useUIStore((s) => s.closeAgentDetail);
+  const openPresetDetail = useUIStore((s) => s.openPresetDetail);
   const openRightPanel = useUIStore((s) => s.openRightPanel);
   const openAgentCatalog = useUIStore((s) => s.openAgentCatalog);
   const setTrackerPanelOpen = useUIStore((s) => s.setTrackerPanelOpen);
   const restoreTrackerPanelOpenForChat = useUIStore((s) => s.restoreTrackerPanelOpenForChat);
+  const refreshLorebooks = useCallback(
+    () => queryClient.invalidateQueries({ queryKey: lorebookKeys.all }),
+    [queryClient],
+  );
+  const openSpatialLorebook = useCallback(
+    (lorebookId: string) => {
+      void refreshLorebooks();
+      openLorebookDetail(lorebookId);
+    },
+    [openLorebookDetail, refreshLorebooks],
+  );
+  const closeFeatureDetail = useCallback(() => {
+    closeAgentDetail();
+    openRightPanel("agents");
+  }, [closeAgentDetail, openRightPanel]);
   const [sidebarDragWidth, setSidebarDragWidth] = useState<number | null>(null);
   const [rightPanelDragWidth, setRightPanelDragWidth] = useState<number | null>(null);
   const sidebarDragWidthRef = useRef<number | null>(null);
@@ -367,7 +386,10 @@ export function AppShell() {
   const liveRightPanelWidth = rightPanelDragWidth ?? sidebarDragWidth ?? sharedSidebarWidth;
   const trackerPanelWidth = getTrackerPanelWidthForProfile(trackerPanelSizeProfile);
   const [trackerPanelResolvedWidth, setTrackerPanelResolvedWidth] = useState(trackerPanelWidth);
+  const [trackerPanelWidthMeasured, setTrackerPanelWidthMeasured] = useState(false);
   const [trackerPanelWindowTarget, setTrackerPanelWindowTarget] = useState<TrackerPanelWindowTarget | null>(null);
+  const trackerPanelWindowTargetRef = useRef<TrackerPanelWindowTarget | null>(null);
+  const trackerPanelDockingPopupRef = useRef<TrackerPanelWindowTarget["popup"] | null>(null);
   const detachTrackerPanelPendingRef = useRef(false);
   const [trackerPanelHost] = useState(() => {
     const host = document.createElement("div");
@@ -382,9 +404,11 @@ export function AppShell() {
     : undefined;
 
   // Track mobile breakpoint for right-panel animation strategy
-  const [isMobile, setIsMobile] = useState(() => typeof window !== "undefined" && window.innerWidth < 768);
+  const [isMobile, setIsMobile] = useState(
+    () => typeof window !== "undefined" && window.matchMedia(MOBILE_SHELL_MEDIA_QUERY).matches,
+  );
   useEffect(() => {
-    const mq = window.matchMedia("(max-width: 767px)");
+    const mq = window.matchMedia(MOBILE_SHELL_MEDIA_QUERY);
     const handler = (e: MediaQueryListEvent) => setIsMobile(e.matches);
     mq.addEventListener("change", handler);
     return () => mq.removeEventListener("change", handler);
@@ -409,6 +433,7 @@ export function AppShell() {
   }, []);
 
   const shellOverlayMode = isMobile;
+  const mobileNavigationPanel = shellOverlayMode ? (sidebarOpen ? "chats" : rightPanelOpen ? "right" : null) : null;
   const [rightPanelEverOpened, setRightPanelEverOpened] = useState(rightPanelOpen);
   useEffect(() => {
     if (rightPanelOpen) setRightPanelEverOpened(true);
@@ -525,7 +550,6 @@ export function AppShell() {
   const regexDetailId = useUIStore((s) => s.regexDetailId);
   const botBrowserOpen = useUIStore((s) => s.botBrowserOpen);
   const gameAssetsBrowserOpen = useUIStore((s) => s.gameAssetsBrowserOpen);
-  const noodleOpen = useUIStore((s) => s.noodleOpen);
   const hasCompletedOnboarding = useUIStore((s) => s.hasCompletedOnboarding);
   const activeChatId = useChatStore((s) => s.activeChatId);
   const activeChat = useChatStore((s) => s.activeChat);
@@ -548,11 +572,7 @@ export function AppShell() {
   );
   const selectedFeaturePackage = useMemo(
     () =>
-      selectedFeatureAgent
-        ? ((installedCapabilities.data ?? []).find((item) =>
-            item.manifest.contributions?.agentDetail?.agentIds.includes(selectedFeatureAgent.id),
-          ) ?? null)
-        : null,
+      selectedFeatureAgent ? resolveFeatureAgentPackage(selectedFeatureAgent, installedCapabilities.data ?? []) : null,
     [installedCapabilities.data, selectedFeatureAgent],
   );
   const activeChatMetadata = parseChatMetadata(activeChat?.metadata);
@@ -590,6 +610,18 @@ export function AppShell() {
     },
     [activeChat?.metadata, activeChatId, selectedFeatureAgent, selectedFeatureSupportsActiveChat, updateChatMetadata],
   );
+  const openChatSummarySettings = useCallback(() => {
+    if (!activeChatId || activeChat?.mode !== "roleplay") return;
+    const chatId = activeChatId;
+    closeAgentDetail();
+    closeRightPanel();
+    window.requestAnimationFrame(() => requestChatSummaryOpen(chatId));
+  }, [activeChat?.mode, activeChatId, closeAgentDetail, closeRightPanel]);
+  const openActivePromptPresetEditor = useCallback(() => {
+    const presetId = activeChat?.promptPresetId;
+    if (!activeChat || !presetId) return;
+    openPresetDetail(presetId, { initialTab: "sections" });
+  }, [activeChat, openPresetDetail]);
 
   useEffect(() => {
     if (!activeChatId || isClearingAutonomousUnread) return;
@@ -744,16 +776,16 @@ export function AppShell() {
         activeChatSupported={selectedFeatureSupportsActiveChat}
         enabledForChat={selectedFeatureEnabledForChat}
         onEnabledForChatChange={setSelectedFeatureEnabledForChat}
-        onClose={() => {
-          closeAgentDetail();
-          openRightPanel("agents");
-        }}
+        onClose={closeFeatureDetail}
         onManagePackage={openAgentCatalog}
         capabilityProps={{
           debugMode,
           confirmAction: showConfirmDialog,
           onDirtyChange: setEditorDirty,
-          onOpenLorebook: openLorebookDetail,
+          onOpenLorebook: openSpatialLorebook,
+          onLorebooksChanged: refreshLorebooks,
+          onOpenChatSummarySettings: activeChat?.mode === "roleplay" ? openChatSummarySettings : undefined,
+          onOpenActivePromptPresetEditor: activeChat?.promptPresetId ? openActivePromptPresetEditor : undefined,
         }}
       />
     ) : (
@@ -773,30 +805,34 @@ export function AppShell() {
     <LorebookEditor />
   ) : null;
 
-  const showAmbientDecor =
-    isPageActive && !activeChatId && !detailView && !botBrowserOpen && !gameAssetsBrowserOpen && !noodleOpen;
+  const showAmbientDecor = isPageActive && !activeChatId && !detailView && !botBrowserOpen && !gameAssetsBrowserOpen;
   const hasDetailView = detailView != null;
   const trackerPanelModeAvailable = activeChat?.mode === "roleplay";
   const trackerPanelActive = trackerPanelEnabled && trackerPanelOpen;
   const trackerPanelDetached = trackerPanelWindowTarget !== null;
   const trackerPanelSurfaceAvailable =
-    trackerPanelModeAvailable && !botBrowserOpen && !gameAssetsBrowserOpen && !noodleOpen && !hasDetailView;
+    trackerPanelModeAvailable && !botBrowserOpen && !gameAssetsBrowserOpen && !hasDetailView;
   const trackerPanelVisible = trackerPanelActive && trackerPanelSurfaceAvailable && !trackerPanelDetached;
   const chatSurfaceActive =
     !botBrowserOpen &&
     !gameAssetsBrowserOpen &&
-    !noodleOpen &&
     !hasDetailView &&
     (!shellOverlayMode || (!sidebarOpen && !rightPanelOpen && !trackerPanelVisible));
   const trackerWindowHost = trackerPanelWindowTarget?.popup ?? window;
 
   const dockTrackerPanel = useCallback(() => {
-    if (trackerPanelWindowTarget) closeTrackerPanelWindow(trackerPanelWindowTarget);
+    const target = trackerPanelWindowTargetRef.current;
+    if (target) {
+      trackerPanelDockingPopupRef.current = target.popup;
+      closeTrackerPanelWindow(target);
+      trackerPanelWindowTargetRef.current = null;
+    }
     setTrackerPanelWindowTarget(null);
-  }, [trackerPanelWindowTarget]);
+  }, []);
 
   const detachTrackerPanel = useCallback(async () => {
     if (detachTrackerPanelPendingRef.current) return;
+    trackerPanelDockingPopupRef.current = null;
     detachTrackerPanelPendingRef.current = true;
 
     try {
@@ -808,6 +844,7 @@ export function AppShell() {
         toast.error(localizeUi("ui.layout.appshell.trackerPanelPopupBlocked"));
         return;
       }
+      trackerPanelWindowTargetRef.current = target;
       setTrackerPanelWindowTarget(target);
     } catch {
       toast.error(localizeUi("ui.layout.appshell.trackerPanelWindowFailed"));
@@ -816,11 +853,27 @@ export function AppShell() {
     }
   }, [localizeUi, trackerPanelWidth]);
 
-  const handleTrackerPanelWindowClosed = useCallback(() => {
-    setTrackerPanelWindowTarget(null);
-  }, []);
+  const handleTrackerPanelWindowClosed = useCallback(
+    (closedTarget: TrackerPanelWindowTarget) => {
+      if (trackerPanelDockingPopupRef.current === closedTarget.popup) {
+        trackerPanelDockingPopupRef.current = null;
+        return;
+      }
+      if (trackerPanelWindowTargetRef.current?.popup !== closedTarget.popup) return;
+      trackerPanelWindowTargetRef.current = null;
+      setTrackerPanelWindowTarget(null);
+      setTrackerPanelOpen(false, activeChatId);
+    },
+    [activeChatId, setTrackerPanelOpen],
+  );
 
-  const professorMariFloatingActive = hasDetailView && hasProfessorMariFloatingFollowup();
+  const professorMariFloatingActive =
+    hasProfessorMariFloatingFollowup() &&
+    (Boolean(activeChatId) ||
+      hasDetailView ||
+      botBrowserOpen ||
+      gameAssetsBrowserOpen ||
+      (shellOverlayMode && Boolean(mobileNavigationPanel)));
 
   useEffect(() => {
     restoreTrackerPanelOpenForChat(activeChatId);
@@ -832,6 +885,7 @@ export function AppShell() {
   useEffect(() => {
     if (!trackerPanelWindowTarget || (trackerPanelActive && trackerPanelModeAvailable)) return;
     closeTrackerPanelWindow(trackerPanelWindowTarget);
+    trackerPanelWindowTargetRef.current = null;
     setTrackerPanelWindowTarget(null);
   }, [trackerPanelActive, trackerPanelModeAvailable, trackerPanelWindowTarget]);
   useEffect(() => {
@@ -1006,9 +1060,11 @@ export function AppShell() {
   useLayoutEffect(() => {
     if (shellOverlayMode || !trackerPanelSurfaceAvailable || !trackerPanelAnchoredForMotion) {
       setTrackerPanelResolvedWidth(trackerPanelWidth);
+      setTrackerPanelWidthMeasured(false);
       return;
     }
 
+    setTrackerPanelWidthMeasured(false);
     let frame = 0;
     let discoveryObserver: MutationObserver | null = null;
     let observedChatColumn: HTMLElement | null = null;
@@ -1020,7 +1076,7 @@ export function AppShell() {
       const chatColumnRect = chatColumn ? readVisibleElementRect(chatColumn) : null;
 
       if (!mainRect || !chatColumn || !chatColumnRect) {
-        setTrackerPanelResolvedWidth(trackerPanelWidth);
+        setTrackerPanelWidthMeasured(false);
         return false;
       }
 
@@ -1034,6 +1090,7 @@ export function AppShell() {
         gap: TRACKER_PANEL_CHAT_GAP,
       });
       setTrackerPanelResolvedWidth((current) => (current === nextWidth ? current : nextWidth));
+      setTrackerPanelWidthMeasured(true);
 
       if (observedChatColumn !== chatColumn) {
         if (observedChatColumn) observer.unobserve(observedChatColumn);
@@ -1112,7 +1169,7 @@ export function AppShell() {
     );
 
   const trackerPanelDesktop = (side: "left" | "right") =>
-    trackerPanelVisible && trackerPanelSide === side ? (
+    trackerPanelVisible && trackerPanelWidthMeasured && trackerPanelSide === side ? (
       <motion.aside
         key={`tracker-${side}`}
         initial={{
@@ -1146,7 +1203,7 @@ export function AppShell() {
         data-tracker-size-profile={trackerPanelSizeProfile}
         aria-label={localizeUi("ui.layout.appshell.trackerDataPanel")}
         className={cn(
-          "mari-tracker-panel fixed z-30 hidden overflow-hidden bg-zinc-950/95 shadow-2xl ring-1 ring-zinc-700/80 backdrop-blur-2xl transition-[width] duration-200 ease-[cubic-bezier(0.16,1,0.3,1)] will-change-[transform,opacity] md:block",
+          "mari-tracker-panel fixed z-30 hidden overflow-hidden bg-zinc-950/95 shadow-2xl ring-1 ring-[var(--marinara-app-accent-static)] backdrop-blur-2xl transition-[width] duration-200 ease-[cubic-bezier(0.16,1,0.3,1)] will-change-[transform,opacity] md:block",
           side === "left" ? "rounded-r-xl" : "rounded-l-xl",
         )}
         style={{
@@ -1194,50 +1251,46 @@ export function AppShell() {
         </>
       )}
 
-      {/* Overlay sidebar backdrop */}
-      {sidebarOpen && shellOverlayMode && (
+      {/* Mobile navigation backdrop */}
+      {mobileNavigationPanel && (
         <div
-          className={cn("fixed inset-x-0 bottom-0 z-30 bg-black/50 backdrop-blur-sm", MOBILE_SHELL_PANEL_TOP_CLASS)}
-          onClick={() => setSidebarOpen(false)}
+          className={cn("fixed inset-x-0 bottom-0 z-[45] bg-black/50 backdrop-blur-sm", MOBILE_SHELL_PANEL_TOP_CLASS)}
+          onClick={() => {
+            setSidebarOpen(false);
+            closeRightPanel();
+          }}
         />
       )}
 
       {/* Left sidebar - Chat list */}
-      <aside
-        data-tour="sidebar"
-        data-component="ChatSidebarSlot"
-        aria-label={localizeUi("ui.layout.appshell.chatList")}
-        aria-hidden={!sidebarOpen}
-        inert={!sidebarOpen}
-        className={cn(
-          "mari-shell-panel-slot flex-shrink-0 overflow-hidden md:relative",
-          sidebarDragWidth != null && "!transition-none",
-          !sidebarOpen && "pointer-events-none",
-          shellOverlayMode &&
-            cn(
-              "fixed bottom-0 left-0 z-40 max-h-none pb-[max(env(safe-area-inset-bottom),0.5rem)] shadow-2xl",
-              MOBILE_SHELL_PANEL_TOP_CLASS,
-            ),
-        )}
-        style={{
-          width: shellOverlayMode ? "100vw" : sidebarOpen ? liveSidebarWidth : 0,
-        }}
-      >
-        <div
-          data-component="ChatSidebarPanel"
+      {!shellOverlayMode && (
+        <aside
+          data-tour="sidebar"
+          data-component="ChatSidebarSlot"
+          aria-label={localizeUi("ui.layout.appshell.chatList")}
           aria-hidden={!sidebarOpen}
           inert={!sidebarOpen}
           className={cn(
-            "mari-sidebar mari-shell-panel-motion absolute inset-y-0 left-0 overflow-hidden bg-[var(--background)]/95",
-            shellOverlayMode && "backdrop-blur-xl",
-            sidebarOpen ? "mari-shell-panel-enter-left" : "mari-shell-panel-exit-left pointer-events-none",
-            !shellOverlayMode && "mari-shell-panel-edge mari-shell-panel-edge--right",
+            "mari-shell-panel-slot relative flex-shrink-0 overflow-hidden",
+            sidebarDragWidth != null && "!transition-none",
+            !sidebarOpen && "pointer-events-none",
           )}
-          style={{ width: shellOverlayMode ? "100vw" : liveSidebarWidth }}
+          style={{ width: sidebarOpen ? liveSidebarWidth : 0 }}
         >
-          <ChatSidebar />
-        </div>
-      </aside>
+          <div
+            data-component="ChatSidebarPanel"
+            aria-hidden={!sidebarOpen}
+            inert={!sidebarOpen}
+            className={cn(
+              "mari-sidebar mari-shell-panel-motion mari-shell-panel-edge mari-shell-panel-edge--right absolute inset-y-0 left-0 overflow-hidden bg-[var(--background)]/95",
+              sidebarOpen ? "mari-shell-panel-enter-left" : "mari-shell-panel-exit-left pointer-events-none",
+            )}
+            style={{ width: liveSidebarWidth }}
+          >
+            <ChatSidebar />
+          </div>
+        </aside>
+      )}
       {!shellOverlayMode && sidebarOpen && (
         <div
           role="separator"
@@ -1282,8 +1335,7 @@ export function AppShell() {
           <div
             className={cn(
               "mari-app-background-paint flex flex-1 flex-col overflow-hidden",
-              (botBrowserOpen || gameAssetsBrowserOpen || (!shellOverlayMode && hasDetailView && !noodleOpen)) &&
-                "hidden",
+              (botBrowserOpen || gameAssetsBrowserOpen || (!shellOverlayMode && hasDetailView)) && "hidden",
             )}
             style={
               {
@@ -1293,15 +1345,13 @@ export function AppShell() {
               } as CSSProperties
             }
           >
-            <Suspense fallback={<MainPaneFallback />}>
-              {noodleOpen ? <NoodleView /> : (shellOverlayMode || !hasDetailView) && <ChatArea />}
-            </Suspense>
+            <Suspense fallback={<MainPaneFallback />}>{(shellOverlayMode || !hasDetailView) && <ChatArea />}</Suspense>
           </div>
           {/* Keep the detail host at one React tree position across the mobile breakpoint.
               Moving an editor between separate desktop/mobile branches remounts it and
               discards component-local unsaved form state. */}
           <AnimatePresence mode="wait">
-            {detailView && (shellOverlayMode || !noodleOpen) && (
+            {detailView && (
               <motion.aside
                 key="detail-editor"
                 initial={shellOverlayMode ? { opacity: 0, x: 24 } : false}
@@ -1314,8 +1364,9 @@ export function AppShell() {
                   "mari-app-background-paint flex min-h-0 flex-1 flex-col overflow-hidden",
                   shellOverlayMode &&
                     cn(
-                      "mari-mobile-detail-sheet !fixed bottom-0 right-0 z-50 !w-full bg-[var(--background)]/95 pb-[max(env(safe-area-inset-bottom),0.5rem)] shadow-2xl backdrop-blur-xl",
+                      "mari-mobile-detail-sheet !fixed bottom-0 right-0 z-50 !w-full bg-[var(--background)]/95 shadow-2xl backdrop-blur-xl",
                       MOBILE_SHELL_PANEL_TOP_CLASS,
+                      MOBILE_SHELL_PANEL_BOTTOM_PADDING_CLASS,
                     ),
                 )}
               >
@@ -1347,7 +1398,7 @@ export function AppShell() {
       {/* Overlay tracker panel backdrop */}
       {trackerPanelVisible && shellOverlayMode && (
         <div
-          className={cn("fixed inset-x-0 bottom-0 z-30 bg-black/50 backdrop-blur-sm", MOBILE_SHELL_PANEL_TOP_CLASS)}
+          className={cn("fixed inset-x-0 bottom-0 z-[45] bg-black/50 backdrop-blur-sm", MOBILE_SHELL_PANEL_TOP_CLASS)}
           onClick={() => setTrackerPanelOpen(false, activeChatId)}
         />
       )}
@@ -1365,8 +1416,9 @@ export function AppShell() {
               data-component="TrackerDataSidebarMobile"
               aria-label={localizeUi("ui.layout.appshell.trackerDataPanel")}
               className={cn(
-                "mari-tracker-panel !fixed bottom-0 z-40 w-screen max-w-none overflow-hidden bg-zinc-950/95 pb-[max(env(safe-area-inset-bottom),0.5rem)] shadow-2xl ring-1 ring-zinc-700/80 backdrop-blur-xl",
+                "mari-tracker-panel !fixed bottom-0 z-50 w-screen max-w-none overflow-hidden bg-zinc-950/95 shadow-2xl ring-1 ring-[var(--marinara-app-accent-static)] backdrop-blur-xl",
                 MOBILE_SHELL_PANEL_TOP_CLASS,
+                MOBILE_SHELL_PANEL_BOTTOM_PADDING_CLASS,
                 trackerPanelSide === "left" ? "left-0" : "right-0",
               )}
               style={trackerPanelBackgroundStyle}
@@ -1377,37 +1429,42 @@ export function AppShell() {
         </AnimatePresence>
       )}
 
-      {/* Overlay right panel backdrop */}
-      {rightPanelOpen && shellOverlayMode && (
-        <div
-          className={cn("fixed inset-x-0 bottom-0 z-30 bg-black/50 backdrop-blur-sm", MOBILE_SHELL_PANEL_TOP_CLASS)}
-          onClick={() => closeRightPanel()}
-        />
-      )}
-
       {shellOverlayMode && <ChatResourceMobileDropDock />}
 
-      {/* Right panel - Context / Settings */}
+      {/* Mobile navigation swaps content in one shell; desktop keeps independent sidebars. */}
       {shellOverlayMode ? (
         <AnimatePresence mode="wait">
-          {rightPanelOpen && (
+          {mobileNavigationPanel && (
             <motion.aside
-              key="mobile"
+              key="mobile-navigation"
               initial={{ x: "100%" }}
               animate={{ x: 0 }}
               exit={{ x: "100%" }}
               transition={{ type: "spring", damping: 28, stiffness: 350 }}
-              data-component="RightPanelMobile"
-              aria-label={localizeUi("ui.layout.appshell.settingsAndToolsPanel")}
+              data-tour={mobileNavigationPanel === "chats" ? "sidebar" : undefined}
+              data-component={mobileNavigationPanel === "chats" ? "ChatSidebarPanel" : "RightPanelMobile"}
+              aria-label={localizeUi(
+                mobileNavigationPanel === "chats"
+                  ? "ui.layout.appshell.chatList"
+                  : "ui.layout.appshell.settingsAndToolsPanel",
+              )}
               className={cn(
-                "mari-right-panel !fixed bottom-0 right-0 z-40 !w-full overflow-hidden bg-[var(--background)]/80 pb-[max(env(safe-area-inset-bottom),0.5rem)] shadow-2xl backdrop-blur-xl",
+                "!fixed right-0 bottom-0 z-50 !w-full overflow-hidden shadow-2xl backdrop-blur-xl",
                 MOBILE_SHELL_PANEL_TOP_CLASS,
+                MOBILE_SHELL_PANEL_BOTTOM_PADDING_CLASS,
+                mobileNavigationPanel === "chats"
+                  ? "mari-sidebar bg-[var(--background)]/95"
+                  : "mari-right-panel bg-[var(--background)]/80",
               )}
               style={{ "--mari-right-panel-width": "100vw" } as CSSProperties}
             >
-              <Suspense fallback={<SidePanelFallback />}>
-                <RightPanel />
-              </Suspense>
+              {mobileNavigationPanel === "chats" ? (
+                <ChatSidebar />
+              ) : (
+                <Suspense fallback={<SidePanelFallback />}>
+                  <RightPanel />
+                </Suspense>
+              )}
             </motion.aside>
           )}
         </AnimatePresence>
@@ -1477,7 +1534,8 @@ export function AppShell() {
             confirmAction: showConfirmDialog,
             onClearPendingDraftReview: clearPendingSpatialMapDraftReview,
             onDirtyChange: setEditorDirty,
-            onOpenLorebook: openLorebookDetail,
+            onOpenLorebook: openSpatialLorebook,
+            onLorebooksChanged: refreshLorebooks,
             onClose: closeSpatialMapDetail,
           }}
         />
@@ -1491,9 +1549,7 @@ export function AppShell() {
       )}
       <ProfessorMariFloatingAssistantHost active={professorMariFloatingActive} />
       <div data-component="MobileMusicWidgetLayer" className="contents">
-        {isMobile && showMusicDjUnavailablePlayer ? (
-          <MusicDjUnavailablePlayer floating mobileOnly />
-        ) : isMobile && musicDjInstalled ? (
+        {isMobile && musicDjInstalled ? (
           <>
             <SpotifyMobileWidget />
             <YouTubeMobileWidget />

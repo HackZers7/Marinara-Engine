@@ -2,14 +2,13 @@
 // Zustand Store: Chat Slice
 // ──────────────────────────────────────────────
 import { create } from "zustand";
-import type { AvatarCropValue } from "../lib/utils";
+import type { AvatarCrop } from "@marinara-engine/shared";
 import { subscribeWithSelector } from "zustand/middleware";
 import type {
   Chat,
   ChatMode,
   ConversationCallSession,
   ConversationPresenceStatus,
-  Message,
   PendingSpatialTransition,
   SpatialDestinationRelation,
 } from "@marinara-engine/shared";
@@ -43,7 +42,7 @@ function clearCurrentInputPresenceTimer(): void {
   currentInputPresenceTimer = null;
 }
 
-type NotificationAvatarCrop = AvatarCropValue | null;
+type NotificationAvatarCrop = AvatarCrop | null;
 type ChatNotificationKind = "message" | "call";
 type ChatNotification = {
   chatId: string;
@@ -142,9 +141,9 @@ function savePendingSpatialTransitions(m: Map<string, PendingSpatialTransitionDr
   }
 }
 
-function abortGenerationForChat(chatId: string, controller?: AbortController) {
+export async function abortGenerationForChat(chatId: string, controller?: AbortController): Promise<void> {
   controller?.abort();
-  void api.post("/generate/abort", { chatId }).catch(() => {});
+  await api.post("/generate/abort", { chatId });
 }
 
 const notificationAutoDismissTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -193,7 +192,6 @@ function scheduleNotificationAutoDismiss(chatId: string, getState: () => ChatSta
 interface ChatState {
   activeChatId: string | null;
   activeChat: Chat | null;
-  messages: Message[];
   isStreaming: boolean;
   /** The chatId that the current streaming generation belongs to. */
   streamingChatId: string | null;
@@ -212,8 +210,6 @@ interface ChatState {
   streamBuffer: string;
   /** Per-chat stream text for active generations, so switching chats does not lose in-flight UI state. */
   streamBuffers: Map<string, string>;
-  /** Chat IDs whose live stream has been replaced by the saved message while agents continue. */
-  committedStreamChatIds: Set<string>;
   /** Persisted assistant row currently represented by each chat's live streaming row. */
   streamedMessageIds: Map<string, string>;
   thinkingBuffer: string;
@@ -239,7 +235,6 @@ interface ChatState {
   perChatTyping: Map<string, string>;
   /** Per-chat delayed state so switching chats restores the correct indicator. */
   perChatDelayed: Map<string, DelayedCharacterInfo>;
-  swipeIndex: Map<string, number>; // messageId → active swipe index
   /** When true, ChatArea should open the settings drawer on next render. */
   shouldOpenSettings: boolean;
   /** When true, ChatArea should show the setup wizard for the newly created chat. */
@@ -272,11 +267,7 @@ interface ChatState {
   // Actions
   setActiveChat: (chat: Chat | null) => void;
   setActiveChatId: (id: string | null) => void;
-  setMessages: (messages: Message[]) => void;
-  addMessage: (message: Message) => void;
-  updateLastMessage: (content: string) => void;
   setStreaming: (streaming: boolean, chatId?: string) => void;
-  setStreamCommitted: (chatId: string, committed: boolean) => void;
   setStreamedMessageId: (chatId: string, messageId: string | null) => void;
   setMariPhase: (chatId: string, phase: "thinking" | "updating" | "idle") => void;
   setAbortController: (chatId: string, controller: AbortController | null) => void;
@@ -300,14 +291,10 @@ interface ChatState {
   setPerChatTyping: (chatId: string, name: string | null) => void;
   setPerChatDelayed: (chatId: string, info: DelayedCharacterInfo | null) => void;
   clearPerChatState: (chatId: string) => void;
-  setSwipeIndex: (messageId: string, index: number) => void;
   setShouldOpenSettings: (v: boolean) => void;
   setShouldOpenWizard: (v: boolean) => void;
   setShouldOpenWizardInShortcutMode: (v: boolean) => void;
-  setPendingNewChatMode: (
-    mode: ChatMode | null,
-    origin?: "home" | "sidebar" | null,
-  ) => void;
+  setPendingNewChatMode: (mode: ChatMode | null, origin?: "home" | "sidebar" | null) => void;
   setInputDraft: (chatId: string, text: string) => void;
   clearInputDraft: (chatId: string) => void;
   setPendingSpatialTransition: (chatId: string, draft: PendingSpatialTransitionDraft) => void;
@@ -363,13 +350,11 @@ export const useChatStore = create<ChatState>()(
       }
     })(),
     activeChat: null,
-    messages: [],
     isStreaming: false,
     streamingChatId: null,
     mariPhaseByChatId: new Map(),
     streamBuffer: "",
     streamBuffers: new Map(),
-    committedStreamChatIds: new Set(),
     streamedMessageIds: new Map(),
     thinkingBuffer: "",
     thinkingBuffers: new Map(),
@@ -383,7 +368,6 @@ export const useChatStore = create<ChatState>()(
     delayedCharacterInfo: null,
     perChatTyping: new Map(),
     perChatDelayed: new Map(),
-    swipeIndex: new Map(),
     shouldOpenSettings: false,
     shouldOpenWizard: false,
     shouldOpenWizardInShortcutMode: false,
@@ -432,7 +416,6 @@ export const useChatStore = create<ChatState>()(
       const activeCall = get().activeConversationCall;
       set({
         activeChatId: id,
-        swipeIndex: new Map(),
         ...(id !== prev && { generationPhase: null, hasCurrentInput: false }),
         ...(!id && { activeChat: null }),
         ...(activeCall ? { conversationCallExpanded: id === activeCall.session.chatId } : {}),
@@ -440,8 +423,16 @@ export const useChatStore = create<ChatState>()(
       // Only reset agent + game state when actually switching chats — re-selecting the
       // same chat should not blow away loaded tracker data.
       if (id !== prev) {
-        useAgentStore.getState().reset();
+        // Professor Mari suggestions and guided plans are already scoped to their chat IDs.
+        // Keep them through temporary editor navigation so reopening the chat does not flash
+        // or replace them with the starter suggestions (#4953).
+        useAgentStore.getState().resetForChatChange();
         useGameStateStore.getState().setGameState(null);
+        if (id) {
+          // Opening a chat is meaningful recency even when the user only reads it.
+          // The lightweight touch keeps Home's Continue Chatting shelf in visit order.
+          void api.post(`/chats/${encodeURIComponent(id)}/touch`).catch(() => undefined);
+        }
         // Background is NOT cleared here — it's managed by ChatArea's restore effect.
         // Clearing it would cause a black flash and wipe the background for new chats.
         // Restore per-chat typing/delayed indicators for the newly active chat
@@ -478,41 +469,17 @@ export const useChatStore = create<ChatState>()(
         /* ignore */
       }
     },
-    setMessages: (messages) => set({ messages }),
-
-    addMessage: (message) => set((state) => ({ messages: [...state.messages, message] })),
-
-    updateLastMessage: (content) =>
-      set((state) => {
-        const messages = [...state.messages];
-        const last = messages[messages.length - 1];
-        if (last) {
-          messages[messages.length - 1] = { ...last, content };
-        }
-        return { messages };
-      }),
-
     setStreaming: (streaming, chatId) =>
       set((state) => {
-        const committed = new Set(state.committedStreamChatIds);
         const streamedMessageIds = new Map(state.streamedMessageIds);
         const targetChatId = chatId ?? state.streamingChatId;
-        if (targetChatId) committed.delete(targetChatId);
         if (targetChatId) streamedMessageIds.delete(targetChatId);
         return {
           isStreaming: streaming,
           streamingChatId: streaming ? (chatId ?? null) : null,
-          committedStreamChatIds: committed,
           streamedMessageIds,
           ...(!streaming ? { generationPhase: null } : {}),
         };
-      }),
-    setStreamCommitted: (chatId, committed) =>
-      set((state) => {
-        const next = new Set(state.committedStreamChatIds);
-        if (committed) next.add(chatId);
-        else next.delete(chatId);
-        return { committedStreamChatIds: next };
       }),
     setStreamedMessageId: (chatId, messageId) =>
       set((state) => {
@@ -537,10 +504,16 @@ export const useChatStore = create<ChatState>()(
       }),
     setAbortController: (chatId, controller) =>
       set((state) => {
-        const m = new Map(state.abortControllers);
-        if (controller) m.set(chatId, controller);
-        else m.delete(chatId);
-        return { abortControllers: m };
+        const abortControllers = new Map(state.abortControllers);
+        if (!controller) {
+          abortControllers.delete(chatId);
+          return { abortControllers };
+        }
+
+        abortControllers.set(chatId, controller);
+        const backgroundIllustrationChatIds = new Set(state.backgroundIllustrationChatIds);
+        backgroundIllustrationChatIds.delete(chatId);
+        return { abortControllers, backgroundIllustrationChatIds };
       }),
     setBackgroundIllustration: (chatId, pending) =>
       set((state) => {
@@ -559,7 +532,7 @@ export const useChatStore = create<ChatState>()(
             ? [streamingChatId]
             : [...abortControllers.keys()];
       for (const targetChatId of new Set(targetIds)) {
-        abortGenerationForChat(targetChatId, abortControllers.get(targetChatId));
+        void abortGenerationForChat(targetChatId, abortControllers.get(targetChatId)).catch(() => {});
       }
     },
     appendStreamBuffer: (text, chatId) =>
@@ -726,16 +699,13 @@ export const useChatStore = create<ChatState>()(
         const t = new Map(state.perChatTyping);
         const d = new Map(state.perChatDelayed);
         const thoughts = new Map(state.thinkingBuffers);
-        const committed = new Set(state.committedStreamChatIds);
         t.delete(chatId);
         d.delete(chatId);
         thoughts.delete(chatId);
-        committed.delete(chatId);
         return {
           perChatTyping: t,
           perChatDelayed: d,
           thinkingBuffers: thoughts,
-          committedStreamChatIds: committed,
           ...(state.activeChatId === chatId ? { thinkingBuffer: "" } : {}),
         };
       }),
@@ -1015,19 +985,12 @@ export const useChatStore = create<ChatState>()(
 
     setConversationCallExpanded: (expanded) => set({ conversationCallExpanded: expanded }),
 
-    setSwipeIndex: (messageId: string, index: number) =>
-      set((state) => {
-        const m = new Map(state.swipeIndex);
-        m.set(messageId, index);
-        return { swipeIndex: m };
-      }),
-
     reset: () => {
       unreadCountSources.clear();
       chatNotificationSources.clear();
       const { abortControllers } = useChatStore.getState();
       for (const [chatId, controller] of abortControllers) {
-        abortGenerationForChat(chatId, controller);
+        void abortGenerationForChat(chatId, controller).catch(() => {});
       }
       clearAllNotificationTimers();
       currentInputSnapshot = "";
@@ -1035,13 +998,11 @@ export const useChatStore = create<ChatState>()(
       set({
         activeChatId: null,
         activeChat: null,
-        messages: [],
         isStreaming: false,
         streamingChatId: null,
         mariPhaseByChatId: new Map(),
         streamBuffer: "",
         streamBuffers: new Map(),
-        committedStreamChatIds: new Set(),
         streamedMessageIds: new Map(),
         thinkingBuffer: "",
         thinkingBuffers: new Map(),
@@ -1055,7 +1016,6 @@ export const useChatStore = create<ChatState>()(
         delayedCharacterInfo: null,
         perChatTyping: new Map(),
         perChatDelayed: new Map(),
-        swipeIndex: new Map(),
         pendingNewChatMode: null,
         pendingNewChatOrigin: null,
         inputDrafts: new Map(),

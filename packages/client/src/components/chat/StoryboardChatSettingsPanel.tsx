@@ -19,6 +19,7 @@ import { useUpdateChatMetadata } from "../../hooks/use-chats";
 import { useConnections } from "../../hooks/use-connections";
 import { useUIStore } from "../../stores/ui.store";
 import {
+  AgentSettingsActionButton,
   AgentDefaultStatus,
   AgentSettingsSegmentedControl,
   AgentSettingsSubsection,
@@ -82,8 +83,8 @@ function StoryboardSlider({
   onReset: () => void;
 }) {
   return (
-    <div className="space-y-1">
-      <label className="block space-y-2 rounded-lg bg-[var(--background)]/75 px-3 py-2 ring-1 ring-[var(--border)]">
+    <div className="flex h-full flex-col gap-1">
+      <label className="flex flex-1 flex-col justify-between gap-2 rounded-lg bg-[var(--background)]/75 px-3 py-2 ring-1 ring-[var(--border)]">
         <span className="flex items-center justify-between gap-3">
           <span className="min-w-0">
             <span className="block text-[0.625rem] font-medium text-[var(--foreground)]">{label}</span>
@@ -149,8 +150,8 @@ function StoryboardNumberInput({
   };
 
   return (
-    <div className="space-y-1">
-      <label className="grid gap-2 rounded-lg bg-[var(--background)]/75 px-3 py-2 ring-1 ring-[var(--border)] sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
+    <div className="flex h-full flex-col gap-1">
+      <label className="grid flex-1 gap-2 rounded-lg bg-[var(--background)]/75 px-3 py-2 ring-1 ring-[var(--border)] sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
         <span className="min-w-0">
           <span className="block text-[0.625rem] font-medium text-[var(--foreground)]">{label}</span>
           <span className="mt-0.5 block text-[0.5625rem] leading-snug text-[var(--muted-foreground)]">
@@ -185,6 +186,101 @@ function StoryboardNumberInput({
       </label>
       <AgentDefaultStatus overridden={overridden} onReset={onReset} />
     </div>
+  );
+}
+
+function StoryboardChatWorkflowStage({
+  number,
+  title,
+  description,
+  children,
+}: {
+  number: 2 | 3 | 4;
+  title: string;
+  description: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div
+      data-storyboard-chat-workflow-stage={number}
+      className="space-y-2 rounded-lg bg-[var(--secondary)]/45 p-2.5 ring-1 ring-[var(--border)]"
+    >
+      <div className="grid grid-cols-[1.5rem_minmax(0,1fr)] items-start gap-2">
+        <span className="flex h-6 w-6 items-center justify-center rounded-full bg-[var(--primary)]/12 text-[0.6875rem] font-semibold text-[var(--primary)] ring-1 ring-[var(--primary)]/25">
+          {number}
+        </span>
+        <span className="min-w-0">
+          <span className="block text-[0.6875rem] font-semibold text-[var(--foreground)]">{title}</span>
+          <span className="mt-0.5 block text-[0.59375rem] leading-snug text-[var(--muted-foreground)]">
+            {description}
+          </span>
+        </span>
+      </div>
+      {children}
+    </div>
+  );
+}
+
+function StoryboardImageAwarePlannerOverride({
+  settings,
+  metadata,
+  onUpdate,
+}: {
+  settings: StoryboardAgentSettings;
+  metadata: Record<string, unknown>;
+  onUpdate: (patch: Record<string, unknown>) => void;
+}) {
+  const { t: localizeUi } = useUiTranslation();
+  const enabledOverridden = typeof metadata.storyboardAgentImageAwareShotPlanningEnabled === "boolean";
+  const enabled = enabledOverridden
+    ? metadata.storyboardAgentImageAwareShotPlanningEnabled === true
+    : settings.imageAwareShotPlanningEnabled;
+  const templateOverridden = readString(metadata.storyboardAgentAnimationRefinementTemplateId) !== "";
+  const selectedTemplateId = resolveSelectedId(
+    metadata.storyboardAgentAnimationRefinementTemplateId,
+    settings.animationRefinementTemplateId,
+    settings.animationRefinementTemplates,
+  );
+
+  return (
+    <StoryboardChatWorkflowStage
+      number={3}
+      title={localizeUi("ui.agents.storyboard.promptStage3Title")}
+      description={localizeUi("ui.agents.storyboard.promptStage3Description")}
+    >
+      <AgentSettingsToggle
+        label={localizeUi("ui.agents.storyboard.enableImageAwareShotPlanning")}
+        description={localizeUi("ui.agents.storyboard.enableImageAwareShotPlanningDescription")}
+        enabled={enabled}
+        onToggle={() => onUpdate({ storyboardAgentImageAwareShotPlanningEnabled: !enabled })}
+        overridden={enabledOverridden}
+        onReset={() => onUpdate({ storyboardAgentImageAwareShotPlanningEnabled: null })}
+      />
+      {enabled ? (
+        <div className="space-y-1">
+          <GamePromptTemplateSelect
+            label={localizeUi("ui.agents.storyboard.defaultShotPlannerPrompt")}
+            description={localizeUi("ui.agents.storyboard.imageAwareShotPlannerDescription")}
+            options={settings.animationRefinementTemplates}
+            selectedId={selectedTemplateId}
+            fallbackId={settings.animationRefinementTemplateId ?? ""}
+            onChange={(id) =>
+              onUpdate({
+                storyboardAgentAnimationRefinementTemplateId: id === settings.animationRefinementTemplateId ? null : id,
+              })
+            }
+          />
+          <AgentDefaultStatus
+            overridden={templateOverridden}
+            onReset={() => onUpdate({ storyboardAgentAnimationRefinementTemplateId: null })}
+          />
+        </div>
+      ) : (
+        <p className="px-1 text-[0.625rem] leading-snug text-[var(--muted-foreground)]">
+          {localizeUi("ui.agents.storyboard.imageAwarePlannerDisabled")}
+        </p>
+      )}
+    </StoryboardChatWorkflowStage>
   );
 }
 
@@ -430,29 +526,50 @@ export function StoryboardChatSettingsPanel({
               overridden={useTemplateOverridden}
               onReset={() => onUpdate({ gameStoryboardUsePromptTemplate: null })}
             />
-            <div className="grid gap-2 md:grid-cols-2">
-              <GamePromptTemplateSelect
-                label={localizeUi("ui.chat.chatsettingsdrawer.storyboardIllustrationPrompt")}
-                description={localizeUi("ui.chat.chatsettingsdrawer.formatsEachPlannedKeyframeIntoTheFinalPromptSent")}
-                options={settings.illustrationTemplates}
-                selectedId={illustrationTemplateId}
-                fallbackId={settings.illustrationTemplateId ?? ""}
-                onChange={(id) =>
-                  onUpdate({
-                    gameStoryboardImagePromptTemplateId: id === settings.illustrationTemplateId ? null : id,
-                  })
-                }
-              />
-              <GamePromptTemplateSelect
-                label={localizeUi("ui.chat.chatsettingsdrawer.storyboardVideoPrompt")}
-                description={localizeUi("ui.chat.chatsettingsdrawer.combinesTheGeneratedKeyframeAndMotionPlanIntoThe")}
-                options={settings.videoTemplates}
-                selectedId={videoTemplateId}
-                fallbackId={settings.videoTemplateId ?? ""}
-                onChange={(id) =>
-                  onUpdate({ gameStoryboardVideoPromptTemplateId: id === settings.videoTemplateId ? null : id })
-                }
-              />
+            <div className="space-y-2">
+              <StoryboardChatWorkflowStage
+                number={2}
+                title={localizeUi("ui.agents.storyboard.promptStage2Title")}
+                description={localizeUi("ui.agents.storyboard.promptStage2Description")}
+              >
+                <GamePromptTemplateSelect
+                  label={localizeUi("ui.chat.chatsettingsdrawer.storyboardIllustrationPrompt")}
+                  description={localizeUi(
+                    "ui.chat.chatsettingsdrawer.formatsEachPlannedKeyframeIntoTheFinalPromptSent",
+                  )}
+                  options={settings.illustrationTemplates}
+                  selectedId={illustrationTemplateId}
+                  fallbackId={settings.illustrationTemplateId ?? ""}
+                  onChange={(id) =>
+                    onUpdate({
+                      gameStoryboardImagePromptTemplateId: id === settings.illustrationTemplateId ? null : id,
+                    })
+                  }
+                />
+              </StoryboardChatWorkflowStage>
+              {autoAnimationsEnabled ? (
+                <>
+                  <StoryboardImageAwarePlannerOverride settings={settings} metadata={metadata} onUpdate={onUpdate} />
+                  <StoryboardChatWorkflowStage
+                    number={4}
+                    title={localizeUi("ui.agents.storyboard.promptStage4Title")}
+                    description={localizeUi("ui.agents.storyboard.promptStage4Description")}
+                  >
+                    <GamePromptTemplateSelect
+                      label={localizeUi("ui.chat.chatsettingsdrawer.storyboardVideoPrompt")}
+                      description={localizeUi(
+                        "ui.chat.chatsettingsdrawer.combinesTheGeneratedKeyframeAndMotionPlanIntoThe",
+                      )}
+                      options={settings.videoTemplates}
+                      selectedId={videoTemplateId}
+                      fallbackId={settings.videoTemplateId ?? ""}
+                      onChange={(id) =>
+                        onUpdate({ gameStoryboardVideoPromptTemplateId: id === settings.videoTemplateId ? null : id })
+                      }
+                    />
+                  </StoryboardChatWorkflowStage>
+                </>
+              ) : null}
             </div>
           </div>
 
@@ -460,14 +577,10 @@ export function StoryboardChatSettingsPanel({
             <p className="min-w-0 flex-1 text-[0.625rem] leading-snug text-[var(--muted-foreground)]">
               {localizeUi("ui.agents.storyboard.promptChainDescription")}
             </p>
-            <button
-              type="button"
-              onClick={onOpenAgentSettings}
-              className="inline-flex shrink-0 items-center justify-center gap-1.5 rounded-lg bg-[var(--background)]/80 px-3 py-1.5 text-[0.6875rem] font-medium text-[var(--muted-foreground)] ring-1 ring-[var(--border)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)]"
-            >
+            <AgentSettingsActionButton onClick={onOpenAgentSettings} className="shrink-0">
               <Settings2 size="0.75rem" />
               <span>{localizeUi("ui.chat.chatsettingsdrawer.openSetup")}</span>
-            </button>
+            </AgentSettingsActionButton>
           </div>
         </AgentSettingsSubsection>
       ) : null}
@@ -492,7 +605,10 @@ function RoleplayStoryboardChatSettingsPanel({
   const imageConnections = connections.filter((connection) => connection.provider === "image_generation");
   const videoConnections = connections.filter((connection) => connection.provider === "video_generation");
   const promptConnections = connections.filter(
-    (connection) => connection.provider !== "image_generation" && connection.provider !== "video_generation",
+    (connection) =>
+      connection.provider !== "image_generation" &&
+      connection.provider !== "video_generation" &&
+      connection.provider !== "audio",
   );
   const autoModeOverridden =
     metadata.roleplayStoryboardAutoGenerateMode === "manual" ||
@@ -776,43 +892,58 @@ function RoleplayStoryboardChatSettingsPanel({
             />
           </div>
 
-          <div className="grid gap-2 md:grid-cols-2">
-            <GamePromptTemplateSelect
-              label={localizeUi("ui.chat.chatsettingsdrawer.storyboardIllustrationPrompt")}
-              description={localizeUi("ui.chat.chatsettingsdrawer.formatsEachPlannedKeyframeIntoTheFinalPromptSent")}
-              options={settings.illustrationTemplates}
-              selectedId={illustrationTemplateId}
-              fallbackId={settings.illustrationTemplateId ?? ""}
-              onChange={(id) =>
-                onUpdate({
-                  roleplayStoryboardImagePromptTemplateId: id === settings.illustrationTemplateId ? null : id,
-                })
-              }
-            />
-            <GamePromptTemplateSelect
-              label={localizeUi("ui.chat.chatsettingsdrawer.storyboardVideoPrompt")}
-              description={localizeUi("ui.chat.chatsettingsdrawer.combinesTheGeneratedKeyframeAndMotionPlanIntoThe")}
-              options={settings.videoTemplates}
-              selectedId={videoTemplateId}
-              fallbackId={settings.videoTemplateId ?? ""}
-              onChange={(id) =>
-                onUpdate({ roleplayStoryboardVideoPromptTemplateId: id === settings.videoTemplateId ? null : id })
-              }
-            />
+          <div className="space-y-2">
+            <StoryboardChatWorkflowStage
+              number={2}
+              title={localizeUi("ui.agents.storyboard.promptStage2Title")}
+              description={localizeUi("ui.agents.storyboard.promptStage2Description")}
+            >
+              <GamePromptTemplateSelect
+                label={localizeUi("ui.chat.chatsettingsdrawer.storyboardIllustrationPrompt")}
+                description={localizeUi("ui.chat.chatsettingsdrawer.formatsEachPlannedKeyframeIntoTheFinalPromptSent")}
+                options={settings.illustrationTemplates}
+                selectedId={illustrationTemplateId}
+                fallbackId={settings.illustrationTemplateId ?? ""}
+                onChange={(id) =>
+                  onUpdate({
+                    roleplayStoryboardImagePromptTemplateId: id === settings.illustrationTemplateId ? null : id,
+                  })
+                }
+              />
+            </StoryboardChatWorkflowStage>
+            {autoGenerateMode === "animation" ? (
+              <>
+                <StoryboardImageAwarePlannerOverride settings={settings} metadata={metadata} onUpdate={onUpdate} />
+                <StoryboardChatWorkflowStage
+                  number={4}
+                  title={localizeUi("ui.agents.storyboard.promptStage4Title")}
+                  description={localizeUi("ui.agents.storyboard.promptStage4Description")}
+                >
+                  <GamePromptTemplateSelect
+                    label={localizeUi("ui.chat.chatsettingsdrawer.storyboardVideoPrompt")}
+                    description={localizeUi(
+                      "ui.chat.chatsettingsdrawer.combinesTheGeneratedKeyframeAndMotionPlanIntoThe",
+                    )}
+                    options={settings.videoTemplates}
+                    selectedId={videoTemplateId}
+                    fallbackId={settings.videoTemplateId ?? ""}
+                    onChange={(id) =>
+                      onUpdate({ roleplayStoryboardVideoPromptTemplateId: id === settings.videoTemplateId ? null : id })
+                    }
+                  />
+                </StoryboardChatWorkflowStage>
+              </>
+            ) : null}
           </div>
 
           <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg bg-[var(--background)]/75 px-3 py-2 ring-1 ring-[var(--border)]">
             <p className="min-w-0 flex-1 text-[0.625rem] leading-snug text-[var(--muted-foreground)]">
               {localizeUi("ui.agents.storyboard.roleplayPromptChainDescription")}
             </p>
-            <button
-              type="button"
-              onClick={onOpenAgentSettings}
-              className="inline-flex shrink-0 items-center justify-center gap-1.5 rounded-lg bg-[var(--background)]/80 px-3 py-1.5 text-[0.6875rem] font-medium text-[var(--muted-foreground)] ring-1 ring-[var(--border)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)]"
-            >
+            <AgentSettingsActionButton onClick={onOpenAgentSettings} className="shrink-0">
               <Settings2 size="0.75rem" />
               <span>{localizeUi("ui.chat.chatsettingsdrawer.openSetup")}</span>
-            </button>
+            </AgentSettingsActionButton>
           </div>
         </AgentSettingsSubsection>
       ) : null}

@@ -3,12 +3,17 @@
 // ──────────────────────────────────────────────
 
 export type MariWorkspaceToolName =
+  | "docs_search"
+  | "docs_read"
   | "read"
   | "grep"
   | "find"
   | "ls"
   | "edit"
   | "write"
+  | "copy"
+  | "move"
+  | "remove"
   | "bash"
   | "dependency"
   | "app_data";
@@ -119,7 +124,10 @@ function firstStringField(record: Record<string, unknown>, keys: string[]): stri
 
 function normalizeMariChipEntity(value: unknown): MariChipEntity | undefined {
   if (typeof value !== "string") return undefined;
-  const normalized = value.trim().toLowerCase().replace(/[\s_-]+/g, "_");
+  const normalized = value
+    .trim()
+    .toLowerCase()
+    .replace(/[\s_-]+/g, "_");
   if (MARI_CHIP_ENTITIES.has(normalized as MariChipEntity)) return normalized as MariChipEntity;
   return MARI_CHIP_ENTITY_ALIASES[normalized];
 }
@@ -136,7 +144,11 @@ export function sanitizeMariSuggestionChips(raw: unknown, options: { maxChips?: 
   const chips: MariSuggestionChip[] = [];
   for (const entry of raw) {
     const record: Record<string, unknown> =
-      typeof entry === "string" ? { label: entry, prompt: entry } : entry && typeof entry === "object" && !Array.isArray(entry) ? (entry as Record<string, unknown>) : {};
+      typeof entry === "string"
+        ? { label: entry, prompt: entry }
+        : entry && typeof entry === "object" && !Array.isArray(entry)
+          ? (entry as Record<string, unknown>)
+          : {};
     if (Object.keys(record).length === 0) continue;
     const rawLabel = firstStringField(record, CHIP_LABEL_KEYS);
     const rawPrompt = firstStringField(record, CHIP_PROMPT_KEYS) ?? rawLabel;
@@ -181,7 +193,10 @@ const PLAN_STEP_FIELD_KEY_KEYS = ["fieldKey", "key", "field", "name"];
 const PLAN_STEP_QUESTION_KEYS = ["question", "prompt", "label", "text"];
 
 /** Same tolerant-parsing philosophy as sanitizeMariSuggestionChips - accept near-miss shapes. */
-export function sanitizeMariGuidedPlan(raw: unknown, options: { maxSteps?: number; maxChipsPerStep?: number } = {}): MariGuidedPlanStep[] {
+export function sanitizeMariGuidedPlan(
+  raw: unknown,
+  options: { maxSteps?: number; maxChipsPerStep?: number } = {},
+): MariGuidedPlanStep[] {
   if (!Array.isArray(raw)) return [];
   const maxSteps = options.maxSteps ?? 8;
   const maxChipsPerStep = options.maxChipsPerStep ?? 5;
@@ -192,7 +207,9 @@ export function sanitizeMariGuidedPlan(raw: unknown, options: { maxSteps?: numbe
     const rawFieldKey = firstStringField(record, PLAN_STEP_FIELD_KEY_KEYS);
     const rawQuestion = firstStringField(record, PLAN_STEP_QUESTION_KEYS) ?? rawFieldKey;
     if (!rawFieldKey || !rawQuestion) continue;
-    const chips = sanitizeMariSuggestionChips(record.chips ?? record.options ?? record.suggestions, { maxChips: maxChipsPerStep });
+    const chips = sanitizeMariSuggestionChips(record.chips ?? record.options ?? record.suggestions, {
+      maxChips: maxChipsPerStep,
+    });
     if (chips.length === 0) continue;
     steps.push({
       fieldKey: truncateMariChipText(rawFieldKey, 40).replace(/\s+/g, "_"),
@@ -224,6 +241,7 @@ export interface MariWorkspaceConnectionSummary {
   name: string;
   provider: string;
   model: string;
+  maxContext: number;
 }
 
 export interface MariWorkspaceSkillSummary {
@@ -244,6 +262,32 @@ export interface MariWorkspaceSkillDetail extends MariWorkspaceSkillSummary {
 export interface MariWorkspaceSkillsResponse {
   skills: MariWorkspaceSkillDetail[];
   diagnostics: string[];
+}
+
+// #4851: Professor Mari's saved memories (the mari_instructions store). The list
+// surfaces full detail (content included) so the Memories management panel can edit
+// in place, mirroring the Skills panel.
+export interface MariInstructionSummary {
+  id: string;
+  name: string;
+  description: string;
+  persistent: boolean;
+  enabled: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface MariInstructionDetail extends MariInstructionSummary {
+  content: string;
+}
+
+export interface MariInstructionsResponse {
+  instructions: MariInstructionDetail[];
+}
+
+export interface MariInstructionMutationResponse {
+  ok: boolean;
+  instruction: MariInstructionDetail;
 }
 
 export interface MariDbValidationIssue {
@@ -280,11 +324,28 @@ export interface MariDbDiffSummary {
   truncated: boolean;
 }
 
+/**
+ * Signals how a structured read was bounded so the model gets a machine-readable
+ * cue instead of a silent mid-field cut. `fields` lists whole values elided from
+ * an object read (largest first) with the exact `field` path to re-read each;
+ * `field` describes a single windowed field read (`app_data { field, offset }`).
+ */
+export interface MariDbReadTruncation {
+  truncated: boolean;
+  fields?: Array<{ path: string; fullLength: number; returnedLength: number }>;
+  field?: { path: string; offset: number; returned: number; total: number };
+  /** Set when even structured elision could not fit the overview and it was hard-capped. */
+  hardCapped?: boolean;
+  /** Set when a `field=` read named a path that did not resolve on this row. */
+  unresolvedField?: string;
+}
+
 export interface MariDbCommandResult {
   ok: boolean;
   mode: "read" | "dry-run" | "apply";
   command: string;
   output?: unknown;
+  truncation?: MariDbReadTruncation;
   summary?: MariDbDiffSummary;
   validation?: MariDbValidationResult;
   approval?: {
@@ -405,7 +466,7 @@ export type MariWorkspacePromptEvent =
         | string
         | {
             content: string;
-            kind?: "compaction_start" | "compaction_end" | "output_limit" | "retry" | "info";
+            kind?: "compaction_start" | "compaction_end" | "output_limit" | "retry" | "info" | "rate_limited";
             level?: "info" | "warning" | "error";
             reason?: string;
           };

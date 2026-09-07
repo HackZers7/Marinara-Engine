@@ -7,16 +7,23 @@ import { existsSync, readFileSync } from "fs";
 import { basename, extname, join } from "path";
 import { z } from "zod";
 import { eq } from "../db/file-query.js";
+import { IMPORTED_GAME_ENGINE_ANCHOR_PREFIX } from "../db/file-backed-store.js";
 import { chats as chatsTable } from "../db/schema/index.js";
 import { logger, logDebugOverride } from "../lib/logger.js";
 import { readImageDimensionsFromFile } from "../utils/image-metadata.js";
-import { createChatsStorage } from "../services/storage/chats.storage.js";
+import { createChatsStorage, METADATA_WRITE_ORDINALS_KEY } from "../services/storage/chats.storage.js";
 import { createConnectionsStorage } from "../services/storage/connections.storage.js";
 import { createCharactersStorage } from "../services/storage/characters.storage.js";
+import { createCharacterGalleryStorage } from "../services/storage/character-gallery.storage.js";
+import { createPersonaGalleryStorage } from "../services/storage/persona-gallery.storage.js";
 import { createGalleryStorage } from "../services/storage/gallery.storage.js";
 import { createGameSceneVideosStorage } from "../services/storage/game-scene-videos.storage.js";
 import { createGameStoryboardsStorage } from "../services/storage/game-storyboards.storage.js";
 import { createGameStateStorage } from "../services/storage/game-state.storage.js";
+import {
+  createGameEngineStateStorage,
+  EXPERIENCE_GAME_TYPE_PREFIX,
+} from "../services/storage/game-engine-state.storage.js";
 import { createSpatialContextStorage } from "../services/storage/spatial-context.storage.js";
 import { formatOwnerSpatialBreadcrumb, resolveOwnerSpatialProjection } from "../services/spatial-context/projection.js";
 import {
@@ -32,7 +39,6 @@ import { createLorebooksStorage } from "../services/storage/lorebooks.storage.js
 import { createAgentsStorage } from "../services/storage/agents.storage.js";
 import { createLLMProvider } from "../services/llm/provider-registry.js";
 import { withConnectionFallbackProvider } from "../services/llm/connection-fallback-provider.js";
-import { extractLeadingThinkingBlocks } from "../services/llm/inline-thinking.js";
 import {
   withLlmRequestTimeout,
   type ChatCompletionResult,
@@ -42,6 +48,7 @@ import {
 import { isDiceNotation, rollDice } from "../services/game/dice.service.js";
 import { jsonishLooksTruncated, parseGameJsonish } from "../services/game/jsonish.js";
 import {
+  formatInitialGameGmConnectionError,
   GAME_SETUP_GENERATION_TIMEOUT_MS,
   resolveInitialGameGmConnectionId,
 } from "../services/game/initial-game-setup.js";
@@ -55,12 +62,17 @@ import {
 import { buildPartySystemPrompt } from "../services/game/party-prompts.js";
 import { normalizeNextSessionCampaignPlan, normalizeNextSessionNpcs } from "../services/game/next-session-plan.js";
 import { normalizeCharacterLookupName } from "../services/game/name-normalization.js";
-import { buildPromptMacroContext, resolveMacrosWithVariableSnapshot } from "../services/prompt/index.js";
+import {
+  buildPromptMacroContext,
+  resolveMacrosWithVariableSnapshot,
+  setLorebookEntryCounts,
+} from "../services/prompt/index.js";
 import { escapeXmlAttribute } from "../services/prompt/xml-escaping.js";
 import { listPartySprites, readPreferredFullBodySpriteBase64 } from "../services/game/sprite.service.js";
 import {
   buildSceneAnalyzerSystemPrompt,
   buildSceneAnalyzerUserPrompt,
+  compactImagePromptInstructions,
   type SceneAnalyzerContext,
 } from "../services/sidecar/scene-analyzer.js";
 import { postProcessSceneResult, type PostProcessContext } from "../services/sidecar/scene-postprocess.js";
@@ -92,8 +104,19 @@ import {
 import { generateWeather, inferBiome, shouldWeatherChange } from "../services/game/weather.service.js";
 import { rollEncounter, rollEnemyCount } from "../services/game/encounter.service.js";
 import { processReputationActions } from "../services/game/reputation.service.js";
-import { npcAvatarSlug, sanitizeGameNpcAvatarUrls } from "../services/game/npc-avatar-utils.js";
-import { createCheckpointService, type CheckpointTrigger } from "../services/game/checkpoint.service.js";
+import {
+  addNameLookupEntry,
+  findCharAvatarFuzzy,
+  nameLookupWithoutLeadingPrefix,
+  normalizeAvatarLookupName,
+  npcAvatarSlug,
+  sanitizeGameNpcAvatarUrls,
+} from "../services/game/npc-avatar-utils.js";
+import {
+  createCheckpointService,
+  type CapturedEngineState,
+  type CheckpointTrigger,
+} from "../services/game/checkpoint.service.js";
 import {
   resolveSkillCheck,
   attributeModifier,
@@ -133,11 +156,14 @@ import {
   GAME_STORYBOARD_PROMPT_TEMPLATE_VARIABLES,
   normalizeVideoGenerationUserSettings,
   normalizeAgentPromptTemplateOptions,
+  getDefaultAgentPrompt,
+  resolveAgentPromptTemplate,
   isClaudeAdaptiveOnlyNoSamplingModel,
   localAuthProviderBaseUrl,
   sceneAnalysisRequestSchema,
   resolveProviderReasoningEffort,
   scoreMusic,
+  musicAreaSlug,
   scoreAmbient,
   serializeResolvedSkillCheckTag,
   applyTrackerFieldLocksToGameStatePatch,
@@ -146,7 +172,9 @@ import {
   parseTrackerHiddenFields,
   normalizeRpgStatPools,
   normalizeIllustratorImagesPerGeneration,
+  resolveGameImageDynamicPromptEnabled,
   resolveGameSetupArtStylePrompt,
+  resolveGameSpatialMapDraftOptions,
   BUILT_IN_AGENT_IDS,
   STORYBOARD_AGENT_ID,
   SPOTIFY_RECENT_TRACK_HISTORY_LIMIT,
@@ -155,9 +183,15 @@ import {
   runEnemyPhase as runTacticalEnemyPhase,
   isTerminal as isTacticalTerminal,
   TERRAIN_DATA,
+  extractLeadingThinkingBlocks,
   type RPGStatsConfig,
 } from "@marinara-engine/shared";
-import { mergeCustomParameters, parseGameStateRow, resolveBaseUrl } from "./generate/generate-route-utils.js";
+import {
+  mergeCustomParameters,
+  parseGameStateRow,
+  resolveBaseUrl,
+  resolveVisibleGameStateAnchor,
+} from "./generate/generate-route-utils.js";
 import {
   fitMessagesToModelAccessContext,
   mergeModelContextLimit,
@@ -196,6 +230,7 @@ import type {
   Combatant,
   TacticalCombatState,
   TacticalAction,
+  StoryboardAnimationSuitability,
 } from "@marinara-engine/shared";
 import { getAssetManifest, GAME_ASSETS_DIR } from "../services/game/asset-manifest.service.js";
 import {
@@ -223,7 +258,17 @@ import {
   type VideoReferenceImage,
 } from "../services/video/video-generation.js";
 import { resolveGameVideoRuntime, type GameVideoRuntime } from "../services/video/game-video-runtime.js";
-import { resolveConnectionImageDefaults } from "../services/image/image-generation-defaults.js";
+import {
+  buildStoryboardAnimationRefinementMessages,
+  compactStoryboardAnimationPrompt,
+  executeStoryboardImageAwareAnimation,
+  redactStoryboardAnimationRefinementMessages,
+  resolveStoryboardAnimationRefinement,
+} from "../services/video/storyboard-animation-refinement.js";
+import {
+  resolveConnectionImageDefaults,
+  resolveConnectionImageQuality,
+} from "../services/image/image-generation-defaults.js";
 import { resolveImagePromptReviewSize } from "../services/image/image-prompt-review.js";
 import {
   mergeSpatialLocationReferenceImages,
@@ -243,6 +288,15 @@ import {
 } from "../services/storage/prompt-overrides.storage.js";
 import { createAppSettingsStorage } from "../services/storage/app-settings.storage.js";
 import { applyStoryboardAgentSettings } from "../services/game/storyboard-agent-settings.js";
+import {
+  STORYBOARD_FALLBACK_BEAT_MAX_CHARS,
+  compactStoryboardFallbackBeat,
+  compactStoryboardTextAtWordBoundary,
+  createStoryboardReviewPlanEnvelope,
+  formatStoryboardFallbackSectionText,
+  resolveStoryboardReviewPlanEnvelope,
+  storyboardPlanHasRenderableKeyframe,
+} from "../services/game/storyboard-planner-fallback.js";
 import {
   selectPreviousSuccessfulStoryboard,
   selectRoleplayStoryboardEpisode,
@@ -266,79 +320,22 @@ import { resolveSceneVideoPrompt, SceneVideoPromptReviewError } from "../service
 import { now } from "../utils/id-generator.js";
 import { DATA_DIR } from "../utils/data-dir.js";
 import { assertInsideDir } from "../utils/security.js";
+import { sendValidatedMediaFile, validateVideoAssetFile } from "../utils/media-file-security.js";
 import {
   buildGameSpotifySceneQuery,
   getGameSpotifyCandidates,
   getGameSpotifyErrorStatus,
   playGameSpotifyTrack,
 } from "../services/spotify/game-spotify-music.service.js";
-import { readIllustratorAppearance } from "./generate/illustrator-references.js";
+import {
+  readIllustratorAppearance,
+  readPreferredCharacterReferenceImage,
+  readPreferredPersonaReferenceImage,
+} from "./generate/illustrator-references.js";
 
 // ──────────────────────────────────────────────
 // Helpers
 // ──────────────────────────────────────────────
-
-const CHARACTER_NAME_LEADING_PREFIX_WORDS = new Set([
-  "a",
-  "an",
-  "the",
-  "il",
-  "lo",
-  "la",
-  "le",
-  "l",
-  "el",
-  "sir",
-  "lady",
-  "lord",
-  "professor",
-  "old",
-  "young",
-  "elder",
-  "great",
-  "captain",
-]);
-
-function normalizeAvatarLookupName(value: string): string {
-  return value
-    .normalize("NFKD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .replace(/['’]/g, "")
-    .toLocaleLowerCase()
-    .replace(/[^\p{L}\p{N}\p{M}]+/gu, " ")
-    .replace(/\s+/gu, " ")
-    .trim();
-}
-
-function nameLookupWithoutLeadingPrefix(normalizedName: string): string {
-  const words = normalizedName.split(/\s+/).filter(Boolean);
-  return words.length > 1 && CHARACTER_NAME_LEADING_PREFIX_WORDS.has(words[0]!)
-    ? words.slice(1).join(" ")
-    : normalizedName;
-}
-
-function avatarLookupAliases(value: string): string[] {
-  const normalized = normalizeAvatarLookupName(value);
-  const words = normalized.split(/\s+/).filter(Boolean);
-  const withoutLeadingPrefix = nameLookupWithoutLeadingPrefix(normalized);
-  return Array.from(
-    new Set([
-      value.normalize("NFKC").trim().toLocaleLowerCase(),
-      normalized,
-      withoutLeadingPrefix,
-      ...words.filter((word) => word.length >= 3 && !CHARACTER_NAME_LEADING_PREFIX_WORDS.has(word)),
-    ]),
-  ).filter(Boolean);
-}
-
-export function addNameLookupEntry(map: Map<string, string>, name: unknown, value: unknown): void {
-  if (typeof name !== "string" || typeof value !== "string") return;
-  const trimmedValue = value.trim();
-  if (!trimmedValue) return;
-  for (const alias of avatarLookupAliases(name)) {
-    map.set(alias, trimmedValue);
-  }
-}
 
 function generatedStringValue(value: unknown): string | undefined {
   if (typeof value === "string") {
@@ -360,35 +357,6 @@ function generatedStringValue(value: unknown): string | undefined {
 
 const generatedRequiredStringSchema = z.preprocess((value) => generatedStringValue(value) ?? value, z.string());
 const generatedOptionalStringSchema = z.preprocess((value) => generatedStringValue(value), z.string().optional());
-
-/**
- * Fuzzy-match an NPC name against the character-avatar/description map.
- * Title aliases make "Il Dottore" resolve to a saved "Dottore" card and
- * "Il Capitano" resolve to "Capitano" before any image generation is attempted.
- */
-export function findCharAvatarFuzzy(npcName: string, charAvatarByName: Map<string, string>): string | undefined {
-  const npcAliases = avatarLookupAliases(npcName);
-
-  // 1. Exact
-  for (const alias of npcAliases) {
-    const exact = charAvatarByName.get(alias);
-    if (exact) return exact;
-  }
-
-  // 2. Any character alias that overlaps the NPC aliases.
-  for (const [charName, avatar] of charAvatarByName) {
-    const charAliases = avatarLookupAliases(charName);
-    for (const npcAlias of npcAliases) {
-      for (const charAlias of charAliases) {
-        if (npcAlias === charAlias) return avatar;
-        if (charAlias.length >= 3 && npcAlias.includes(charAlias)) return avatar;
-        if (npcAlias.length >= 3 && charAlias.includes(npcAlias)) return avatar;
-      }
-    }
-  }
-
-  return undefined;
-}
 
 const ILLUSTRATION_COOLDOWN_TURNS = 2;
 
@@ -432,6 +400,7 @@ export function extractCharacterAppearanceText(characterData: Record<string, unk
 
 type IllustrationCharacterAssetMaps = {
   charReferenceByName: Map<string, string>;
+  charReferenceSourceByName: Map<string, "character-sheet" | "avatar" | "sprite">;
   charAvatarByName: Map<string, string>;
   charDescriptionByName: Map<string, string>;
 };
@@ -439,7 +408,7 @@ type IllustrationCharacterAssetMaps = {
 type IllustrationCharacterAssetDetail = {
   name: string;
   referenceAttached: boolean;
-  referenceSource?: "sprite" | "avatar";
+  referenceSource?: "character-sheet" | "sprite" | "avatar";
   appearanceAttached: boolean;
 };
 
@@ -460,6 +429,7 @@ type StoryboardCharacterContext = IllustrationCharacterAssetMaps & {
 function emptyIllustrationCharacterAssetMaps(): IllustrationCharacterAssetMaps {
   return {
     charReferenceByName: new Map<string, string>(),
+    charReferenceSourceByName: new Map<string, "character-sheet" | "avatar" | "sprite">(),
     charAvatarByName: new Map<string, string>(),
     charDescriptionByName: new Map<string, string>(),
   };
@@ -478,17 +448,32 @@ function readStringArray(value: unknown): string[] {
   return Array.isArray(value) ? value.map((item) => (typeof item === "string" ? item.trim() : "")).filter(Boolean) : [];
 }
 
-function addCharacterRowIllustrationAssets(
+async function addCharacterRowIllustrationAssets(
   maps: IllustrationCharacterAssetMaps,
   character: { id: string; data: string; avatarPath?: string | null },
-): string | null {
+  characterGallery: ReturnType<typeof createCharacterGalleryStorage>,
+): Promise<string | null> {
   try {
     const parsed = JSON.parse(character.data) as Record<string, unknown> & { name?: string };
     const name = typeof parsed.name === "string" && parsed.name.trim() ? parsed.name.trim() : null;
     if (!name) return null;
 
-    const fullBodyReference = readPreferredFullBodySpriteBase64(character.id);
-    if (fullBodyReference) addNameLookupEntry(maps.charReferenceByName, name, fullBodyReference.base64);
+    const extensions =
+      parsed.extensions && typeof parsed.extensions === "object" && !Array.isArray(parsed.extensions)
+        ? (parsed.extensions as Record<string, unknown>)
+        : {};
+    const preferredReference = await readPreferredCharacterReferenceImage({
+      characterId: character.id,
+      avatarPath: character.avatarPath,
+      characterSheetImageId:
+        typeof extensions.characterSheetImageId === "string" ? extensions.characterSheetImageId : null,
+      useCharacterSheetAsReference: extensions.useCharacterSheetAsReference === true,
+      characterGallery,
+    });
+    if (preferredReference) {
+      addNameLookupEntry(maps.charReferenceByName, name, preferredReference.base64);
+      addNameLookupEntry(maps.charReferenceSourceByName, name, preferredReference.source);
+    }
     if (character.avatarPath) addNameLookupEntry(maps.charAvatarByName, name, character.avatarPath);
 
     const appearanceText = extractCharacterAppearanceText(parsed);
@@ -499,7 +484,23 @@ function addCharacterRowIllustrationAssets(
   }
 }
 
-function addPersonaIllustrationAssets(
+async function addCharacterRowsIllustrationAssets(
+  maps: IllustrationCharacterAssetMaps,
+  characters: Array<{ id: string; data: string; avatarPath?: string | null }>,
+  characterGallery: ReturnType<typeof createCharacterGalleryStorage>,
+): Promise<void> {
+  let nextIndex = 0;
+  const runWorker = async () => {
+    while (nextIndex < characters.length) {
+      const character = characters[nextIndex++];
+      if (character) await addCharacterRowIllustrationAssets(maps, character, characterGallery);
+    }
+  };
+  const workerCount = Math.min(GAME_ASSET_REFERENCE_LOOKUP_CONCURRENCY, characters.length);
+  await Promise.all(Array.from({ length: workerCount }, () => runWorker()));
+}
+
+async function addPersonaIllustrationAssets(
   maps: IllustrationCharacterAssetMaps,
   persona:
     | {
@@ -507,15 +508,28 @@ function addPersonaIllustrationAssets(
         name?: string | null;
         avatarPath?: string | null;
         appearance?: string | null;
+        characterSheetImageId?: string | null;
+        useCharacterSheetAsReference?: string;
       }
     | null
     | undefined,
-): string | null {
+  personaGallery: ReturnType<typeof createPersonaGalleryStorage>,
+): Promise<string | null> {
   const name = typeof persona?.name === "string" && persona.name.trim() ? persona.name.trim() : null;
   if (!persona || !name) return null;
 
-  const fullBodyReference = readPreferredFullBodySpriteBase64(persona.id);
-  if (fullBodyReference) addNameLookupEntry(maps.charReferenceByName, name, fullBodyReference.base64);
+  const preferredReference = await readPreferredPersonaReferenceImage({
+    personaId: persona.id,
+    characterSheetImageId: persona.characterSheetImageId,
+    useCharacterSheetAsReference: persona.useCharacterSheetAsReference === "true",
+    personaGallery,
+    // Preserve storyboard's existing full-body-sprite priority when no sheet is selected.
+    loaders: { avatar: () => undefined, sprite: () => readPreferredFullBodySpriteBase64(persona.id)?.base64 },
+  });
+  if (preferredReference) {
+    addNameLookupEntry(maps.charReferenceByName, name, preferredReference.base64);
+    addNameLookupEntry(maps.charReferenceSourceByName, name, preferredReference.source);
+  }
   if (persona.avatarPath) addNameLookupEntry(maps.charAvatarByName, name, persona.avatarPath);
 
   const appearanceText = extractCharacterAppearanceText({ appearance: persona.appearance });
@@ -558,6 +572,8 @@ async function buildStoryboardCharacterContext(args: {
   meta: Record<string, unknown>;
   setupConfig: Record<string, unknown> | null;
   latestState: unknown;
+  characterGallery: ReturnType<typeof createCharacterGalleryStorage>;
+  personaGallery: ReturnType<typeof createPersonaGalleryStorage>;
 }): Promise<StoryboardCharacterContext> {
   const maps = emptyIllustrationCharacterAssetMaps();
   const allowedCharacterNames: string[] = [];
@@ -570,7 +586,7 @@ async function buildStoryboardCharacterContext(args: {
     try {
       const character = await args.characters.getById(id);
       if (!character) continue;
-      const name = addCharacterRowIllustrationAssets(maps, character);
+      const name = await addCharacterRowIllustrationAssets(maps, character, args.characterGallery);
       addUniqueCharacterName(allowedCharacterNames, seenAllowedNames, name);
     } catch {
       /* skip unresolvable game character */
@@ -581,7 +597,7 @@ async function buildStoryboardCharacterContext(args: {
   if (personaId) {
     try {
       const persona = await args.characters.getPersona(personaId);
-      const name = addPersonaIllustrationAssets(maps, persona);
+      const name = await addPersonaIllustrationAssets(maps, persona, args.personaGallery);
       personaName = name;
       addUniqueCharacterName(allowedCharacterNames, seenAllowedNames, name);
     } catch {
@@ -620,6 +636,7 @@ function collectIllustrationCharacterAssets(opts: {
   trackedNpcs: Array<Record<string, unknown>>;
   gameNpcs: GameNpc[];
   charReferenceByName: Map<string, string>;
+  charReferenceSourceByName: Map<string, "character-sheet" | "avatar" | "sprite">;
   charAvatarByName: Map<string, string>;
   charDescriptionByName: Map<string, string>;
   includeReferenceImages?: boolean;
@@ -669,7 +686,11 @@ function collectIllustrationCharacterAssets(opts: {
         seen.add(preferredReference);
         references.push(preferredReference);
         referenceAttached = true;
-        referenceSource = "sprite";
+        const storedReferenceSource = findCharAvatarFuzzy(name, opts.charReferenceSourceByName);
+        referenceSource =
+          storedReferenceSource === "character-sheet" || storedReferenceSource === "avatar"
+            ? storedReferenceSource
+            : "sprite";
       } else {
         const avatarPath =
           findCharAvatarFuzzy(name, opts.charAvatarByName) ?? findCharAvatarFuzzy(name, npcAvatarByName);
@@ -710,11 +731,7 @@ function collectIllustrationCharacterAssets(opts: {
 }
 
 function compactIllustratorAppearanceLine(value: string): string {
-  const clean = value.trim().replace(/\s+/g, " ");
-  if (clean.length <= 1500) return clean;
-  const clipped = clean.slice(0, 1497).trimEnd();
-  const wordBoundary = clipped.lastIndexOf(" ");
-  return `${(wordBoundary > 0 ? clipped.slice(0, wordBoundary) : clipped).trimEnd()}...`;
+  return compactStoryboardTextAtWordBoundary(value, 1500);
 }
 
 export function buildGameIllustratorAppearanceContextBlock(characterDescriptions: string[]): string {
@@ -1152,6 +1169,7 @@ function sanitizeDynamicGameImagePromptResponse(raw: string, maxCharacters: numb
 
 export async function buildDynamicGameImagePromptMessages(args: {
   promptOverridesStorage?: PromptOverridesStorage;
+  illustratorPromptTemplate?: string | null;
   request: GameDynamicImagePromptRequest;
   meta: Record<string, unknown>;
   setupConfig: Record<string, unknown> | null;
@@ -1198,9 +1216,21 @@ export async function buildDynamicGameImagePromptMessages(args: {
     sourcePrompt,
     maxCharacters: args.request.maxCharacters,
   };
-  const systemPrompt = args.promptOverridesStorage
+  const directorPrompt = args.promptOverridesStorage
     ? await loadPrompt(args.promptOverridesStorage, GAME_IMAGE_PROMPT_DIRECTOR, vars)
     : GAME_IMAGE_PROMPT_DIRECTOR.defaultBuilder(vars);
+  const illustratorPromptTemplate = compactDynamicPromptText(args.illustratorPromptTemplate ?? "", 6000);
+  const systemPrompt = illustratorPromptTemplate
+    ? [
+        directorPrompt,
+        [
+          "<selected_illustrator_prompt_template>",
+          "Apply the relevant visual, content, and provider-format requirements from this selected Illustrator template. The Game Prompt Director output contract remains authoritative.",
+          illustratorPromptTemplate,
+          "</selected_illustrator_prompt_template>",
+        ].join("\n"),
+      ].join("\n\n")
+    : directorPrompt;
   return [
     { role: "system", content: systemPrompt },
     {
@@ -1278,8 +1308,17 @@ export function dynamicGameImagePromptRequestOptions(kind: GameDynamicImagePromp
   };
 }
 
+export function shouldUseDynamicGameImagePromptGenerator(args: {
+  enabled: boolean;
+  hasCustomizedIllustratorPrompt: boolean;
+  hasEnabledPromptDirectorOverride: boolean;
+}): boolean {
+  return args.enabled || args.hasCustomizedIllustratorPrompt || args.hasEnabledPromptDirectorOverride;
+}
+
 async function createDynamicGameImagePromptGenerator(args: {
   connections: ReturnType<typeof createConnectionsStorage>;
+  agents: ReturnType<typeof createAgentsStorage>;
   promptOverridesStorage?: PromptOverridesStorage;
   chat: NonNullable<StoredChatRecord>;
   meta: Record<string, unknown>;
@@ -1289,21 +1328,44 @@ async function createDynamicGameImagePromptGenerator(args: {
   debugLog?: (message: string, ...args: any[]) => void;
   signal?: AbortSignal;
 }): Promise<GameDynamicImagePromptGenerator | undefined> {
-  if (args.meta.gameImageDynamicPromptEnabled !== true) return undefined;
-
   try {
-    const { conn, baseUrl, defaultGenerationParameters } = await resolveDynamicGameImagePromptConnection({
-      connections: args.connections,
-      meta: args.meta,
-      setupConfig: args.setupConfig,
-      chatConnectionId: args.chat.connectionId,
-    });
+    const illustratorPrompt = await resolveGameIllustratorPromptTemplate(args.meta, args.agents);
+    const promptDirectorOverride = await args.promptOverridesStorage?.get(GAME_IMAGE_PROMPT_DIRECTOR.key);
+    const explicitlyEnabled = args.meta.gameImageDynamicPromptEnabled === true;
+    if (
+      !shouldUseDynamicGameImagePromptGenerator({
+        enabled: explicitlyEnabled,
+        hasCustomizedIllustratorPrompt: illustratorPrompt.customized,
+        hasEnabledPromptDirectorOverride: promptDirectorOverride?.enabled === true,
+      })
+    ) {
+      return undefined;
+    }
+
+    let resolvedConnection;
+    try {
+      resolvedConnection = await resolveDynamicGameImagePromptConnection({
+        connections: args.connections,
+        meta: args.meta,
+        setupConfig: args.setupConfig,
+        chatConnectionId: args.chat.connectionId,
+      });
+    } catch (err) {
+      if (explicitlyEnabled) throw err;
+      logger.warn(
+        err,
+        "[game/dynamic-image-prompt] No text connection available for implicit prompt rewriting; continuing without it",
+      );
+      return undefined;
+    }
+    const { conn, baseUrl, defaultGenerationParameters } = resolvedConnection;
     const parameters = resolveStoredGameGenerationParameters(args.meta, defaultGenerationParameters);
     const provider = await createGameMainProvider(args.connections, conn, baseUrl);
 
     return async (request) => {
       const messages = await buildDynamicGameImagePromptMessages({
         promptOverridesStorage: args.promptOverridesStorage,
+        illustratorPromptTemplate: illustratorPrompt.promptTemplate,
         request,
         meta: args.meta,
         setupConfig: args.setupConfig,
@@ -1590,7 +1652,7 @@ async function buildStoryboardGalleryAnimatePrompt(args: {
     args.ownerMode === "roleplay"
       ? args.meta.roleplayStoryboardVideoPromptTemplateId
       : args.meta.gameStoryboardVideoPromptTemplateId;
-  const narrationSummary = compactVideoPromptText(args.plannedFrame.narrationBeat, args.promptLimits.narrationSummary);
+  const narrationSummary = compactStoryboardAnimationPrompt(args.plannedFrame.narrationBeat);
   if (!narrationSummary) {
     throw new Error("Storyboard keyframe is missing its planned animation prompt.");
   }
@@ -1648,7 +1710,28 @@ function sourceIllustrationPathForMetadata(assetPath: string): string {
 }
 
 const MAX_GAME_HUD_WIDGETS = 4;
+/** Cap for the opaque `experienceConfig`, so it can't grow into a payload every later write of the
+ *  setup config has to carry. Generous next to what a setup wizard actually collects. */
+const MAX_EXPERIENCE_CONFIG_CHARS = 32_000;
+/** Ceiling for a game-surface Experience's per-anchor world-state blob (#5102), counted in
+ *  UTF-16 code units of the serialized JSON. Generous for a serialized tile-world save. */
+const MAX_EXPERIENCE_STATE_CHARS = 262_144;
+/** Newest per-anchor experience saves kept per chat (#5102): swipe-back rewind only targets
+ *  recent anchors and checkpoint restore reads the blob captured in the checkpoint row, so
+ *  older rows are unreachable — pruning them bounds the chat's game_engine_state shard. */
+const EXPERIENCE_STATE_KEEP_ANCHORS = 100;
+/** Route-level body ceiling for the experience-state import (#5405): the PUT's per-save formula
+ *  (up to 6 raw bytes per stored UTF-16 unit, for \uXXXX escapes) scaled by the row cap, plus a
+ *  small per-row envelope for the anchor fields and a fixed slack for the array wrapper. Stays
+ *  under the app-wide 256 MiB ceiling, so an oversize import still dies at the socket with 413. */
+const EXPERIENCE_STATE_IMPORT_BODY_LIMIT =
+  (MAX_EXPERIENCE_STATE_CHARS * 6 + 1_024) * EXPERIENCE_STATE_KEEP_ANCHORS + 16_384;
 const GAME_REPUTATION_ACTION_MAX_LENGTH = 500;
+/** Shape and length ceiling for a game-surface Experience's package id (#5102). The setup schema
+ *  and the experience-state route's resolver must validate a stamp identically — a looser rule here
+ *  would mint ids the route then rejects with 409, a tighter one would strand already-stored stamps. */
+const GAME_EXPERIENCE_ID_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+const GAME_EXPERIENCE_ID_MAX_CHARS = 80;
 const trimmedWidgetString = (max: number) => z.string().trim().min(1).max(max);
 
 const hudWidgetSchema = z.object({
@@ -1678,17 +1761,35 @@ const gameSetupConfigSchema = z.object({
   combatStyle: z.enum(["classic", "tactical"]).optional(),
   spatialMapInstructions: z.string().max(4000).optional(),
   gameWorldMapMode: z.enum(["standard", "hierarchical"]).optional(),
+  spatialMapDraftSize: z.enum(["small", "medium", "large"]).optional(),
+  spatialMapTargetLocationCount: z.number().int().min(1).max(40).optional(),
+  spatialMapGroundingMode: z.enum(["setup", "lore_strict", "lore_expand"]).optional(),
   playerGoals: z.string().max(2000).default(""),
   gmMode: z.enum(["standalone", "character"]),
   rating: z.enum(["sfw", "nsfw"]).default("sfw"),
   gmCharacterId: z.string().nullable().optional(),
   partyCharacterIds: z.array(z.string()),
   personaId: z.string().nullable().optional(),
+  /** Installed package that provides this game's experience. Same shape the manifest allows for an id,
+   *  since this is matched against one to mount the surface. */
+  gameExperienceId: z.string().regex(GAME_EXPERIENCE_ID_PATTERN).max(GAME_EXPERIENCE_ID_MAX_CHARS).optional(),
+  /** Opaque config owned by that experience — persisted verbatim, never read by the host. */
+  experienceConfig: z
+    .record(z.string().max(120), z.unknown())
+    .refine((value) => JSON.stringify(value).length <= MAX_EXPERIENCE_CONFIG_CHARS, {
+      message: `experienceConfig must serialize to at most ${MAX_EXPERIENCE_CONFIG_CHARS} characters`,
+    })
+    .optional(),
   sceneConnectionId: z.string().optional(),
   enableAgents: z.boolean().optional(),
+  enableQuickTimeEvents: z.boolean().optional(),
   enableSpriteGeneration: z.boolean().optional(),
+  gameImageDynamicPromptEnabled: z.boolean().optional(),
   imageConnectionId: z.string().optional(),
   videoConnectionId: z.string().optional(),
+  audioConnectionId: z.string().optional(),
+  enableGameSoundEffects: z.boolean().optional(),
+  enableGameMusic: z.boolean().optional(),
   gameStoryboardAutoIllustrationsEnabled: z.boolean().optional(),
   gameStoryboardAutoGenerationEnabled: z.boolean().optional(),
   gameStoryboardsEnabled: z.boolean().optional(),
@@ -1917,6 +2018,38 @@ async function resolveGameImageConnectionId(
   } catch (err) {
     logger.warn(err, "[game.routes] Failed to resolve Illustrator image connection fallback");
     return null;
+  }
+}
+
+async function resolveGameIllustratorPromptTemplate(
+  meta: Record<string, unknown>,
+  agents: ReturnType<typeof createAgentsStorage>,
+): Promise<{ promptTemplate: string | null; customized: boolean }> {
+  try {
+    const illustrator = await agents.getByType("illustrator");
+    if (!illustrator) return { promptTemplate: null, customized: false };
+    const selections =
+      meta.agentPromptTemplateIds &&
+      typeof meta.agentPromptTemplateIds === "object" &&
+      !Array.isArray(meta.agentPromptTemplateIds)
+        ? (meta.agentPromptTemplateIds as Record<string, unknown>)
+        : {};
+    const selectedPromptTemplateId = readTrimmedString(selections.illustrator);
+    const fallbackPromptTemplate = getDefaultAgentPrompt("illustrator").trim();
+    const promptTemplate = resolveAgentPromptTemplate({
+      promptTemplate: illustrator.promptTemplate,
+      fallbackPromptTemplate,
+      settings: illustrator.settings,
+      selectedPromptTemplateId,
+    }).trim();
+    return {
+      promptTemplate: promptTemplate || null,
+      customized:
+        selectedPromptTemplateId !== null || (promptTemplate.length > 0 && promptTemplate !== fallbackPromptTemplate),
+    };
+  } catch (err) {
+    logger.warn(err, "[game.routes] Failed to resolve the selected Illustrator prompt template");
+    return { promptTemplate: null, customized: false };
   }
 }
 
@@ -2874,6 +3007,7 @@ type InitialSetupConnectionRow = {
   imageService?: unknown;
   videoGenerationSource?: unknown;
   videoService?: unknown;
+  audioSource?: unknown;
 };
 
 function snapshotInitialSetupConnection(
@@ -2889,6 +3023,7 @@ function snapshotInitialSetupConnection(
     service: firstString(
       connection.imageService,
       connection.videoService,
+      connection.audioSource,
       connection.imageGenerationSource,
       connection.videoGenerationSource,
     ),
@@ -3142,7 +3277,9 @@ const GAME_ASSET_GENERATION_TIMEOUT_MS = 45 * 60 * 1000;
 const GAME_SCENE_VIDEO_GENERATION_TIMEOUT_MS = 31 * 60 * 1000;
 const GAME_ILLUSTRATION_SUMMARY_TIMEOUT_MS = 60 * 1000;
 const GAME_STORYBOARD_ILLUSTRATOR_TIMEOUT_MS = 3 * 60 * 1000;
+const GAME_STORYBOARD_ANIMATION_REFINEMENT_TIMEOUT_MS = 60 * 1000;
 const GAME_ASSET_PORTRAIT_CONCURRENCY = 2;
+const GAME_ASSET_REFERENCE_LOOKUP_CONCURRENCY = 4;
 const GAME_STORYBOARD_IMAGE_FRAME_CONCURRENCY = 4;
 const GAME_STORYBOARD_VIDEO_FRAME_CONCURRENCY = 2;
 const GAME_STORYBOARD_STALE_RENDER_MS = GAME_SCENE_VIDEO_GENERATION_TIMEOUT_MS * 2;
@@ -4791,6 +4928,12 @@ const STORYBOARD_ANCHOR_KINDS = new Set<StoryboardAnchorKind>([
   "user",
   "assistant",
 ]);
+const STORYBOARD_ANIMATION_SUITABILITY = new Set<StoryboardAnimationSuitability>([
+  "suitable",
+  "simplify",
+  "subtle",
+  "regenerate",
+]);
 
 function chatGalleryImageUrl(image: ChatGalleryImageRow, fallbackChatId: string): string {
   const parts = image.filePath.replace(/\\/g, "/").split("/").filter(Boolean);
@@ -4807,6 +4950,12 @@ function normalizeStoryboardKeyframeStatus(value: string): GameStoryboardKeyfram
   return STORYBOARD_KEYFRAME_STATUSES.has(value as GameStoryboardKeyframeStatus)
     ? (value as GameStoryboardKeyframeStatus)
     : "failed";
+}
+
+function normalizeStoryboardAnimationSuitability(value: string): StoryboardAnimationSuitability | "" {
+  return STORYBOARD_ANIMATION_SUITABILITY.has(value as StoryboardAnimationSuitability)
+    ? (value as StoryboardAnimationSuitability)
+    : "";
 }
 
 function storyboardStaleRenderCutoff(): string {
@@ -4957,7 +5106,7 @@ function storyboardSectionsForRange(
 }
 
 function storyboardSectionText(section: StoryboardSourceSection): string {
-  return section.speaker ? `${section.speaker}: ${section.content}` : section.content;
+  return formatStoryboardFallbackSectionText(section.content, section.speaker);
 }
 
 function dominantStoryboardSectionKind(sections: StoryboardSourceSection[]): StoryboardAnchorKind | "" {
@@ -5319,7 +5468,7 @@ function fallbackStoryboardPlan(args: {
     keyframes: chunks.map((chunk, index) => {
       const firstSection = chunk.sections[0] ?? null;
       const lastSection = chunk.sections[chunk.sections.length - 1] ?? null;
-      const beat = compactStoryboardText(chunk.text, 900);
+      const beat = compactStoryboardFallbackBeat(chunk.text);
       const title = `Keyframe ${index + 1}`;
       const imagePrompt = `Manga illustration keyframe, cinematic anime panel, expressive character acting, detailed environment, dramatic lighting. ${beat}`;
       const reconciledCharacters = reconcileStoryboardCharactersForFrame({
@@ -5366,6 +5515,7 @@ function sanitizeStoryboardPlan(
     aspectRatio: GameSceneVideoAspectRatio;
     allowedCharacterNames?: string[];
     maxVisibleCharacters?: number;
+    narrationBeatMaxChars?: number;
   },
 ): PlannedStoryboard {
   const root = asStoryboardRecord(raw);
@@ -5376,7 +5526,9 @@ function sanitizeStoryboardPlan(
     .map((rawFrame, index): PlannedStoryboardKeyframe | null => {
       const frame = asStoryboardRecord(rawFrame);
       const fallbackFrame = fallback.keyframes[index] ?? fallback.keyframes[0] ?? null;
-      const narrationBeat = compactStoryboardText(frame.narrationBeat, 1200);
+      const narrationBeat = args.narrationBeatMaxChars
+        ? compactStoryboardText(frame.narrationBeat, args.narrationBeatMaxChars)
+        : compactStoryboardAnimationPrompt(frame.narrationBeat);
       const mangaPanelPrompt = compactStoryboardText(frame.mangaPanelPrompt, 5000);
       const imagePrompt = compactStoryboardText(frame.imagePrompt, 6500) || mangaPanelPrompt || narrationBeat;
       if (!narrationBeat && !imagePrompt) return null;
@@ -5713,6 +5865,7 @@ async function serializeGameTurnStoryboard(args: {
       mangaPanelPrompt: frame.mangaPanelPrompt,
       imagePrompt: frame.imagePrompt,
       videoPrompt: frame.videoPrompt,
+      animationSuitability: normalizeStoryboardAnimationSuitability(frame.animationSuitability),
       characters: parseStoryboardCharacters(frame.characters),
       continuityNotes: frame.continuityNotes,
       cameraMotion: frame.cameraMotion,
@@ -5754,6 +5907,8 @@ async function serializeGameTurnStoryboard(args: {
 
 export async function gameRoutes(app: FastifyInstance) {
   await recoverStaleGameStoryboards(createGameStoryboardsStorage(app.db), new Date().toISOString(), "startup");
+  const characterGallery = createCharacterGalleryStorage(app.db);
+  const personaGallery = createPersonaGalleryStorage(app.db);
 
   const buildHydratedGameMeta = async (
     chatId: string,
@@ -6167,6 +6322,14 @@ export async function gameRoutes(app: FastifyInstance) {
     logger.info("[game/create] Received request");
     const parsedCreateGameInput = createGameSchema.parse(req.body);
     const { name, connectionId, promptPresetId, chatId, preferences, shareLabels } = parsedCreateGameInput;
+    const normalizedSpatialMapDraftOptions =
+      parsedCreateGameInput.setupConfig.spatialMapDraftSize !== undefined ||
+      parsedCreateGameInput.setupConfig.spatialMapTargetLocationCount !== undefined
+        ? resolveGameSpatialMapDraftOptions(
+            parsedCreateGameInput.setupConfig.spatialMapDraftSize,
+            parsedCreateGameInput.setupConfig.spatialMapTargetLocationCount,
+          )
+        : null;
     const selectedPromptPresetId = promptPresetId || parsedCreateGameInput.setupConfig.promptPresetId || null;
     const customHudWidgets = sanitizeGameHudWidgets(parsedCreateGameInput.setupConfig.customHudWidgets);
     const gameSystemPrompt = parsedCreateGameInput.setupConfig.gameSystemPrompt?.trim() || null;
@@ -6202,6 +6365,12 @@ export async function gameRoutes(app: FastifyInstance) {
         requestedWorldMapMode === "hierarchical" && parsedCreateGameInput.setupConfig.enableAgents === true
           ? "hierarchical"
           : "standard",
+      ...(normalizedSpatialMapDraftOptions
+        ? {
+            spatialMapDraftSize: normalizedSpatialMapDraftOptions.size,
+            spatialMapTargetLocationCount: normalizedSpatialMapDraftOptions.targetLocationCount,
+          }
+        : {}),
       enableSpriteGeneration: visualGenerationEnabled || undefined,
       gameStoryboardAutoIllustrationsEnabled: visualGenerationEnabled
         ? storyboardIllustrationsEnabled
@@ -6277,11 +6446,12 @@ export async function gameRoutes(app: FastifyInstance) {
       if (id === "local") return { name: "Local scene helper", provider: "local" };
       return snapshotInitialSetupConnection(await connectionStorage.getById(id));
     };
-    const [gmConnection, sceneConnection, imageConnection, videoConnection] = await Promise.all([
+    const [gmConnection, sceneConnection, imageConnection, videoConnection, audioConnection] = await Promise.all([
       snapshotConnection(resolvedGmConnectionId),
       snapshotConnection(setupConfig.sceneConnectionId),
       snapshotConnection(setupConfig.imageConnectionId),
       snapshotConnection(setupConfig.videoConnectionId),
+      snapshotConnection(setupConfig.audioConnectionId),
     ]);
     await chats.updateMetadata(sessionChat.id, {
       ...sessionMeta,
@@ -6318,6 +6488,7 @@ export async function gameRoutes(app: FastifyInstance) {
           scene: sceneConnection,
           image: imageConnection,
           video: videoConnection,
+          audio: audioConnection,
         },
         labels: shareLabels,
         createdAt: new Date().toISOString(),
@@ -6325,12 +6496,18 @@ export async function gameRoutes(app: FastifyInstance) {
       gameSystemPrompt,
       gameSpecialInstructions,
       gameSceneConnectionId: setupConfig.sceneConnectionId || null,
+      // Chosen at creation and fixed for the game's lifetime (see GameSetupConfig).
+      gameExperienceId: setupConfig.gameExperienceId || null,
       gameNpcs: [],
       enableAgents: setupConfig.enableAgents === true,
       activeAgentIds: setupActiveAgentIds,
       enableSpriteGeneration: setupConfig.enableSpriteGeneration || false,
+      gameImageDynamicPromptEnabled: resolveGameImageDynamicPromptEnabled(setupConfig),
       gameImageConnectionId: setupConfig.imageConnectionId || null,
       gameVideoConnectionId: setupConfig.videoConnectionId || null,
+      gameAudioConnectionId: setupConfig.audioConnectionId || null,
+      gameAudioSoundEffectsEnabled: setupConfig.enableGameSoundEffects !== false,
+      gameAudioMusicEnabled: setupConfig.enableGameMusic !== false,
       gameSceneVideosEnabled: false,
       gameStoryboardAutoIllustrationsEnabled: setupConfig.gameStoryboardAutoIllustrationsEnabled !== false,
       gameStoryboardAutoGenerationEnabled: setupConfig.gameStoryboardAutoGenerationEnabled === true,
@@ -6502,8 +6679,13 @@ export async function gameRoutes(app: FastifyInstance) {
         lastGenerationType: "game_setup",
         idleDuration: "0 seconds",
       });
-      const resolveSetupLorebookMacrosForFinal = (value: string) =>
-        resolveMacrosWithVariableSnapshot(value, setupPromptMacroContext);
+      const resolveSetupLorebookMacrosForFinal = (
+        value: string,
+        lorebookEntryCounts?: Readonly<Record<string, number>>,
+      ) => {
+        setLorebookEntryCounts(setupPromptMacroContext, lorebookEntryCounts);
+        return resolveMacrosWithVariableSnapshot(value, setupPromptMacroContext);
+      };
       const setupLorebookScopeExclusions = resolveLorebookScopeExclusions("game", meta);
       const lorebookResult = await processLorebooks(app.db, [], null, {
         chatId,
@@ -6619,12 +6801,20 @@ export async function gameRoutes(app: FastifyInstance) {
     let setupFinishReason: ChatCompletionResult["finishReason"] | null = null;
 
     for (let attempt = 1; attempt <= 2; attempt++) {
-      const result = await runGameChatComplete(
-        provider,
-        messages,
-        setupOptions,
-        attempt === 1 ? "Game setup" : "Game setup retry",
-      );
+      let result: ChatCompletionResult;
+      try {
+        result = await runGameChatComplete(
+          provider,
+          messages,
+          setupOptions,
+          attempt === 1 ? "Game setup" : "Game setup retry",
+        );
+      } catch (error) {
+        const failure = formatInitialGameGmConnectionError(error);
+        logger.warn(error, "[game/setup] GM connection failed");
+        reply.code(failure.statusCode).send({ error: failure.message });
+        return;
+      }
       setupFinishReason = result.finishReason;
       const setupExtraction = extractLeadingThinkingBlocks(
         result.content ?? "",
@@ -7030,6 +7220,12 @@ export async function gameRoutes(app: FastifyInstance) {
         gameSceneAmbient: _previousSceneAmbient,
         gameRecentMusic: _previousRecentMusic,
         gameRecentSpotifyTracks: _previousRecentSpotifyTracks,
+        // #5406: the write-ordinal mirror is per-chat and never travels. A new session clones no
+        // engine rows, so it has nothing to order against — carrying the previous session's
+        // stamps into a chat whose counter starts at null would just make its first real writes
+        // compare as older than the inherited ones. (allocateWriteOrdinal's mirror floor covers
+        // the same hazard, but the mirror is meaningless here regardless.)
+        [METADATA_WRITE_ORDINALS_KEY]: _previousWriteOrdinals,
         ...carryMeta
       } = prevMeta;
 
@@ -9641,16 +9837,18 @@ export async function gameRoutes(app: FastifyInstance) {
     const chat = await chats.getById(chatId);
     if (!chat) throw new Error("Chat not found");
 
-    const meta = parseMeta(chat.metadata);
-    const currentTime = (meta.gameTime as GameTime) ?? createInitialTime();
-    let newTime: GameTime;
-    if (isTimeOfDayLabel(action)) {
-      newTime = setTimeOfDay(currentTime, action);
-    } else {
-      newTime = advanceTime(currentTime, action);
-    }
-
-    await chats.updateMetadata(chatId, { ...meta, gameTime: newTime });
+    // #5076: recompute the new time against the queue-fresh metadata and write ONLY the gameTime key
+    // through the queued patch path. The old whole-blob updateMetadata (spreading a request-time
+    // `meta`) silently reverted any concurrent metadata write that landed in between — most damagingly
+    // a World Maps definition revision bump, which then permanently fails movement validation as
+    // spatial_transition_stale_definition. patchMetadata re-reads and merges under the per-chat queue.
+    let newTime: GameTime | undefined;
+    const updated = await chats.patchMetadata(chatId, (freshMeta) => {
+      const currentTime = (freshMeta.gameTime as GameTime) ?? createInitialTime();
+      newTime = isTimeOfDayLabel(action) ? setTimeOfDay(currentTime, action) : advanceTime(currentTime, action);
+      return { gameTime: newTime };
+    });
+    if (!updated || !newTime) throw new Error("Chat not found");
 
     // Also update the game state snapshot so WeatherEffects picks it up
     const gameStateStore = createGameStateStorage(app.db);
@@ -9685,7 +9883,8 @@ export async function gameRoutes(app: FastifyInstance) {
       weather.type = type as any;
       weather.description = `The weather is ${type}.`;
 
-      await chats.updateMetadata(chatId, { ...meta, gameWeather: weather });
+      // #5076: narrow queued patch so a concurrent metadata write is merged, not clobbered.
+      await chats.patchMetadata(chatId, { gameWeather: weather });
       const gameStateStore = createGameStateStorage(app.db);
       await updateLatestGameStateWithTrackerLocks(gameStateStore, chatId, {
         weather: weather.type,
@@ -9701,7 +9900,8 @@ export async function gameRoutes(app: FastifyInstance) {
     const biome = inferBiome(location);
     const weather = generateWeather(biome, season);
 
-    await chats.updateMetadata(chatId, { ...meta, gameWeather: weather });
+    // #5076: narrow queued patch so a concurrent metadata write is merged, not clobbered.
+    await chats.patchMetadata(chatId, { gameWeather: weather });
 
     // Also update the game state snapshot so WeatherEffects picks it up
     const gameStateStore = createGameStateStorage(app.db);
@@ -9837,6 +10037,60 @@ export async function gameRoutes(app: FastifyInstance) {
     return { journal, recap: buildStructuredRecap(journal, sessionNumber), playerNotes };
   });
 
+  // ── PUT /game/:chatId/journal/entries/:entryIndex ──
+  app.put<{ Params: { chatId: string; entryIndex: string } }>(
+    "/:chatId/journal/entries/:entryIndex",
+    async (req, reply) => {
+      const entryIndex = z.coerce.number().int().nonnegative().parse(req.params.entryIndex);
+      const { title, content } = z
+        .object({
+          title: z.string().trim().min(1).max(500),
+          content: z.string().max(20_000),
+        })
+        .parse(req.body);
+      const chats = createChatsStorage(app.db);
+      let nextJournal: Journal | null = null;
+      const updated = await chats.patchMetadata(req.params.chatId, (current) => {
+        const journal = (current.gameJournal as Journal) ?? createJournal();
+        const entry = journal.entries[entryIndex];
+        if (!entry) {
+          throw Object.assign(new Error("Journal entry not found"), { statusCode: 404 });
+        }
+        const entries = [...journal.entries];
+        entries[entryIndex] = { ...entry, title, content };
+        nextJournal = { ...journal, entries };
+        return { gameJournal: nextJournal };
+      });
+      if (!updated || !nextJournal) return reply.status(404).send({ error: "Chat not found" });
+
+      return { journal: nextJournal };
+    },
+  );
+
+  // ── DELETE /game/:chatId/journal/entries/:entryIndex ──
+  app.delete<{ Params: { chatId: string; entryIndex: string } }>(
+    "/:chatId/journal/entries/:entryIndex",
+    async (req, reply) => {
+      const entryIndex = z.coerce.number().int().nonnegative().parse(req.params.entryIndex);
+      const chats = createChatsStorage(app.db);
+      let nextJournal: Journal | null = null;
+      const updated = await chats.patchMetadata(req.params.chatId, (current) => {
+        const journal = (current.gameJournal as Journal) ?? createJournal();
+        if (!journal.entries[entryIndex]) {
+          throw Object.assign(new Error("Journal entry not found"), { statusCode: 404 });
+        }
+        nextJournal = {
+          ...journal,
+          entries: journal.entries.filter((_, index) => index !== entryIndex),
+        };
+        return { gameJournal: nextJournal };
+      });
+      if (!updated || !nextJournal) return reply.status(404).send({ error: "Chat not found" });
+
+      return { journal: nextJournal };
+    },
+  );
+
   // ── PUT /game/:chatId/notes ──
   app.put<{ Params: { chatId: string } }>("/:chatId/notes", async (req) => {
     const { notes } = z.object({ notes: z.string().max(10000) }).parse(req.body);
@@ -9848,6 +10102,885 @@ export async function gameRoutes(app: FastifyInstance) {
 
     return { ok: true };
   });
+
+  // ── Experience state (#5102) ──
+  // Host-owned access to game_engine_state for the chat's stamped game-surface
+  // Experience. Packages cannot reach this table any other way (their sanctioned
+  // route registrar is privileged-only, unusable off loopback), so their world
+  // state used to live in chat metadata — a whole-blob store no engine seam
+  // rewinds. Rows here ride every lifecycle seam for free: swipe delete and
+  // re-index, message/chat prunes, branch re-anchoring, and checkpoint restore
+  // (the #5077 clone copies gameType verbatim, and resolveVisibleGameStateAnchor
+  // honors the checkpoint_restore anchor, so a restored Experience world becomes
+  // visible exactly like a restored turn-game).
+  //
+  // Scoping: rows use gameType "experience:<gameExperienceId>" and every read is
+  // filtered to that namespace, so an Experience can only ever observe its own
+  // chat's experience rows — never turn-game rows, never another Experience's.
+  // (The reverse direction lives in the turn-game runner, whose reads and wipes
+  // exclude the experience namespace.) The stamp is only honored on game-mode
+  // chats: gameExperienceId is set once by game creation, and refusing other
+  // modes keeps a metadata-patched stamp on a Conversation chat from ever
+  // colliding with turn-game flows.
+  // The stamp is re-validated on every read with the same shape rule the game-setup
+  // schema enforces at stamping: the metadata PATCH route merges arbitrary keys, and a
+  // malformed id (e.g. one containing a newline) must never reach the gameType
+  // namespace, where it could slip past the turn-game runner's excludePrefix scope.
+  const resolveExperienceStateGameType = (chat: { mode?: string | null; metadata?: unknown }): string | null => {
+    if (chat.mode !== "game") return null;
+    const id = parseMeta(chat.metadata).gameExperienceId;
+    if (typeof id !== "string" || id.length > GAME_EXPERIENCE_ID_MAX_CHARS || !GAME_EXPERIENCE_ID_PATTERN.test(id)) {
+      return null;
+    }
+    return `experience:${id}`;
+  };
+
+  // Saves within one chat are serialized through a promise tail: create() is a
+  // delete-then-insert across an await, so two overlapping PUTs could otherwise
+  // leave two rows at one anchor (and the store's stable createdAt tiebreak
+  // would let the OLDER one win reads).
+  const experienceStateWriteTails = new Map<string, Promise<unknown>>();
+  const withExperienceStateWriteLock = async <T>(chatId: string, task: () => Promise<T>): Promise<T> => {
+    const previous = experienceStateWriteTails.get(chatId) ?? Promise.resolve();
+    const run = previous.then(task, task);
+    const tail = run.catch(() => undefined);
+    experienceStateWriteTails.set(chatId, tail);
+    void tail.finally(() => {
+      if (experienceStateWriteTails.get(chatId) === tail) experienceStateWriteTails.delete(chatId);
+    });
+    return run;
+  };
+
+  /**
+   * The millisecond an experience-state write should be stamped with, given the namespace's
+   * current newest row (#5405): the wall clock, or one past the newest row when the clock has
+   * not moved past it yet. Every writer in the GET/PUT/import route family goes through here,
+   * inside the write lock, so no two of THEIR rows can ever share a createdAt — see
+   * CreateGameEngineStateInput.createdAt for why a tie is unsafe (neither tie-break the store
+   * can apply returns the newest write). The checkpoint-restore clone also stamps through this
+   * helper but does not yet hold the write lock, so a tie with an in-flight save remains
+   * possible in that one narrow window (closed by #5406, which locks the restore block).
+   * A bulk writer adds its row index to the returned base so the whole batch stays strictly
+   * increasing.
+   */
+  /** The unified unreadable-row payload every read surface in this family emits
+   * (single-row GET and the export alike): `stateUnparseable: true` is the always-truthy
+   * discriminator (rawState can legitimately be ""), rawState is the stored value as a
+   * STRING whatever shape the disk held, and the cap is the PUT's own ceiling. */
+  const unreadableStatePayload = (
+    value: unknown,
+  ): { stateUnparseable: true; rawState: string; rawStateTruncated: boolean } => {
+    const raw = typeof value === "string" ? value : (JSON.stringify(value) ?? "undefined");
+    const rawStateTruncated = raw.length > MAX_EXPERIENCE_STATE_CHARS;
+    return {
+      stateUnparseable: true,
+      rawState: rawStateTruncated ? raw.slice(0, MAX_EXPERIENCE_STATE_CHARS) : raw,
+      rawStateTruncated,
+    };
+  };
+
+  const experienceStateStampBase = (newest: { createdAt: string } | null): number => {
+    const newestMs = newest ? Date.parse(newest.createdAt) : Number.NaN;
+    // An unparseable stored stamp cannot order anything; fall back to the clock rather than NaN.
+    return Number.isFinite(newestMs) ? Math.max(Date.now(), newestMs + 1) : Date.now();
+  };
+
+  // ── GET /game/:chatId/experience-state ──
+  app.get<{ Params: { chatId: string } }>("/:chatId/experience-state", async (req, reply) => {
+    const chats = createChatsStorage(app.db);
+    const chat = await chats.getById(req.params.chatId);
+    if (!chat) return reply.code(404).send({ error: "Chat not found" });
+    const gameType = resolveExperienceStateGameType(chat);
+    if (!gameType) {
+      return reply.code(409).send({
+        error: "This chat has no game-surface Experience, so it has no experience state",
+      });
+    }
+
+    const storage = createGameEngineStateStorage(app.db);
+    const messages = await chats.listMessages(req.params.chatId);
+    const anchor = resolveVisibleGameStateAnchor(messages);
+    // Anchor-first so swiping BACK to an anchored message (or a checkpoint
+    // restore) rewinds the world the reader sees, mirroring turn-game
+    // resolution. A brand-new swipe/anchor with no row of its own falls back to
+    // the latest committed save — the world continues rather than resetting.
+    const row = await storage.getForGeneration(req.params.chatId, { visibleAnchor: anchor, gameType });
+    if (!row)
+      return {
+        exists: false,
+        state: null,
+        schemaVersion: null,
+        anchor: null,
+        committed: false,
+        writeOrdinal: null,
+        createdAt: null,
+      };
+
+    let state: unknown = null;
+    // Set ONLY when the stored value is unreadable — `stateUnparseable: true` is the
+    // corruption signal (always truthy, unlike `rawState`, which can legitimately be
+    // an empty string). It keeps a corrupt row distinguishable from a legitimately
+    // stored null: the PUT always stores JSON.stringify output, so a stored null is
+    // the four-character string "null", never a missing or non-string column.
+    let corrupt: { stateUnparseable: true; rawState: string; rawStateTruncated: boolean } | null = null;
+    // The catch below exists because the stored value may not be what its type says —
+    // so nothing in this block may re-assume it is a string. A missing key reads back
+    // as null through the store's default path, and a hand-repaired shard can hold a
+    // real object; both are corruption, and both must yield a 200 with a STRING
+    // rawState rather than a 500 or a shape surprise.
+    const storedIsString = typeof row.state === "string";
+    if (!storedIsString) {
+      logger.error("Non-string experience state on disk for chat %s (%s)", req.params.chatId, gameType);
+      corrupt = unreadableStatePayload(row.state);
+    } else {
+      try {
+        state = JSON.parse(row.state);
+      } catch (err) {
+        // On-disk corruption; surface an empty save rather than a 500. Hand the
+        // unparseable text back (#5407): the package's own repair is a replacing PUT,
+        // so without this the damaged bytes are destroyed unseen; with it a package
+        // can preserve a bounded excerpt (a few KB in metadata, or a bug-report copy)
+        // before repairing — the full blob does not belong in hot chat metadata.
+        logger.error(err, "Unparseable experience state for chat %s (%s)", req.params.chatId, gameType);
+        corrupt = unreadableStatePayload(row.state);
+      }
+    }
+    return {
+      exists: true,
+      state,
+      ...(corrupt ?? {}),
+      schemaVersion: row.schemaVersion,
+      anchor: { messageId: row.messageId, swipeIndex: row.swipeIndex },
+      // False when the returned row is a fallback rather than the visible anchor's own
+      // save (a brand-new swipe, or an anchor whose row was pruned): the world shown is
+      // the latest save, not one written at what the reader is looking at. A package
+      // that would rather refuse than continue a mismatched world can check this.
+      anchorMatched: !!anchor && row.messageId === anchor.messageId && row.swipeIndex === anchor.swipeIndex,
+      committed: row.committed === 1,
+      // #5406: the returned ROW's ordinal, not the chat's high-water mark — swiping back must
+      // surface the ordinal of the save the reader is actually looking at. Compare it against
+      // `metadata.metadataWriteOrdinals["<your key>"]`: the higher value is the later write,
+      // which is the whole boot-time "which store is newer" decision in one line. Null on rows
+      // written before #5406 (and on clones of them); treat null as "unorderable" and fall back
+      // to whatever conservative rule the package used before.
+      writeOrdinal: row.writeOrdinal,
+      createdAt: row.createdAt,
+    };
+  });
+
+  // ── PUT /game/:chatId/experience-state ──
+  // Route-level bodyLimit so an oversize save dies at the socket with 413 instead of
+  // being buffered and parsed under the app-wide 256 MiB ceiling: the raw JSON body
+  // can spend up to 6 bytes per stored UTF-16 unit (\uXXXX escapes), plus envelope.
+  app.put<{ Params: { chatId: string } }>(
+    "/:chatId/experience-state",
+    { bodyLimit: MAX_EXPERIENCE_STATE_CHARS * 6 + 16_384 },
+    async (req, reply) => {
+      const body = z
+        .object({
+          state: z.unknown(),
+          schemaVersion: z.number().int().min(1).max(1_000_000).default(1),
+          // Experience saves are player-confirmed world state, not mid-turn
+          // provisional snapshots, so they default to committed (regen fallback
+          // eligible) unlike turn-game rows.
+          committed: z.boolean().default(true),
+        })
+        .parse(req.body ?? {});
+      const serialized = JSON.stringify(body.state);
+      if (serialized === undefined) {
+        return reply.code(422).send({ error: "state must be a JSON-serializable value" });
+      }
+      if (serialized.length > MAX_EXPERIENCE_STATE_CHARS) {
+        return reply.code(422).send({
+          error: `state must serialize to at most ${MAX_EXPERIENCE_STATE_CHARS} characters`,
+        });
+      }
+
+      const chats = createChatsStorage(app.db);
+      const chat = await chats.getById(req.params.chatId);
+      if (!chat) return reply.code(404).send({ error: "Chat not found" });
+      const gameType = resolveExperienceStateGameType(chat);
+      if (!gameType) {
+        return reply.code(409).send({
+          error: "This chat has no game-surface Experience, so it cannot store experience state",
+        });
+      }
+
+      // Anchor to the currently-visible message ("" live anchor before the first
+      // one exists, like a turn-game's opening deal). storage.create replaces any
+      // prior row of this gameType for the SAME anchor and inserts a fresh row
+      // otherwise, so each narration turn keeps its own snapshot — the history
+      // swipe-back rewind recovers. Checkpoint restore does NOT depend on these
+      // rows: checkpoints capture the state blob by value at create time. Older
+      // anchors beyond the newest EXPERIENCE_STATE_KEEP_ANCHORS are pruned so a
+      // long campaign cannot balloon the chat's sharded table (every save
+      // re-serializes the chat's whole game_engine_state shard).
+      return withExperienceStateWriteLock(req.params.chatId, async () => {
+        const messages = await chats.listMessages(req.params.chatId);
+        const anchor = resolveVisibleGameStateAnchor(messages) ?? { messageId: "", swipeIndex: 0 };
+        const storage = createGameEngineStateStorage(app.db);
+        // #5406: allocate the shared per-chat ordinal INSIDE this write lock, so the value the
+        // response reports is the one the row carries and two overlapping saves can never
+        // report the same number. The allocator takes the metadata patch queue on top of this
+        // lock (never the reverse), which is what serializes it against a metadata PATCH
+        // allocating at the same moment. Null only if the chat vanished between the lookup
+        // above and here; the save still lands, just unorderable.
+        const writeOrdinal = await chats.allocateWriteOrdinal(req.params.chatId);
+        const id = await storage.create({
+          chatId: req.params.chatId,
+          messageId: anchor.messageId,
+          swipeIndex: anchor.swipeIndex,
+          gameType,
+          schemaVersion: body.schemaVersion,
+          state: serialized,
+          committed: body.committed,
+          writeOrdinal,
+          // Strictly newer than the namespace's current newest, not just now() (#5405). Two
+          // saves inside the same millisecond — a package saving twice in one narration turn,
+          // or a scripted loop — otherwise TIE on createdAt, and a tie is not resolved in
+          // favor of the newer write: in-process the FIRST-inserted row wins the desc read,
+          // and after a shard reload the LOWEST row id does. Reading the newest inside the
+          // write lock and stepping past it keeps every save's recency unambiguous, which is
+          // what makes the export's "oldest write first" ordering real.
+          createdAt: new Date(
+            experienceStateStampBase(await storage.getLatest(req.params.chatId, gameType)),
+          ).toISOString(),
+        });
+        await storage.pruneToNewestAnchors(req.params.chatId, gameType, EXPERIENCE_STATE_KEEP_ANCHORS);
+        return { ok: true, id, anchor, writeOrdinal };
+      });
+    },
+  );
+
+  // ── Experience save management: delete / export / import (#5405) ──
+  // Three player-initiated verbs over the same namespace the GET/PUT above own.
+  // Nothing automatic calls any of them: a package surfaces them behind explicit
+  // player action ("New Game", "Free up space", "Back up this campaign"). All three
+  // reuse resolveExperienceStateGameType, so a chat without a valid game-mode stamp
+  // gets the same 409 the GET/PUT give and a missing chat the same 404; all three run
+  // inside withExperienceStateWriteLock, so none of them can interleave with a concurrent
+  // save's delete-then-insert (export included — a backup has to be atomic against a
+  // concurrent save by construction). CSRF needs no route-level work: the app's
+  // onRequest hook treats DELETE and POST as unsafe methods (UNSAFE_METHODS covers
+  // POST/PUT/PATCH/DELETE) for every /api/ path, so both are origin-checked already.
+
+  // ── DELETE /game/:chatId/experience-state ──
+  // Removes every row of this chat's experience namespace. Turn-game rows and any
+  // other writer's rows in the same chat are untouched (the delete is gameType-scoped).
+  // Losing these rows does not strand old campaigns: checkpoints capture the world blob
+  // by value at create time (engineStateData, #5102/#5077), so a restore still recovers
+  // the world even with no surviving per-turn row.
+  app.delete<{ Params: { chatId: string } }>("/:chatId/experience-state", async (req, reply) => {
+    const chats = createChatsStorage(app.db);
+    const chat = await chats.getById(req.params.chatId);
+    if (!chat) return reply.code(404).send({ error: "Chat not found" });
+    const gameType = resolveExperienceStateGameType(chat);
+    if (!gameType) {
+      return reply.code(409).send({
+        error: "This chat has no game-surface Experience, so it has no experience state",
+      });
+    }
+
+    return withExperienceStateWriteLock(req.params.chatId, async () => {
+      const storage = createGameEngineStateStorage(app.db);
+      // Counted inside the lock so `deleted` is what this call actually removed.
+      const doomed = await storage.listForChat(req.params.chatId, gameType);
+      if (doomed.length > 0) await storage.deleteForChat(req.params.chatId, gameType);
+      logger.info("Deleted %d experience-state row(s) for chat %s (%s)", doomed.length, req.params.chatId, gameType);
+      return { ok: true, deleted: doomed.length };
+    });
+  });
+
+  // ── GET /game/:chatId/experience-state/export ──
+  // Every row of the namespace, oldest write first, so a player can take a campaign
+  // off-device. Deliberately unpaginated: the response can reach roughly
+  // EXPERIENCE_STATE_KEEP_ANCHORS × MAX_EXPERIENCE_STATE_CHARS (~100 × 256K) of state
+  // plus envelope. That is accepted for an explicit, player-triggered export — the
+  // alternative (paging a save file) would hand packages a partial-export failure mode
+  // for no benefit on a local-first server.
+  app.get<{ Params: { chatId: string } }>("/:chatId/experience-state/export", async (req, reply) => {
+    const chats = createChatsStorage(app.db);
+    const chat = await chats.getById(req.params.chatId);
+    if (!chat) return reply.code(404).send({ error: "Chat not found" });
+    const gameType = resolveExperienceStateGameType(chat);
+    if (!gameType) {
+      return reply.code(409).send({
+        error: "This chat has no game-surface Experience, so it has no experience state",
+      });
+    }
+
+    // Read under the write lock so a backup is atomic against a concurrent save by
+    // construction: without it an export interleaving with the PUT's delete-then-insert could
+    // capture the namespace mid-rewrite and miss the anchor being replaced.
+    return withExperienceStateWriteLock(req.params.chatId, async () => {
+      const storage = createGameEngineStateStorage(app.db);
+      const rows = await storage.listForChat(req.params.chatId, gameType);
+      return {
+        rows: rows.map((row) => {
+          let state: unknown = null;
+          let unreadable: ReturnType<typeof unreadableStatePayload> | null = null;
+          // Same discipline as the single-row GET, same discriminator, same payload:
+          // nothing here may re-assume the stored value is a string (JSON.parse(null)
+          // coerces to "null" and returns null WITHOUT throwing, which would launder a
+          // damaged null COLUMN into a legitimate stored null on the very verb that
+          // exists to be the backup). An export is the last copy a player may ever
+          // have, so unreadable rows carry their raw bytes rather than dropping them.
+          if (typeof row.state !== "string") {
+            logger.error("Non-string experience state on disk for chat %s (%s)", req.params.chatId, gameType);
+            unreadable = unreadableStatePayload(row.state);
+          } else {
+            try {
+              state = JSON.parse(row.state);
+            } catch (err) {
+              logger.error(err, "Unparseable experience state for chat %s (%s)", req.params.chatId, gameType);
+              unreadable = unreadableStatePayload(row.state);
+            }
+          }
+          return {
+            messageId: row.messageId,
+            swipeIndex: row.swipeIndex,
+            state,
+            schemaVersion: row.schemaVersion,
+            committed: row.committed === 1,
+            createdAt: row.createdAt,
+            // Present only on unreadable rows. The import restores an untruncated
+            // rawState VERBATIM (the row stays flagged on future reads — a faithful
+            // backup restores what was there); a truncated one is skipped and counted.
+            ...(unreadable ?? {}),
+          };
+        }),
+      };
+    });
+  });
+
+  // ── POST /game/:chatId/experience-state/import ──
+  // Accepts an export payload back. Each row is rewritten at its ORIGINAL anchor via
+  // storage.create, whose delete-then-insert dedupe means a re-import over a live
+  // campaign replaces same-anchor rows — a player wanting a clean slate calls the
+  // DELETE above first. Import is additive UP TO THE ANCHOR CAP: imported rows are
+  // stamped newer than everything already stored, so when the merged total exceeds
+  // EXPERIENCE_STATE_KEEP_ANCHORS the prune evicts the OLDEST-stamped rows — which is
+  // the pre-existing campaign, not the import. On a chat already at the cap, importing
+  // a full backup replaces the live campaign's per-turn history entirely (its
+  // checkpoints survive; they carry state by value). The response's `pruned` count
+  // reports exactly how many pre-existing rows the merge evicted.
+  //
+  // An anchor whose message does not exist in THIS chat (an export replayed into a
+  // different chat, or one whose anchor message was deleted) is still imported, but under
+  // a synthetic "imported:<originalId>" anchor rather than the caller's id. That rewrite is
+  // load-bearing, not cosmetic: the messages→game_engine_state cascade matches on messageId
+  // ALONE and is never scoped by chatId, so storing a foreign chat's message ids verbatim
+  // would let the SOURCE chat's message deletions silently destroy the imported campaign
+  // here. A prefixed id can never equal a real messages.id, so no cascade can reach it, and
+  // the row still serves through the GET's fallback path (latest committed / latest of any)
+  // — which is exactly what makes an imported campaign playable again. Rows whose anchors DO
+  // resolve here keep them, so a same-chat export→import round trip is unaffected and stays
+  // idempotent. See IMPORTED_GAME_ENGINE_ANCHOR_PREFIX for the validate() exemption that
+  // stops these by-design dangling refs from reading as integrity errors.
+  //
+  // Rate limiting: export/import share a dedicated 20/min class (ROUTE_RULES key
+  // "game-experience-save-transfer") rather than the 600/min default — see rate-limit.ts.
+  const experienceStateImportSchema = z.object({
+    rows: z.array(
+      z.object({
+        /** "" is the live anchor the PUT uses before the first assistant message exists. */
+        messageId: z.string().max(200),
+        swipeIndex: z.number().int().min(0).max(1_000_000),
+        state: z.unknown(),
+        schemaVersion: z.number().int().min(1).max(1_000_000).default(1),
+        committed: z.boolean().default(true),
+        /** Accepted so an export round-trips without stripping fields, but never stored —
+         *  see the stamping note in the handler. */
+        createdAt: z.string().max(64).optional(),
+        /** The export's discriminator for a row whose stored bytes were unreadable (the same
+         *  shape the single-row GET emits). Its `state` is null only because the disk bytes
+         *  would not parse; the restorable copy is `rawState`. */
+        stateUnparseable: z.boolean().optional(),
+        /** The stored value verbatim, as a string, capped at the PUT's own ceiling. */
+        rawState: z.string().max(MAX_EXPERIENCE_STATE_CHARS).optional(),
+        /** True when the capture hit the cap — such a row is missing bytes and cannot be
+         *  restored faithfully, so the import skips it. */
+        rawStateTruncated: z.boolean().optional(),
+      }),
+    ),
+  });
+
+  /** The anchor an imported row is actually stored at. Only ids that name a message of THIS
+   *  chat survive verbatim; see the cascade note above the schema for why the rest must not. */
+  const resolveImportAnchor = (messageId: string, chatMessageIds: ReadonlySet<string>): string => {
+    // The "" live anchor is a sentinel, not an id: no message can ever carry it, so no cascade
+    // can match it, and keeping it preserves a pre-narration save across a same-chat round trip.
+    // A CROSS-chat import at "" does overwrite the destination's own "" row — accepted, because
+    // that row is only reachable before the chat's first assistant message and replacing it is
+    // the intended restore semantic; the cascade argument alone would not justify the pass-through.
+    if (messageId === "") return messageId;
+    // Already synthetic (re-importing an export OF an import). Re-prefixing would mint a second
+    // anchor for the same save and duplicate the campaign instead of replacing it.
+    if (messageId.startsWith(IMPORTED_GAME_ENGINE_ANCHOR_PREFIX)) return messageId;
+    if (chatMessageIds.has(messageId)) return messageId;
+    return `${IMPORTED_GAME_ENGINE_ANCHOR_PREFIX}${messageId}`;
+  };
+
+  app.post<{ Params: { chatId: string } }>(
+    "/:chatId/experience-state/import",
+    { bodyLimit: EXPERIENCE_STATE_IMPORT_BODY_LIMIT },
+    async (req, reply) => {
+      // Gate first: a missing chat or a chat with no game-surface Experience is refused
+      // before any body work at all, so the reject path costs one chat read instead of a
+      // parse plus a per-row serialize of a batch that was never going to be stored.
+      const chats = createChatsStorage(app.db);
+      const chat = await chats.getById(req.params.chatId);
+      if (!chat) return reply.code(404).send({ error: "Chat not found" });
+      const gameType = resolveExperienceStateGameType(chat);
+      if (!gameType) {
+        return reply.code(409).send({
+          error: "This chat has no game-surface Experience, so it cannot store experience state",
+        });
+      }
+
+      // Count-cap before the schema parse: the body limit is sized for full-size saves,
+      // so it still admits millions of tiny rows. Rejecting on length first keeps a
+      // pathological batch from being validated row by row before it is refused.
+      const rawRows = (req.body as { rows?: unknown } | null | undefined)?.rows;
+      if (Array.isArray(rawRows) && rawRows.length > EXPERIENCE_STATE_KEEP_ANCHORS) {
+        return reply.code(422).send({
+          error: `rows must contain at most ${EXPERIENCE_STATE_KEEP_ANCHORS} entries`,
+        });
+      }
+      const body = experienceStateImportSchema.parse(req.body ?? {});
+
+      // Serialize and bound every row up front so an invalid batch is refused whole
+      // instead of half-applied: nothing is written until all of them pass.
+      const pending: {
+        /** The row's index in the request body, so a rejection names what the caller sent. */
+        index: number;
+        messageId: string;
+        swipeIndex: number;
+        state: string;
+        schemaVersion: number;
+        committed: boolean;
+      }[] = [];
+      let skipped = 0;
+      for (const [index, row] of body.rows.entries()) {
+        if (row.stateUnparseable) {
+          // The export could not parse this row's stored bytes, so its `state: null` is an
+          // absence of data, not data — storing it would launder on-disk corruption into a
+          // legitimate empty save. A faithful backup restores `rawState` VERBATIM instead:
+          // the row stays flagged on future reads, but nothing is lost and nothing lies.
+          // A truncated capture is missing bytes and CANNOT be restored faithfully, so it
+          // is skipped and counted rather than stored short.
+          if (typeof row.rawState === "string" && !row.rawStateTruncated) {
+            pending.push({
+              index,
+              messageId: row.messageId,
+              swipeIndex: row.swipeIndex,
+              state: row.rawState,
+              schemaVersion: row.schemaVersion,
+              committed: row.committed,
+            });
+          } else {
+            skipped += 1;
+            logger.warn(
+              "Skipping unrestorable unparseable experience-state row %d for chat %s (%s)",
+              index,
+              req.params.chatId,
+              gameType,
+            );
+          }
+          continue;
+        }
+        const serialized = JSON.stringify(row.state);
+        if (serialized === undefined) {
+          return reply.code(422).send({ error: `rows[${index}].state must be a JSON-serializable value` });
+        }
+        if (serialized.length > MAX_EXPERIENCE_STATE_CHARS) {
+          return reply.code(422).send({
+            error: `rows[${index}].state must serialize to at most ${MAX_EXPERIENCE_STATE_CHARS} characters`,
+          });
+        }
+        pending.push({
+          index,
+          messageId: row.messageId,
+          swipeIndex: row.swipeIndex,
+          state: serialized,
+          schemaVersion: row.schemaVersion,
+          committed: row.committed,
+        });
+      }
+
+      // Resolve every anchor against THIS chat's messages before writing anything (see the
+      // cascade note above the schema). Read outside the write lock deliberately: the lock
+      // orders experience-state writes and never covers message creation, so holding it here
+      // would buy nothing and only lengthen the critical section.
+      const chatMessageIds = new Set<string>(
+        pending.length > 0 ? (await chats.listMessages(req.params.chatId)).map((message) => message.id) : [],
+      );
+      const resolved = pending.map((row) => ({
+        ...row,
+        messageId: resolveImportAnchor(row.messageId, chatMessageIds),
+      }));
+
+      // Two rows at the same anchor would COLLAPSE: create() replaces any prior row of this
+      // gameType at the same (message, swipe), so the later one silently overwrites the
+      // earlier and the batch stores fewer saves than it was handed. Refuse the whole batch —
+      // the same posture every other bound on this route takes — rather than pick a winner.
+      const anchorFirstSeen = new Map<string, number>();
+      for (const row of resolved) {
+        const key = JSON.stringify([row.messageId, row.swipeIndex]);
+        const first = anchorFirstSeen.get(key);
+        if (first !== undefined) {
+          return reply.code(422).send({
+            error:
+              `rows[${row.index}] and rows[${first}] resolve to the same anchor ` +
+              `(messageId ${JSON.stringify(row.messageId)}, swipeIndex ${row.swipeIndex}); ` +
+              `every row must have a distinct (messageId, swipeIndex) pair`,
+          });
+        }
+        anchorFirstSeen.set(key, row.index);
+      }
+
+      return withExperienceStateWriteLock(req.params.chatId, async () => {
+        const storage = createGameEngineStateStorage(app.db);
+        // Recency comes from array ORDER, not from the exported createdAt. Honoring a
+        // caller-supplied timestamp would let a far-future stamp permanently shadow every
+        // later save and skew deleteAfter/getLatestAtOrBefore, so the batch is re-stamped
+        // here, FORWARD from a base strictly past everything already in the namespace.
+        // Stamping backwards from the base instead would push the batch's earliest rows
+        // BEHIND a pre-existing recent row, and the post-write prune below — which keeps the
+        // newest anchors — would then delete the import's own oldest saves.
+        // Only pre-existing rows at anchors this batch does NOT touch can count as
+        // "pruned": replacing the row at an incoming anchor is the intended write
+        // (create() is delete-then-insert per anchor), not a cap eviction, so a
+        // same-chat re-import must report pruned: 0. Key form matches anchorFirstSeen.
+        const incomingAnchors = new Set(resolved.map((row) => JSON.stringify([row.messageId, row.swipeIndex])));
+        const evictionCandidateIds = new Set(
+          (await storage.listForChat(req.params.chatId, gameType))
+            .filter((row) => !incomingAnchors.has(JSON.stringify([row.messageId, row.swipeIndex])))
+            .map((row) => row.id),
+        );
+        const base = experienceStateStampBase(await storage.getLatest(req.params.chatId, gameType));
+        const writtenIds = new Set<string>();
+        for (const [index, row] of resolved.entries()) {
+          writtenIds.add(
+            await storage.create({
+              chatId: req.params.chatId,
+              messageId: row.messageId,
+              swipeIndex: row.swipeIndex,
+              gameType,
+              schemaVersion: row.schemaVersion,
+              state: row.state,
+              committed: row.committed,
+              // #5406: an import is an experience-store write like any other, so each row is
+              // allocated a fresh ordinal here (in array order, inside this lock — strictly
+              // increasing alongside the createdAt stamps). Leaving these null would make a
+              // freshly imported campaign LOSE the boot comparison to the destination chat's
+              // stale metadata mirror, resurrecting the pre-import world — the exact clobber
+              // the ordinal exists to prevent. The exported writeOrdinal (a foreign chat's
+              // counter space) is deliberately never honored, same as the exported createdAt.
+              writeOrdinal: await chats.allocateWriteOrdinal(req.params.chatId),
+              createdAt: new Date(base + index).toISOString(),
+            }),
+          );
+        }
+        // Same bound the PUT enforces: an import merged onto a live campaign can push the
+        // namespace past the anchor cap.
+        await storage.pruneToNewestAnchors(req.params.chatId, gameType, EXPERIENCE_STATE_KEEP_ANCHORS);
+        // Report survivors, not intentions: the prune runs after the writes, so a response
+        // counting what was handed to create() could name rows that no longer exist. Re-read
+        // the namespace and count this call's own ids.
+        const surviving = await storage.listForChat(req.params.chatId, gameType);
+        const retained = surviving.reduce((count, row) => count + (writtenIds.has(row.id) ? 1 : 0), 0);
+        // Pre-existing rows the merge evicted through the anchor cap. Named in the
+        // response because an import onto a full campaign can evict ALL of them, and
+        // a success payload that stays silent about that is a lie of omission.
+        const survivingCandidates = surviving.reduce(
+          (count, row) => count + (evictionCandidateIds.has(row.id) ? 1 : 0),
+          0,
+        );
+        const pruned = evictionCandidateIds.size - survivingCandidates;
+        logger.info(
+          "Imported %d experience-state row(s) (%d retained, %d pre-existing pruned, %d skipped) for chat %s (%s)",
+          writtenIds.size,
+          retained,
+          pruned,
+          skipped,
+          req.params.chatId,
+          gameType,
+        );
+        return { ok: true, imported: writtenIds.size, retained, pruned, skipped };
+      });
+    },
+  );
+
+  // ── POST /game/:chatId/experience-generation (#5135) ──
+  // One host-run, bounded, non-streaming structured-output call for the chat's
+  // stamped game-surface Experience — e.g. turning wizard preferences into a
+  // compact world brief its deterministic generator compiles into a tile world.
+  // Packages are client-only, so this is the sanctioned way for one to spend a
+  // single LLM call; the gate is the same stamp the experience-state routes
+  // enforce, the connection is the chat's own GM connection, and both a
+  // dedicated rate-limit class and the per-chat asset-generation lock bound the
+  // spend. Modeled on /game/scene-wrap, with the illustrator's repair
+  // round-trip instead of a blind retry.
+  const experienceGenerationSchema = z.object({
+    /** The package's guidance: what to produce, the schema description, vocabularies. */
+    instructions: z.string().min(1).max(16_000),
+    /** The request payload (e.g. the player's preferences), appended as the user turn. */
+    userContent: z.string().max(8_000).default(""),
+    /** Optional JSON schema forwarded as provider-native structured output where
+     *  supported (OpenAI-compatible, Google). Advisory elsewhere: Anthropic and
+     *  the local sidecar ignore it, so the tolerant parser is the real contract. */
+    schema: z
+      .record(z.string(), z.unknown())
+      .optional()
+      .refine(
+        (value) => {
+          if (value === undefined) return true;
+          // stringify can throw on pathological nesting depth; that is a
+          // validation failure (→ 400), not a server error.
+          try {
+            return JSON.stringify(value).length <= 8_000;
+          } catch {
+            return false;
+          }
+        },
+        { message: "schema must serialize to at most 8000 characters" },
+      ),
+    schemaName: z
+      .string()
+      .regex(/^[a-zA-Z0-9_-]{1,64}$/)
+      .default("experience_generation"),
+    /** OpenAI strict structured outputs reject most hand-written schemas
+     *  (additionalProperties, required-completeness rules), so strict is
+     *  opt-in for packages that author their schema to that dialect. */
+    strictSchema: z.boolean().default(false),
+    debugMode: z.boolean().default(false),
+    connectionId: z.string().optional(),
+    /** Optional tightening of the stored max-output-token parameter; never a raise. */
+    maxTokens: z.number().int().min(256).max(8_192).optional(),
+  });
+
+  app.post<{ Params: { chatId: string } }>(
+    "/:chatId/experience-generation",
+    { bodyLimit: 64 * 1024 },
+    async (req, reply) => {
+      const input = experienceGenerationSchema.parse(req.body ?? {});
+      const chats = createChatsStorage(app.db);
+      const connections = createConnectionsStorage(app.db);
+      const chat = await chats.getById(req.params.chatId);
+      if (!chat) return reply.code(404).send({ error: "Chat not found" });
+      const gameType = resolveExperienceStateGameType(chat);
+      if (!gameType) {
+        return reply.code(409).send({
+          error: "This chat has no game-surface Experience, so it cannot run experience generation",
+        });
+      }
+
+      const meta = parseMeta(chat.metadata);
+      const { conn, baseUrl, defaultGenerationParameters } = await resolveConnection(
+        connections,
+        input.connectionId,
+        chat.connectionId,
+      );
+      const gameGenerationParameters = resolveStoredGameGenerationParameters(meta, defaultGenerationParameters);
+      const provider = await createGameMainProvider(connections, conn, baseUrl);
+
+      const baseMessages: ChatMessage[] = [
+        { role: "system", content: input.instructions },
+        {
+          role: "user",
+          content:
+            `${input.userContent}\n\nREMEMBER: Output ONLY the requested JSON object — no prose, no markdown fences.`.trim(),
+        },
+      ];
+
+      // Fast-fail when the chat's generation lock is held (a storyboard or
+      // asset run can hold it for many minutes): parking here would consume a
+      // five-minute socket per request and then surface as an opaque 500. The
+      // has() check races the acquire by a tick at worst; the park it leaves
+      // behind is then bounded by the other caller's own watchdog.
+      if (gameAssetGenerationLocks.has(req.params.chatId)) {
+        reply.header("Retry-After", "15");
+        return reply.code(409).send({
+          error: "This chat already has a generation in flight. Try again shortly.",
+          code: "chat_busy",
+        });
+      }
+      const signal = createResponseAbortSignal(reply, GAME_GENERATION_TIMEOUT_MS, "Experience generation");
+      const release = await acquireGameAssetGenerationLock(req.params.chatId, signal);
+      try {
+        // 2048 lifts the STORED parameter so a brief-sized reply has headroom
+        // (mirroring GAME_SETUP_MIN_OUTPUT_TOKENS); the known-model cap still
+        // applies, and an explicit package maxTokens may tighten below the
+        // floor — a caller asking for less gets less.
+        // The override slot is a ceiling; both the connection's own configured
+        // cap and the package's requested tightening must survive, so pass the
+        // tighter of the two.
+        const maxTokens = clampGameMaxOutputTokens({
+          provider: conn.provider,
+          model: conn.model ?? "",
+          maxTokens: Math.max(2_048, gameGenerationParameters?.maxTokens ?? 0),
+          maxTokensOverride:
+            input.maxTokens != null && conn.maxTokensOverride != null
+              ? Math.min(input.maxTokens, conn.maxTokensOverride)
+              : (input.maxTokens ?? conn.maxTokensOverride ?? null),
+        });
+        const options = gameGenOptions(
+          conn.model ?? "",
+          { stream: false, maxTokens, signal },
+          gameGenerationParameters,
+          conn.provider,
+        );
+        // Set AFTER gameGenOptions (its suppressModelParameters branch drops
+        // unknown overrides). Providers under that policy may STILL drop
+        // response_format at their own layer — for them the prompt + tolerant
+        // parser are the contract, which is also true of Anthropic and the
+        // local sidecar by design. The FLAT json_schema form is the universal
+        // donor shape: the OpenAI chat-completions normalizer re-nests it, the
+        // Responses path consumes it as-is, and Google reads `.schema` first.
+        options.responseFormat = input.schema
+          ? { type: "json_schema", name: input.schemaName, schema: input.schema, strict: input.strictSchema }
+          : { type: "json_object" };
+
+        const debugLogsEnabled = input.debugMode || isDebugAgentsEnabled() || logger.isLevelEnabled("debug");
+        const debugLog = (message: string, ...args: unknown[]) => {
+          logDebugOverride(input.debugMode || isDebugAgentsEnabled(), message, ...args);
+        };
+        if (debugLogsEnabled) {
+          debugLog(
+            "[debug/game/experience-generation] chatId=%s model=%s gameType=%s maxTokens=%d strict=%s responseFormat=%s",
+            req.params.chatId,
+            conn.model ?? "",
+            gameType,
+            maxTokens,
+            input.strictSchema,
+            JSON.stringify(options.responseFormat),
+          );
+        }
+
+        // Worst case THREE upstream calls per request: attempt 1 buffered, an
+        // empty-buffered streamed rescue (attempt 1 only), and one repair
+        // round-trip. The rate-limit class is sized with that fan-out in mind.
+        const runAttempt = async (attemptMessages: ChatMessage[], allowStreamedRescue: boolean) => {
+          if (debugLogsEnabled) {
+            for (const message of attemptMessages) {
+              debugLog("[debug/game/experience-generation] %s message:\n%s", message.role, message.content);
+            }
+          }
+          const result = await runGameChatComplete(provider, attemptMessages, options, "Experience generation");
+          let extraction = extractLeadingThinkingBlocks(
+            result.content || "",
+            gameGenerationParameters?.customThinkingTags,
+          );
+          let raw = extraction.content;
+          let finishReason: string | null = result.finishReason ?? null;
+          if (!raw.trim() && allowStreamedRescue) {
+            // Some provider/model combos return empty content on the buffered
+            // path (scene-wrap precedent). The streamed collection has no
+            // reliable finish reason — the discarded buffered one must not be
+            // allowed to condemn a complete streamed reply as truncated.
+            logger.warn("[game/experience-generation] Empty buffered response, retrying with streamed collection");
+            const streamed = await runGameChatStream(
+              provider,
+              attemptMessages,
+              options,
+              "Experience generation streamed retry",
+            );
+            extraction = extractLeadingThinkingBlocks(streamed, gameGenerationParameters?.customThinkingTags);
+            raw = extraction.content;
+            finishReason = null;
+          }
+          if (debugLogsEnabled) {
+            debugLog(
+              "[debug/game/experience-generation] raw response (%d chars, finishReason=%s):\n%s",
+              raw.length,
+              finishReason ?? "null",
+              raw,
+            );
+          }
+          return { raw, finishReason };
+        };
+
+        let attemptMessages = baseMessages;
+        let lastRaw = "";
+        let lastFinishReason: string | null = null;
+        for (let attempt = 1; attempt <= 2; attempt++) {
+          let raw: string;
+          let finishReason: string | null;
+          try {
+            ({ raw, finishReason } = await runAttempt(attemptMessages, attempt === 1));
+          } catch (error) {
+            // A provider rejection (strict-schema refusal, 4xx, network) is a
+            // degradation case for the package, not a server fault — but a
+            // client abort/timeout stays a plain error.
+            if (signal.aborted) throw error;
+            const message = error instanceof Error ? error.message : String(error);
+            logger.warn(error, "[game/experience-generation] Provider call failed: %s", message);
+            return reply.code(422).send({
+              error: `The model provider rejected the request: ${message}`,
+              code: "provider_error",
+              truncated: false,
+            });
+          }
+          lastRaw = raw;
+          lastFinishReason = finishReason;
+          // The authoritative cut signal is checked BEFORE the parse: the
+          // tolerant parser happily repairs a cut-off reply by closing its
+          // containers, which would hand the package a silently amputated
+          // document as ok:true — and there is no host-side semantic validator
+          // behind this route to catch that. The heuristic container scan is
+          // only consulted when the parse fails, so its rare false positives
+          // on unusual-but-complete output cannot 422 a parseable reply.
+          if (finishReason === "length") {
+            return reply.code(422).send({
+              error:
+                "The model's JSON was cut off before it finished. Increase the connection's max output tokens and try again.",
+              truncated: true,
+              raw: raw.slice(0, 20_000),
+              finishReason,
+            });
+          }
+          try {
+            const data = parseJSON(raw);
+            return { ok: true, data };
+          } catch {
+            if (isLikelyTruncatedJsonResponse(raw, finishReason ?? undefined)) {
+              return reply.code(422).send({
+                error:
+                  "The model's JSON was cut off before it finished. Increase the connection's max output tokens and try again.",
+                truncated: true,
+                raw: raw.slice(0, 20_000),
+                finishReason,
+              });
+            }
+            if (attempt === 1) {
+              // Repair round-trip: showing the model its own bad output plus a
+              // correction converges far better than a blind re-run.
+              attemptMessages = [
+                ...baseMessages,
+                { role: "assistant", content: raw.slice(0, 4_000) },
+                {
+                  role: "user",
+                  content:
+                    "That response was not the requested JSON. Reply again with ONLY the corrected JSON object — no prose, no fences.",
+                },
+              ];
+            }
+          }
+        }
+        // The package degrades to its own defaults; hand it the raw text so it
+        // can log or salvage, never a hand-repair dialog (this is not a wizard).
+        return reply.code(422).send({
+          error: "The model did not return parseable JSON",
+          truncated: false,
+          raw: lastRaw.slice(0, 20_000),
+          finishReason: lastFinishReason,
+        });
+      } finally {
+        release();
+      }
+    },
+  );
 
   // ── PUT /game/:chatId/widgets ──
   app.put<{ Params: { chatId: string } }>("/:chatId/widgets", async (req) => {
@@ -10289,7 +11422,7 @@ export async function gameRoutes(app: FastifyInstance) {
       .catch(() => null);
     const imagePromptInstructions =
       typeof meta.gameImagePromptInstructions === "string"
-        ? meta.gameImagePromptInstructions.trim().slice(0, 5000)
+        ? compactImagePromptInstructions(meta.gameImagePromptInstructions)
         : "";
 
     // Compute approximate turn number: count user messages + 1 (current turn)
@@ -10428,13 +11561,18 @@ export async function gameRoutes(app: FastifyInstance) {
 
       if (input.context.useSpotifyMusic) {
         parsed.music = null;
-      } else if (!input.context.generateMusic) {
+      } else {
+        // Scoring runs even with music generation enabled (#5161): generated
+        // context tracks are ordinary scoreable library entries now, and the
+        // analyzer no longer writes free-text music prompts.
         const scoredMusic = scoreMusic({
           state: (input.context.currentState as GameActiveState) ?? "exploration",
           weather: parsed.weather ?? input.context.currentWeather,
           timeOfDay: parsed.timeOfDay ?? input.context.currentTimeOfDay,
           musicGenre: parsed.musicGenre,
           musicIntensity: parsed.musicIntensity,
+          locationSlug: musicAreaSlug(input.context.currentLocation),
+          enemyTier: input.context.enemyTier,
           currentMusic: input.context.currentMusic,
           recentMusic: input.context.recentMusic,
           availableMusic: serverMusicTags,
@@ -10987,6 +12125,8 @@ export async function gameRoutes(app: FastifyInstance) {
       const charStore = createCharactersStorage(app.db);
       const storyboardCharacterContext = await buildStoryboardCharacterContext({
         characters: charStore,
+        characterGallery,
+        personaGallery,
         chat,
         meta,
         setupConfig: setupCfg,
@@ -11008,6 +12148,7 @@ export async function gameRoutes(app: FastifyInstance) {
         trackedNpcs: storyboardCharacterContext.trackedNpcs,
         gameNpcs: ownerMode === "game" && Array.isArray(meta.gameNpcs) ? (meta.gameNpcs as GameNpc[]) : [],
         charReferenceByName: storyboardCharacterContext.charReferenceByName,
+        charReferenceSourceByName: storyboardCharacterContext.charReferenceSourceByName,
         charAvatarByName: storyboardCharacterContext.charAvatarByName,
         charDescriptionByName: storyboardCharacterContext.charDescriptionByName,
         includeReferenceImages: false,
@@ -11079,7 +12220,18 @@ export async function gameRoutes(app: FastifyInstance) {
       } as const;
       let usedFallbackStoryboardPlanner = false;
       if (input.plannedStoryboard !== undefined) {
-        plan = sanitizeStoryboardPlan(input.plannedStoryboard, storyboardPlanSanitizerOptions);
+        const reviewedStoryboard = resolveStoryboardReviewPlanEnvelope(input.plannedStoryboard);
+        illustratorErrorMessage = reviewedStoryboard.plannerError;
+        const reviewedPlanHasRenderableKeyframe = storyboardPlanHasRenderableKeyframe(reviewedStoryboard.plan);
+        usedFallbackStoryboardPlanner = reviewedStoryboard.usedFallbackPlanner || !reviewedPlanHasRenderableKeyframe;
+        if (!reviewedPlanHasRenderableKeyframe && !illustratorErrorMessage) {
+          illustratorErrorMessage =
+            "Reviewed storyboard contained no usable keyframes. Marinara used narration-based fallback keyframes and skipped video generation.";
+        }
+        plan = sanitizeStoryboardPlan(reviewedStoryboard.plan, {
+          ...storyboardPlanSanitizerOptions,
+          narrationBeatMaxChars: usedFallbackStoryboardPlanner ? STORYBOARD_FALLBACK_BEAT_MAX_CHARS : undefined,
+        });
         if (debugLogsEnabled) {
           debugLog("[debug/game/storyboard-illustrator] using reviewed client storyboard plan");
         }
@@ -11106,18 +12258,7 @@ export async function gameRoutes(app: FastifyInstance) {
           const rawPlan = extraction.content.trim();
           if (debugLogsEnabled) debugLog("[debug/game/storyboard-illustrator] raw response:\n%s", rawPlan);
           const parsedPlan = parseJSON(rawPlan);
-          const parsedKeyframes = asStoryboardRecord(parsedPlan).keyframes;
-          const hasRenderableKeyframe =
-            Array.isArray(parsedKeyframes) &&
-            parsedKeyframes.some((rawFrame) => {
-              const frame = asStoryboardRecord(rawFrame);
-              return Boolean(
-                compactStoryboardText(frame.narrationBeat, 1200) ||
-                compactStoryboardText(frame.imagePrompt, 6500) ||
-                compactStoryboardText(frame.mangaPanelPrompt, 5000),
-              );
-            });
-          if (!hasRenderableKeyframe) {
+          if (!storyboardPlanHasRenderableKeyframe(parsedPlan)) {
             throw new Error("Storyboard Illustrator returned no usable keyframes");
           }
           plan = sanitizeStoryboardPlan(parsedPlan, storyboardPlanSanitizerOptions);
@@ -11126,10 +12267,11 @@ export async function gameRoutes(app: FastifyInstance) {
             throw abortReasonAsError(storyboardAbortSignal, "Game storyboard generation cancelled");
           }
           usedFallbackStoryboardPlanner = true;
-          illustratorErrorMessage =
-            err instanceof Error
-              ? `${err.message}; used fallback storyboard planner and skipped video generation.`
-              : "Used fallback storyboard planner and skipped video generation.";
+          const plannerFailureReason = compactStoryboardText(err instanceof Error ? err.message : "", 900);
+          illustratorErrorMessage = [
+            plannerFailureReason ? `Storyboard planner failed: ${plannerFailureReason}` : "Storyboard planner failed.",
+            "Marinara used narration-based fallback keyframes and skipped video generation.",
+          ].join(" ");
           logger.warn(
             err,
             "[game/storyboard] Storyboard Illustrator failed; using fallback images and skipping video generation",
@@ -11145,6 +12287,7 @@ export async function gameRoutes(app: FastifyInstance) {
           });
         }
       }
+      const includeCharacterAppearanceAtRender = includeCharacterAppearance && usedFallbackStoryboardPlanner;
 
       const imgModel = imgConn.model || "";
       const imgBaseUrl = imgConn.baseUrl || "https://image.pollinations.ai";
@@ -11154,6 +12297,7 @@ export async function gameRoutes(app: FastifyInstance) {
       const imgServiceHint = imgConn.imageService || imgSource;
       const imgEndpointId = imgConn.imageEndpointId || undefined;
       const imgDefaults = resolveConnectionImageDefaults(imgConn);
+      const imgQuality = resolveConnectionImageQuality(imgConn);
       const imgFallback = await resolveImageConnectionFallback(connections, imgConn.id);
       const imageSettings = await loadImageGenerationUserSettings(app.db);
       const backgroundSize = ownerMode === "game" ? imageSettings.game : imageSettings.illustration;
@@ -11166,7 +12310,7 @@ export async function gameRoutes(app: FastifyInstance) {
         null;
       const imagePromptInstructions =
         ownerMode === "game" && typeof meta.gameImagePromptInstructions === "string"
-          ? meta.gameImagePromptInstructions.trim().slice(0, 5000)
+          ? compactImagePromptInstructions(meta.gameImagePromptInstructions)
           : "";
       const useAvatarReferences = meta.storyboardAgentUseAvatarReferences !== false;
       const useStoryboardPromptTemplate =
@@ -11178,7 +12322,8 @@ export async function gameRoutes(app: FastifyInstance) {
       );
       const storyboardImagePromptTemplates =
         ownerMode === "game" ? meta.gameStoryboardImagePromptTemplates : meta.roleplayStoryboardImagePromptTemplates;
-      const { charReferenceByName, charAvatarByName, charDescriptionByName } = storyboardCharacterContext;
+      const { charReferenceByName, charReferenceSourceByName, charAvatarByName, charDescriptionByName } =
+        storyboardCharacterContext;
       const storyboardPromptOverrideById = new Map(
         (input.promptOverrides ?? []).map((item) => [
           item.id,
@@ -11198,7 +12343,7 @@ export async function gameRoutes(app: FastifyInstance) {
               prompts: plannedFrame.characterPrompts,
               characters: plannedFrame.characters,
               characterDescriptions: charDescriptionByName,
-              includeCharacterAppearance,
+              includeCharacterAppearance: includeCharacterAppearanceAtRender,
             })
           : [];
         const illustration: SceneIllustrationRequest = {
@@ -11215,10 +12360,11 @@ export async function gameRoutes(app: FastifyInstance) {
           trackedNpcs: storyboardCharacterContext.trackedNpcs,
           gameNpcs: ownerMode === "game" ? ((meta.gameNpcs as GameNpc[]) ?? []) : [],
           charReferenceByName,
+          charReferenceSourceByName,
           charAvatarByName,
           charDescriptionByName,
           includeReferenceImages: useAvatarReferences,
-          includeCharacterDescriptions: includeCharacterAppearance,
+          includeCharacterDescriptions: includeCharacterAppearanceAtRender && characterPrompts.length === 0,
           maxReferenceImages: Math.max(0, storyboardReferenceImageLimit - (spatialLocationReferenceImage ? 1 : 0)),
         });
         const illustrationAssets = {
@@ -11229,16 +12375,15 @@ export async function gameRoutes(app: FastifyInstance) {
             storyboardReferenceImageLimit,
           ),
         };
-        return { plannedFrame, characterPrompts, illustration, illustrationAssets };
+        const ensureCharacterAppearance = includeCharacterAppearanceAtRender && characterPrompts.length === 0;
+        return { plannedFrame, characterPrompts, illustration, illustrationAssets, ensureCharacterAppearance };
       };
 
       if (input.previewOnly) {
         const items = await Promise.all(
           plan.keyframes.map(async (_frame, frameIndex) => {
-            const { plannedFrame, illustration, illustrationAssets } = buildStoryboardFrameIllustration(
-              frameIndex,
-              "storyboard-preview",
-            );
+            const { plannedFrame, illustration, illustrationAssets, ensureCharacterAppearance } =
+              buildStoryboardFrameIllustration(frameIndex, "storyboard-preview");
             const compiled = await buildSceneIllustrationProviderPrompt({
               chatId: input.chatId,
               title: illustration.title,
@@ -11246,6 +12391,7 @@ export async function gameRoutes(app: FastifyInstance) {
               reason: illustration.reason,
               characters: illustration.characters,
               characterDescriptions: illustrationAssets.characterDescriptions,
+              ensureCharacterAppearance,
               slug: illustration.slug,
               genre,
               setting,
@@ -11262,6 +12408,7 @@ export async function gameRoutes(app: FastifyInstance) {
               imgEndpointId,
               imgComfyWorkflow,
               imgDefaults,
+              imgQuality,
               styleProfiles,
               styleProfileId,
               promptOverridesStorage,
@@ -11297,7 +12444,15 @@ export async function gameRoutes(app: FastifyInstance) {
             };
           }),
         );
-        return { items, plannedStoryboard: plan };
+        return {
+          items,
+          plannedStoryboard: createStoryboardReviewPlanEnvelope({
+            plan,
+            plannerError: illustratorErrorMessage,
+            usedFallbackPlanner: usedFallbackStoryboardPlanner,
+          }),
+          plannerWarning: illustratorErrorMessage,
+        };
       }
 
       const snapshot =
@@ -11377,10 +12532,8 @@ export async function gameRoutes(app: FastifyInstance) {
           return { generatedImage: false, generatedVideo: false, imageFailure: true, videoFailure: false };
         }
         await storyboards.updateKeyframe(frame.id, { status: "rendering_image", error: null });
-        const { plannedFrame, characterPrompts, illustration, illustrationAssets } = buildStoryboardFrameIllustration(
-          frame.index,
-          storyboardRow.id.slice(0, 8),
-        );
+        const { plannedFrame, characterPrompts, illustration, illustrationAssets, ensureCharacterAppearance } =
+          buildStoryboardFrameIllustration(frame.index, storyboardRow.id.slice(0, 8));
         await storyboards.updateKeyframe(frame.id, {
           imagePrompt: plannedFrame.imagePrompt,
           mangaPanelPrompt: plannedFrame.mangaPanelPrompt,
@@ -11415,6 +12568,7 @@ export async function gameRoutes(app: FastifyInstance) {
             reason: illustration.reason,
             characters: illustration.characters,
             characterDescriptions: illustrationAssets.characterDescriptions,
+            ensureCharacterAppearance,
             slug: illustration.slug,
             genre,
             setting,
@@ -11431,6 +12585,7 @@ export async function gameRoutes(app: FastifyInstance) {
             imgEndpointId,
             imgComfyWorkflow,
             imgDefaults,
+            imgQuality,
             imgFallback,
             styleProfiles,
             styleProfileId,
@@ -11472,45 +12627,145 @@ export async function gameRoutes(app: FastifyInstance) {
                 galleryImagePath,
                 sourceGalleryImagePathForMetadata(galleryImage),
               );
-              const promptBuild = await buildStoryboardGalleryAnimatePrompt({
-                promptOverridesStorage,
-                galleryImage,
-                plannedFrame,
-                frameIndex: frame.index,
-                setupConfig: setupCfg,
-                latestState: fallbackState,
-                meta,
-                artStyle,
-                promptLimits: videoRuntime.promptLimits,
-                ownerMode,
-                debugMode: requestDebug,
-              });
-              const prompt = promptBuild.prompt;
-              await storyboards.updateKeyframe(frame.id, { videoPrompt: prompt });
-              if (debugLogsEnabled) {
-                debugLog("[debug/game/storyboard-video] frame=%d prompt:\n%s", frame.index + 1, prompt);
-              }
-              const generated = await generateVideo(
-                videoRuntime.source,
-                videoRuntime.baseUrl,
-                videoRuntime.apiKey,
-                videoRuntime.serviceHint,
-                {
-                  prompt,
-                  model: videoRuntime.model,
-                  durationSeconds: Math.min(videoRuntime.maxDurationSeconds, plannedFrame.durationSeconds),
-                  aspectRatio: plannedFrame.aspectRatio,
-                  resolution: videoRuntime.resolution,
-                  comfyWorkflow: videoRuntime.comfyWorkflow,
-                  comfyLoras: videoRuntime.comfyLoras,
-                  fps: videoRuntime.comfyFps,
-                  referenceImage,
-                  publicReferenceUpload: videoRuntime.publicReferenceUpload,
-                  fallback: videoFallback,
-                  debugMode: debugOverrideEnabled,
-                  signal: backgroundSignal,
-                },
+              const refinementSourceSections = storyboardSectionsForRange(
+                sourceSections,
+                plannedFrame.sectionStartIndex,
+                plannedFrame.sectionEndIndex,
               );
+              const animationExecution = await executeStoryboardImageAwareAnimation({
+                referenceImage,
+                motionIntent: plannedFrame.narrationBeat,
+                refinementEnabled: meta.storyboardAgentImageAwareShotPlanningEnabled !== false,
+                refine: async (exactReferenceImage) => {
+                  const refinementMessages = buildStoryboardAnimationRefinementMessages({
+                    templates: meta.storyboardAgentAnimationRefinementTemplates,
+                    templateId: meta.storyboardAgentAnimationRefinementTemplateId,
+                    title: plannedFrame.title,
+                    motionIntent: plannedFrame.narrationBeat,
+                    imagePrompt: galleryImage.prompt || plannedFrame.imagePrompt,
+                    sourceSections:
+                      refinementSourceSections.length > 0
+                        ? buildStoryboardSectionsBlock(refinementSourceSections)
+                        : plannedFrame.anchorQuote,
+                    characters: plannedFrame.characters,
+                    durationSeconds: plannedFrame.durationSeconds,
+                    aspectRatio: plannedFrame.aspectRatio,
+                    referenceImage: exactReferenceImage,
+                  });
+                  if (debugLogsEnabled) {
+                    debugLog(
+                      "[debug/%s/storyboard-animation-refinement] frame=%d messages:\n%s",
+                      ownerMode,
+                      frame.index + 1,
+                      JSON.stringify(redactStoryboardAnimationRefinementMessages(refinementMessages), null, 2),
+                    );
+                  }
+                  const refinementResult = await runGameChatComplete(
+                    provider,
+                    refinementMessages,
+                    gameGenOptions(
+                      conn.model ?? "",
+                      {
+                        stream: false,
+                        maxTokens: 800,
+                        signal: backgroundSignal,
+                      },
+                      parameters,
+                      conn.provider,
+                    ),
+                    "Storyboard illustration-aware animation planner",
+                    GAME_STORYBOARD_ANIMATION_REFINEMENT_TIMEOUT_MS,
+                  );
+                  const refinementContent = refinementResult.content || "";
+                  if (isLikelyTruncatedJsonResponse(refinementContent, refinementResult.finishReason)) {
+                    throw new Error("Animation Planner returned a truncated image-aware motion beat");
+                  }
+                  const extraction = extractLeadingThinkingBlocks(refinementContent, parameters?.customThinkingTags);
+                  const refinement = resolveStoryboardAnimationRefinement(
+                    extraction.content,
+                    plannedFrame.narrationBeat,
+                  );
+                  if (!refinement) {
+                    throw new Error("Animation Planner returned no usable image-aware motion beat");
+                  }
+                  if (debugLogsEnabled) {
+                    debugLog(
+                      "[debug/%s/storyboard-animation-refinement] frame=%d classification=%s refined motion:\n%s",
+                      ownerMode,
+                      frame.index + 1,
+                      refinement.classification,
+                      refinement.narrationBeat,
+                    );
+                  }
+                  return refinement;
+                },
+                onRefinementError: (err) => {
+                  if (backgroundSignal.aborted) {
+                    throw abortReasonAsError(backgroundSignal, "Storyboard animation refinement cancelled");
+                  }
+                  logger.warn(
+                    err,
+                    "[game/storyboard] illustration-aware animation refinement failed for frame %s; using planned motion beat",
+                    frame.id,
+                  );
+                  if (debugLogsEnabled) {
+                    debugLog(
+                      "[debug/%s/storyboard-animation-refinement] frame=%d fallback=planned-motion-beat",
+                      ownerMode,
+                      frame.index + 1,
+                    );
+                  }
+                },
+                formatPrompt: async (narrationBeat) => {
+                  const promptBuild = await buildStoryboardGalleryAnimatePrompt({
+                    promptOverridesStorage,
+                    galleryImage,
+                    plannedFrame: { ...plannedFrame, narrationBeat },
+                    frameIndex: frame.index,
+                    setupConfig: setupCfg,
+                    latestState: fallbackState,
+                    meta,
+                    artStyle,
+                    promptLimits: videoRuntime.promptLimits,
+                    ownerMode,
+                    debugMode: requestDebug,
+                  });
+                  return promptBuild.prompt;
+                },
+                persistPrompt: async ({ prompt, classification }) => {
+                  await storyboards.updateKeyframe(frame.id, {
+                    videoPrompt: prompt,
+                    animationSuitability: classification,
+                  });
+                  if (debugLogsEnabled) {
+                    debugLog("[debug/game/storyboard-video] frame=%d prompt:\n%s", frame.index + 1, prompt);
+                  }
+                },
+                generateVideo: ({ prompt, referenceImage: exactReferenceImage }) =>
+                  generateVideo(
+                    videoRuntime.source,
+                    videoRuntime.baseUrl,
+                    videoRuntime.apiKey,
+                    videoRuntime.serviceHint,
+                    {
+                      prompt,
+                      model: videoRuntime.model,
+                      durationSeconds: Math.min(videoRuntime.maxDurationSeconds, plannedFrame.durationSeconds),
+                      aspectRatio: plannedFrame.aspectRatio,
+                      resolution: videoRuntime.resolution,
+                      comfyWorkflow: videoRuntime.comfyWorkflow,
+                      comfyLoras: videoRuntime.comfyLoras,
+                      fps: videoRuntime.comfyFps,
+                      referenceImage: exactReferenceImage,
+                      publicReferenceUpload: videoRuntime.publicReferenceUpload,
+                      fallback: videoFallback,
+                      debugMode: debugOverrideEnabled,
+                      signal: backgroundSignal,
+                    },
+                  ),
+              });
+              const generated = animationExecution.generated;
+              const prompt = animationExecution.prompt;
               const filePath = await saveVideoToDisk(input.chatId, generated.base64);
               savedFilePath = filePath;
               const videoRow = await sceneVideos.create({
@@ -11696,10 +12951,14 @@ export async function gameRoutes(app: FastifyInstance) {
 
       const filePath = assertInsideDir(GAME_SCENE_VIDEOS_ROOT, join(GAME_SCENE_VIDEOS_ROOT, chatId, filename));
       if (!existsSync(filePath)) return reply.status(404).send({ error: "Scene video file not found" });
+      const video = await validateVideoAssetFile(filePath, filename);
+      if (!video) return reply.status(404).send({ error: "Scene video file not found" });
 
-      return reply
-        .header("Content-Type", "video/mp4")
-        .sendFile(filename, join(GAME_SCENE_VIDEOS_ROOT, chatId), { maxAge: "1y", immutable: true });
+      return sendValidatedMediaFile(reply, video, {
+        method: req.method,
+        rangeHeader: req.headers.range,
+        cacheControl: "public, max-age=31536000, immutable",
+      });
     },
   );
 
@@ -11979,6 +13238,7 @@ export async function gameRoutes(app: FastifyInstance) {
     const imgServiceHint = imgConn.imageService || imgSource;
     const imgEndpointId = imgConn.imageEndpointId || undefined;
     const imgDefaults = resolveConnectionImageDefaults(imgConn);
+    const imgQuality = resolveConnectionImageQuality(imgConn);
     const previewSizeFor = (prompt: string, size: ImageGenerationSize) =>
       resolveImagePromptReviewSize({
         connection: imgConn,
@@ -12004,7 +13264,7 @@ export async function gameRoutes(app: FastifyInstance) {
       null;
     const imagePromptInstructions =
       typeof meta.gameImagePromptInstructions === "string"
-        ? meta.gameImagePromptInstructions.trim().slice(0, 5000)
+        ? compactImagePromptInstructions(meta.gameImagePromptInstructions)
         : "";
     const useAvatarReferences = input.useAvatarReferences ?? meta.gameImageUseAvatarReferences !== false;
     const includeCharacterAppearance =
@@ -12024,6 +13284,7 @@ export async function gameRoutes(app: FastifyInstance) {
         : null;
     const dynamicPromptGenerator = await createDynamicGameImagePromptGenerator({
       connections,
+      agents,
       promptOverridesStorage,
       chat,
       meta,
@@ -12068,6 +13329,7 @@ export async function gameRoutes(app: FastifyInstance) {
         imgEndpointId,
         imgComfyWorkflow,
         imgDefaults,
+        imgQuality,
         styleProfiles,
         styleProfileId,
         promptOverridesStorage,
@@ -12095,27 +13357,10 @@ export async function gameRoutes(app: FastifyInstance) {
       if (input.forceIllustration === true || isIllustrationAllowed(meta, approxTurnNumber, sessionNumber)) {
         const charStore = createCharactersStorage(app.db);
         const allChars = await charStore.list();
-        const charReferenceByName = new Map<string, string>();
-        const charAvatarByName = new Map<string, string>();
-        const charDescriptionByName = new Map<string, string>();
-        for (const ch of allChars) {
-          try {
-            const parsed = JSON.parse(ch.data) as Record<string, unknown> & { name?: string };
-            const fullBodyReference = parsed.name ? readPreferredFullBodySpriteBase64(ch.id) : null;
-            if (parsed.name && fullBodyReference) {
-              addNameLookupEntry(charReferenceByName, parsed.name, fullBodyReference.base64);
-            }
-            if (parsed.name && ch.avatarPath) {
-              addNameLookupEntry(charAvatarByName, parsed.name, ch.avatarPath);
-            }
-            const appearanceText = extractCharacterAppearanceText(parsed);
-            if (parsed.name && appearanceText) {
-              addNameLookupEntry(charDescriptionByName, parsed.name, appearanceText);
-            }
-          } catch {
-            /* skip */
-          }
-        }
+        const illustrationCharacterAssets = emptyIllustrationCharacterAssetMaps();
+        await addCharacterRowsIllustrationAssets(illustrationCharacterAssets, allChars, characterGallery);
+        const { charReferenceByName, charReferenceSourceByName, charAvatarByName, charDescriptionByName } =
+          illustrationCharacterAssets;
 
         const originalIllustration = input.illustration as SceneIllustrationRequest;
         const illustrationReviewKey =
@@ -12126,6 +13371,7 @@ export async function gameRoutes(app: FastifyInstance) {
           trackedNpcs: [],
           gameNpcs: Array.isArray(meta.gameNpcs) ? (meta.gameNpcs as GameNpc[]) : [],
           charReferenceByName,
+          charReferenceSourceByName,
           charAvatarByName,
           charDescriptionByName,
           includeReferenceImages: false,
@@ -12170,6 +13416,7 @@ export async function gameRoutes(app: FastifyInstance) {
           trackedNpcs: [],
           gameNpcs: (meta.gameNpcs as GameNpc[]) ?? [],
           charReferenceByName,
+          charReferenceSourceByName,
           charAvatarByName,
           charDescriptionByName,
           includeReferenceImages: useAvatarReferences,
@@ -12206,6 +13453,7 @@ export async function gameRoutes(app: FastifyInstance) {
           imgEndpointId,
           imgComfyWorkflow,
           imgDefaults,
+          imgQuality,
           styleProfiles,
           styleProfileId,
           promptOverridesStorage,
@@ -12298,6 +13546,7 @@ export async function gameRoutes(app: FastifyInstance) {
             imgEndpointId,
             imgComfyWorkflow,
             imgDefaults,
+            imgQuality,
             styleProfiles,
             styleProfileId,
             promptOverridesStorage,
@@ -12417,6 +13666,7 @@ export async function gameRoutes(app: FastifyInstance) {
       const imgServiceHint = imgConn.imageService || imgSource;
       const imgEndpointId = imgConn.imageEndpointId || undefined;
       const imgDefaults = resolveConnectionImageDefaults(imgConn);
+      const imgQuality = resolveConnectionImageQuality(imgConn);
       const imgFallback = await resolveImageConnectionFallback(connections, imgConn.id);
 
       const setupCfg = meta.gameSetupConfig as Record<string, unknown> | null;
@@ -12428,7 +13678,7 @@ export async function gameRoutes(app: FastifyInstance) {
         null;
       const imagePromptInstructions =
         typeof meta.gameImagePromptInstructions === "string"
-          ? meta.gameImagePromptInstructions.trim().slice(0, 5000)
+          ? compactImagePromptInstructions(meta.gameImagePromptInstructions)
           : "";
       const useAvatarReferences = input.useAvatarReferences ?? meta.gameImageUseAvatarReferences !== false;
       const includeCharacterAppearance =
@@ -12453,6 +13703,7 @@ export async function gameRoutes(app: FastifyInstance) {
       );
       const dynamicPromptGenerator = await createDynamicGameImagePromptGenerator({
         connections,
+        agents,
         promptOverridesStorage,
         chat,
         meta,
@@ -12494,6 +13745,7 @@ export async function gameRoutes(app: FastifyInstance) {
           imgEndpointId,
           imgComfyWorkflow,
           imgDefaults,
+          imgQuality,
           imgFallback,
           styleProfiles,
           styleProfileId,
@@ -12535,27 +13787,10 @@ export async function gameRoutes(app: FastifyInstance) {
         } else {
           const charStore = createCharactersStorage(app.db);
           const allChars = await charStore.list();
-          const charReferenceByName = new Map<string, string>();
-          const charAvatarByName = new Map<string, string>();
-          const charDescriptionByName = new Map<string, string>();
-          for (const ch of allChars) {
-            try {
-              const parsed = JSON.parse(ch.data) as Record<string, unknown> & { name?: string };
-              const fullBodyReference = parsed.name ? readPreferredFullBodySpriteBase64(ch.id) : null;
-              if (parsed.name && fullBodyReference) {
-                addNameLookupEntry(charReferenceByName, parsed.name, fullBodyReference.base64);
-              }
-              if (parsed.name && ch.avatarPath) {
-                addNameLookupEntry(charAvatarByName, parsed.name, ch.avatarPath);
-              }
-              const appearanceText = extractCharacterAppearanceText(parsed);
-              if (parsed.name && appearanceText) {
-                addNameLookupEntry(charDescriptionByName, parsed.name, appearanceText);
-              }
-            } catch {
-              /* skip */
-            }
-          }
+          const illustrationCharacterAssets = emptyIllustrationCharacterAssetMaps();
+          await addCharacterRowsIllustrationAssets(illustrationCharacterAssets, allChars, characterGallery);
+          const { charReferenceByName, charReferenceSourceByName, charAvatarByName, charDescriptionByName } =
+            illustrationCharacterAssets;
 
           const originalIllustration = input.illustration as SceneIllustrationRequest;
           const illustrationReviewKey =
@@ -12566,6 +13801,7 @@ export async function gameRoutes(app: FastifyInstance) {
             trackedNpcs: [],
             gameNpcs: Array.isArray(meta.gameNpcs) ? (meta.gameNpcs as GameNpc[]) : [],
             charReferenceByName,
+            charReferenceSourceByName,
             charAvatarByName,
             charDescriptionByName,
             includeReferenceImages: false,
@@ -12608,6 +13844,7 @@ export async function gameRoutes(app: FastifyInstance) {
             trackedNpcs: [],
             gameNpcs: (meta.gameNpcs as GameNpc[]) ?? [],
             charReferenceByName,
+            charReferenceSourceByName,
             charAvatarByName,
             charDescriptionByName,
             includeReferenceImages: useAvatarReferences,
@@ -12660,6 +13897,7 @@ export async function gameRoutes(app: FastifyInstance) {
               imgEndpointId,
               imgComfyWorkflow,
               imgDefaults,
+              imgQuality,
               imgFallback,
               styleProfiles,
               styleProfileId,
@@ -12786,6 +14024,7 @@ export async function gameRoutes(app: FastifyInstance) {
                 imgEndpointId,
                 imgComfyWorkflow,
                 imgDefaults,
+                imgQuality,
                 imgFallback,
                 styleProfiles,
                 styleProfileId,
@@ -13044,6 +14283,108 @@ export async function gameRoutes(app: FastifyInstance) {
       },
       manualOverrides,
     );
+
+    // #5077/#5102: engine-state snapshots (turn-games and game-surface Experiences) are anchored
+    // per (message, swipe) INDEPENDENTLY of the game/spatial snapshots the checkpoint captures, so
+    // checkpoints never carried them and a load left an active game on its post-checkpoint state.
+    // Restore clones the blobs the checkpoint captured BY VALUE at create time (engineStateData —
+    // one per gameType) onto the restore anchor, so getTurnGameView / the experience-state GET —
+    // via the shared resolver's checkpoint_restore rule — rewind too. The pre-#5102 createdAt
+    // re-lookup remains only for checkpoints created before engineStateData existed; it is invalid
+    // for any writer that delete-recreates one anchor (experience saves, silent turn games),
+    // whose row timestamps move PAST the checkpoint.
+    const engineStore = createGameEngineStateStorage(app.db);
+    const capturedEngineStates: CapturedEngineState[] = (() => {
+      if (!cp.engineStateData) return [];
+      try {
+        const parsed = JSON.parse(cp.engineStateData);
+        return Array.isArray(parsed)
+          ? parsed.filter(
+              (entry): entry is CapturedEngineState =>
+                !!entry && typeof entry.gameType === "string" && typeof entry.state === "string",
+            )
+          : [];
+      } catch (err) {
+        // Corrupt capture: fall through to the legacy re-lookup below rather than
+        // silently leaving the game on its post-checkpoint state.
+        logger.error(
+          err,
+          "Unparseable checkpoint engineStateData for chat %s; using the legacy restore lookup",
+          input.chatId,
+        );
+        return [];
+      }
+    })();
+    // #5406: a restored row gets a FRESH ordinal, never the captured one. Reusing the captured
+    // value would hand the same number out twice, and semantically the restore IS the newest
+    // write to the experience store — which is exactly what stops a boot comparison from
+    // deciding a stale chat-metadata copy (whose mirror kept advancing while the player was on
+    // a later turn) is newer than the world the user just restored.
+    //
+    // The whole block runs inside the experience-state write lock, the same one the PUT holds.
+    // Outside it, an autosave PUT landing at the restore anchor can allocate a HIGHER ordinal
+    // than the restore and still lose the delete-then-insert race, leaving the surviving row
+    // carrying the lower number — at which point the next boot comparison prefers the stale
+    // chat-metadata copy and resurrects the pre-restore world, the exact clobber #5406 exists
+    // to prevent. Lock order stays experience-lock -> metadata-queue: allocateWriteOrdinal takes
+    // the metadata queue from inside this lock, never the reverse. (This lock also closes the
+    // narrow race the #5405 stamp comment below tracked.)
+    await withExperienceStateWriteLock(input.chatId, async () => {
+      // Only experience rows are ordered: a turn-game keeps a single store, so it has nothing to
+      // compare against and its rows stay null (see game_engine_state.writeOrdinal).
+      const restoreOrdinal = async (gameType: string) =>
+        gameType.startsWith(EXPERIENCE_GAME_TYPE_PREFIX) ? await chats.allocateWriteOrdinal(input.chatId) : null;
+      if (capturedEngineStates.length > 0) {
+        for (const captured of capturedEngineStates) {
+          // Restore clones take the same monotonic stamp as the save/import family (#5405) —
+          // an unstamped now() here could tie a concurrent save in the same millisecond,
+          // and ties resolve differently in-process vs after a shard reload, so the NEXT
+          // checkpoint's capture could flip between the restored blob and the newer save
+          // across a restart.
+          await engineStore.create({
+            chatId: input.chatId,
+            messageId: restoreMsg.id,
+            swipeIndex: 0,
+            gameType: captured.gameType,
+            schemaVersion: typeof captured.schemaVersion === "number" ? captured.schemaVersion : 1,
+            state: captured.state,
+            committed: true,
+            writeOrdinal: await restoreOrdinal(captured.gameType),
+            createdAt: new Date(
+              experienceStateStampBase(await engineStore.getLatest(input.chatId, captured.gameType)),
+            ).toISOString(),
+          });
+        }
+      } else {
+        // No usable capture (pre-#5102 checkpoint, empty chat at capture time, or a
+        // corrupt blob): the createdAt re-lookup is strictly better than nothing.
+        const cpEngineRow = await engineStore.getLatestAtOrBefore(input.chatId, cp.createdAt);
+        if (cpEngineRow) {
+          await engineStore.create({
+            chatId: input.chatId,
+            messageId: restoreMsg.id,
+            swipeIndex: 0,
+            gameType: cpEngineRow.gameType,
+            schemaVersion: cpEngineRow.schemaVersion,
+            state: cpEngineRow.state,
+            committed: true,
+            writeOrdinal: await restoreOrdinal(cpEngineRow.gameType),
+            // Stamped like every other writer in the family (#5418) — this branch was the
+            // last unstamped one. An unstamped now() can land INSIDE the future window a
+            // stamped burst legitimately runs ahead by (a full import stamps up to ~99 ms
+            // past the clock), sorting the restored row BEHIND rows it supersedes for
+            // getLatest, the anchor-cap prune, and the next checkpoint's capture lookup —
+            // and, on experience rows, disagreeing with the fresh writeOrdinal above.
+            // Unlike the captured branch this can stamp a TURN-GAME row: consistent (the
+            // restore is genuinely the namespace's newest write), and in a namespace no
+            // stamped writer ever touched the base collapses to plain now().
+            createdAt: new Date(
+              experienceStateStampBase(await engineStore.getLatest(input.chatId, cpEngineRow.gameType)),
+            ).toISOString(),
+          });
+        }
+      }
+    });
 
     // Restore chat metadata fields from checkpoint
     if (cp.gameState) {

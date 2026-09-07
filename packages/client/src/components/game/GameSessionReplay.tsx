@@ -37,8 +37,8 @@ import { resolveAssetTag } from "../../lib/asset-fuzzy-match";
 import { parseChatMetadata } from "../../lib/chat-display";
 import { findReplayableGameSessionChat } from "../../lib/game-session-resolution";
 import { findReplayStoryboardKeyframe } from "../../lib/game-storyboard-keyframes";
+import type { AvatarCrop } from "@marinara-engine/shared";
 import type { CharacterMap, PersonaInfo } from "../chat/chat-area.types";
-import type { AvatarCrop, LegacyAvatarCrop } from "../../lib/utils";
 import { buildGameSessionReplayTurns, type GameReplayPresentationCue } from "../../lib/game-session-replay";
 import { useGameAssetStore } from "../../stores/game-asset.store";
 import { useChatStore } from "../../stores/chat.store";
@@ -50,7 +50,7 @@ import { useTranslation as useUiTranslation } from "react-i18next";
 
 interface SpeakerAvatarInfo {
   url: string;
-  crop?: AvatarCrop | LegacyAvatarCrop | null;
+  crop?: AvatarCrop | null;
   nameColor?: string;
   dialogueColor?: string;
 }
@@ -255,7 +255,9 @@ function ReplayStoryboardMedia({
     >
       <aside className="overflow-hidden rounded-xl border border-white/15 bg-black/80 text-white shadow-2xl backdrop-blur-md">
         <div className="flex items-center justify-between gap-2 border-b border-white/10 px-3 py-2">
-          <span className="truncate text-[0.6875rem] font-semibold uppercase tracking-wide text-white/75">{localizeUi("ui.game.gamesurfacecomponent.storyboard")}</span>
+          <span className="truncate text-[0.6875rem] font-semibold uppercase tracking-wide text-white/75">
+            {localizeUi("ui.game.gamesurfacecomponent.storyboard")}
+          </span>
           <span className="shrink-0 text-[0.625rem] text-white/45">{formatReplayStoryboardSectionLabel(frame)}</span>
         </div>
         <div className="bg-black">{media}</div>
@@ -280,8 +282,16 @@ function ReplayStoryboardMedia({
                     type="button"
                     onClick={handlePlaybackToggle}
                     className={REPLAY_STORYBOARD_CONTROL_BUTTON}
-                    title={playing ?localizeUi("ui.game.gamesurfacecomponent.pauseStoryboardVideo") :localizeUi("ui.game.gamesurfacecomponent.playStoryboardVideo")}
-                    aria-label={playing ?localizeUi("ui.game.gamesurfacecomponent.pauseStoryboardVideo") :localizeUi("ui.game.gamesurfacecomponent.playStoryboardVideo")}
+                    title={
+                      playing
+                        ? localizeUi("ui.game.gamesurfacecomponent.pauseStoryboardVideo")
+                        : localizeUi("ui.game.gamesurfacecomponent.playStoryboardVideo")
+                    }
+                    aria-label={
+                      playing
+                        ? localizeUi("ui.game.gamesurfacecomponent.pauseStoryboardVideo")
+                        : localizeUi("ui.game.gamesurfacecomponent.playStoryboardVideo")
+                    }
                   >
                     {playing ? <Pause size={13} /> : <Play size={13} />}
                   </button>
@@ -289,8 +299,16 @@ function ReplayStoryboardMedia({
                     type="button"
                     onClick={() => setMuted((current) => !current)}
                     className={REPLAY_STORYBOARD_CONTROL_BUTTON}
-                    title={muted ?localizeUi("ui.game.gamesurfacecomponent.unmuteStoryboardVideo") :localizeUi("ui.game.gamesurfacecomponent.muteStoryboardVideo")}
-                    aria-label={muted ?localizeUi("ui.game.gamesurfacecomponent.unmuteStoryboardVideo") :localizeUi("ui.game.gamesurfacecomponent.muteStoryboardVideo")}
+                    title={
+                      muted
+                        ? localizeUi("ui.game.gamesurfacecomponent.unmuteStoryboardVideo")
+                        : localizeUi("ui.game.gamesurfacecomponent.muteStoryboardVideo")
+                    }
+                    aria-label={
+                      muted
+                        ? localizeUi("ui.game.gamesurfacecomponent.unmuteStoryboardVideo")
+                        : localizeUi("ui.game.gamesurfacecomponent.muteStoryboardVideo")
+                    }
                   >
                     {muted ? <VolumeX size={13} /> : <Volume2 size={13} />}
                   </button>
@@ -306,8 +324,12 @@ function ReplayStoryboardMedia({
                   })
                 }
                 className={REPLAY_STORYBOARD_CONTROL_BUTTON}
-                title={localizeUi("ui.game.replaystoryboardmedia.changeStoryboardViewerSizeCurrentValue1", { value1: viewerSize })}
-                aria-label={localizeUi("ui.game.replaystoryboardmedia.changeStoryboardViewerSizeCurrentValue1", { value1: viewerSize })}
+                title={localizeUi("ui.game.replaystoryboardmedia.changeStoryboardViewerSizeCurrentValue1", {
+                  value1: viewerSize,
+                })}
+                aria-label={localizeUi("ui.game.replaystoryboardmedia.changeStoryboardViewerSizeCurrentValue1", {
+                  value1: viewerSize,
+                })}
               >
                 <Maximize2 size={13} />
               </button>
@@ -456,7 +478,11 @@ export function GameSessionReplay({
           audioManager.playAmbient(resolveAssetTag(effect.ambient, "ambient", assetMap), assetMap);
         }
         for (const sfx of effect.sfx ?? []) {
-          audioManager.playSfx(resolveAssetTag(sfx, "sfx", assetMap), assetMap);
+          audioManager.playSfx(
+            resolveAssetTag(sfx, "sfx", assetMap),
+            assetMap,
+            "sfxLoopCount" in effect ? effect.sfxLoopCount : undefined,
+          );
         }
         if (effect.directions?.length) {
           onPlayDirections(effect.directions);
@@ -498,7 +524,10 @@ export function GameSessionReplay({
     return (
       <div className="flex h-full flex-1 items-center justify-center">
         <div className="flex items-center gap-2 rounded-xl border border-white/15 bg-black/70 px-4 py-3 text-sm text-white/80 shadow-lg">
-          <Loader2 size={15} className="animate-spin" />{localizeUi("ui.game.gamesessionreplay.loadingSession")} {sessionNumber} {localizeUi("ui.game.gamesessionreplay.replay")}</div>
+          <Loader2 size={15} className="animate-spin" />
+          {localizeUi("ui.game.gamesessionreplay.loadingSession")} {sessionNumber}{" "}
+          {localizeUi("ui.game.gamesessionreplay.replay")}
+        </div>
       </div>
     );
   }
@@ -515,7 +544,9 @@ export function GameSessionReplay({
       <div className="flex h-full flex-1 items-center justify-center px-6">
         <div className="max-w-md rounded-xl border border-white/15 bg-black/75 px-5 py-4 text-center shadow-lg">
           <History size={22} className="mx-auto text-white/55" />
-          <h2 className="mt-3 text-sm font-semibold text-white">{localizeUi("ui.game.gamesessionreplay.replayUnavailable")}</h2>
+          <h2 className="mt-3 text-sm font-semibold text-white">
+            {localizeUi("ui.game.gamesessionreplay.replayUnavailable")}
+          </h2>
           <p className="mt-1 text-xs leading-relaxed text-white/60">
             {replayError?.message || "This session does not contain any replayable GM turns."}
           </p>
@@ -523,7 +554,9 @@ export function GameSessionReplay({
             type="button"
             onClick={exitReplay}
             className="mari-chrome-control mari-chrome-control--primary mt-4 px-4 py-2 text-xs"
-          >{localizeUi("ui.game.gamesessionreplay.returnToCurrentSession")}</button>
+          >
+            {localizeUi("ui.game.gamesessionreplay.returnToCurrentSession")}
+          </button>
         </div>
       </div>
     );
@@ -551,22 +584,32 @@ export function GameSessionReplay({
     replayComplete ? (
       <div className="flex flex-wrap items-center justify-between gap-2 pt-2">
         <div className="flex items-center gap-2 text-xs font-medium text-[var(--foreground)]/75 dark:text-white/75">
-          <Check size={13} className="text-emerald-400" />{localizeUi("ui.game.gamesessionreplay.sessionReplayComplete")}</div>
+          <Check size={13} className="text-emerald-400" />
+          {localizeUi("ui.game.gamesessionreplay.sessionReplayComplete")}
+        </div>
         <div className="flex items-center gap-2">
           <button type="button" onClick={restart} className="mari-chrome-control px-3 py-1.5 text-xs">
-            <RotateCcw size={12} />{localizeUi("ui.game.gamesessionreplay.watchAgain")}</button>
+            <RotateCcw size={12} />
+            {localizeUi("ui.game.gamesessionreplay.watchAgain")}
+          </button>
           <button
             type="button"
             onClick={exitReplay}
             className="mari-chrome-control mari-chrome-control--primary px-3 py-1.5 text-xs"
-          >{localizeUi("ui.game.gamesessionreplay.returnToCurrentSession")}</button>
+          >
+            {localizeUi("ui.game.gamesessionreplay.returnToCurrentSession")}
+          </button>
         </div>
       </div>
     ) : hasChoices ? (
       !recordedChoiceLabel ? (
         <div className="flex flex-wrap items-center justify-between gap-2 pt-2">
-          <span className="text-xs text-amber-300/80">{localizeUi("ui.game.gamesessionreplay.theOriginalChoiceWasNotRecordedForThisTurn")}</span>
-          <button type="button" onClick={advance} className="mari-chrome-control px-3 py-1.5 text-xs">{localizeUi("ui.game.gamesessionreplay.continueReplay")}<ChevronRight size={12} />
+          <span className="text-xs text-amber-300/80">
+            {localizeUi("ui.game.gamesessionreplay.theOriginalChoiceWasNotRecordedForThisTurn")}
+          </span>
+          <button type="button" onClick={advance} className="mari-chrome-control px-3 py-1.5 text-xs">
+            {localizeUi("ui.game.gamesessionreplay.continueReplay")}
+            <ChevronRight size={12} />
           </button>
         </div>
       ) : undefined
@@ -577,7 +620,9 @@ export function GameSessionReplay({
           onClick={advance}
           className="mari-chrome-control mari-chrome-control--primary px-3 py-1.5 text-xs"
         >
-          {turnIndex >= turns.length - 1 ?localizeUi("ui.game.gamesessionreplay.finishReplay") :localizeUi("ui.game.gamesessionreplay.nextTurn")}
+          {turnIndex >= turns.length - 1
+            ? localizeUi("ui.game.gamesessionreplay.finishReplay")
+            : localizeUi("ui.game.gamesessionreplay.nextTurn")}
           <ChevronRight size={12} />
         </button>
       </div>
@@ -596,8 +641,13 @@ export function GameSessionReplay({
         <div className="flex min-w-0 items-center gap-2 rounded-xl border border-white/15 bg-black/70 px-3 py-2 text-white shadow-lg backdrop-blur-md">
           <History size={14} className="shrink-0 text-[var(--primary)]" />
           <div className="min-w-0">
-            <div className="truncate text-xs font-semibold">{localizeUi("game.toolbar.session")} {sessionNumber} {localizeUi("ui.game.gamesessionreplay.replay")}</div>
-            <div className="text-[0.625rem] text-white/55">{localizeUi("ui.game.gamesurfacecomponent.turn")} {turnIndex + 1} {localizeUi("ui.noodle.noodlehome.of")} {turns.length} {localizeUi("ui.game.gamesessionreplay.readOnly")}</div>
+            <div className="truncate text-xs font-semibold">
+              {localizeUi("game.toolbar.session")} {sessionNumber} {localizeUi("ui.game.gamesessionreplay.replay")}
+            </div>
+            <div className="text-[0.625rem] text-white/55">
+              {localizeUi("ui.game.gamesurfacecomponent.turn")} {turnIndex + 1} {localizeUi("ui.noodle.noodlehome.of")}{" "}
+              {turns.length} {localizeUi("ui.game.gamesessionreplay.readOnly")}
+            </div>
           </div>
         </div>
         <button

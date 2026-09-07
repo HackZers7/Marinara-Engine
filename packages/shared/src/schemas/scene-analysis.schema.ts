@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { MAX_IMAGE_PROMPT_INSTRUCTIONS_LENGTH } from "../constants/defaults.js";
 import type { GameNpc, HudWidget } from "../types/game.js";
 import type { GameActiveState } from "../types/game.js";
 import type { SceneSpotifyTrackCandidate } from "../types/sidecar.js";
@@ -36,6 +37,8 @@ export const sceneAnalysisContextSchema = z.object({
   recentSpotifyTracks: z.array(z.string().max(300)).max(20).optional().default([]),
   currentAmbient: z.string().nullable().optional().default(null),
   currentLocation: z.string().nullable().optional().default(null),
+  /** Encounter tier while in combat (#5161); selects a music:tier:<tier> context track. Scoring-only — never sent to the analyzer LLM. */
+  enemyTier: z.string().max(40).nullable().optional().default(null),
   currentWeather: z.string().nullable(),
   currentTimeOfDay: z.string().nullable(),
   genre: z.string().nullable().optional().default(null),
@@ -44,7 +47,7 @@ export const sceneAnalysisContextSchema = z.object({
   canGenerateBackgrounds: z.boolean().optional(),
   canGenerateIllustrations: z.boolean().optional(),
   artStylePrompt: z.string().nullable().optional(),
-  imagePromptInstructions: z.string().max(5_000).nullable().optional(),
+  imagePromptInstructions: z.string().max(MAX_IMAGE_PROMPT_INSTRUCTIONS_LENGTH).nullable().optional(),
 });
 
 export const sceneAnalysisRequestSchema = z.object({

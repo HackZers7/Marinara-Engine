@@ -60,6 +60,8 @@ export interface SafeFetchOptions extends Omit<RequestInit, "dispatcher"> {
   bufferResponse?: boolean;
   decodeCompressedResponse?: boolean;
   agentOptions?: Omit<AgentOptions, "connect">;
+  /** Start TCP keepalive probes after this many idle milliseconds without exposing custom DNS/connect hooks. */
+  keepAliveInitialDelayMs?: number;
   dispatcher?: unknown;
 }
 
@@ -90,7 +92,7 @@ export function safeBasename(value: string, fallback = "file"): string {
   return name || fallback;
 }
 
-export function isAllowedImageBuffer(buffer: Buffer, expectedExt?: string): { ext: string; mimeType: string } | null {
+export function isAllowedImageBuffer(buffer: Buffer, _expectedExt?: string): { ext: string; mimeType: string } | null {
   if (
     buffer.length >= 8 &&
     buffer.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))
@@ -111,11 +113,7 @@ export function isAllowedImageBuffer(buffer: Buffer, expectedExt?: string): { ex
     const sig = buffer.subarray(0, 6).toString("ascii");
     if (sig === "GIF87a" || sig === "GIF89a") return { ext: "gif", mimeType: "image/gif" };
   }
-  if (
-    expectedExt?.toLowerCase() === ".avif" &&
-    buffer.length >= 16 &&
-    buffer.subarray(4, 8).toString("ascii") === "ftyp"
-  ) {
+  if (buffer.length >= 16 && buffer.subarray(4, 8).toString("ascii") === "ftyp") {
     const boxSize = buffer.readUInt32BE(0);
     const brandEnd = Math.min(buffer.length, boxSize > 0 ? boxSize : buffer.length);
     const acceptedBrands = new Set(["avif", "avis"]);
@@ -377,9 +375,19 @@ async function validateOutboundUrlForFetch(
   url: string | URL,
   policy: OutboundUrlPolicy = {},
   agentOptions?: Omit<AgentOptions, "connect">,
+  keepAliveInitialDelayMs?: number,
 ): Promise<{ url: URL; dispatcher?: Agent }> {
   const parsed = await validateOutboundUrl(url, policy);
-  if (policy.allowLocal) return { url: parsed, dispatcher: agentOptions ? new Agent(agentOptions) : undefined };
+  if (policy.allowLocal) {
+    const dispatcher =
+      agentOptions || keepAliveInitialDelayMs
+        ? new Agent({
+            ...(agentOptions ?? {}),
+            ...(keepAliveInitialDelayMs ? { connect: { keepAliveInitialDelay: keepAliveInitialDelayMs } } : {}),
+          })
+        : undefined;
+    return { url: parsed, dispatcher };
+  }
 
   const original = typeof url === "string" ? url : parsed.toString();
   const addresses = await validateResolvedAddresses(parsed.hostname, policy, original);
@@ -387,6 +395,7 @@ async function validateOutboundUrlForFetch(
   const dispatcher = new Agent({
     ...(agentOptions ?? {}),
     connect: {
+      ...(keepAliveInitialDelayMs ? { keepAliveInitialDelay: keepAliveInitialDelayMs } : {}),
       lookup(_hostname, options, callback) {
         if (used) {
           callback(new Error("Outbound URL resolver was reused unexpectedly"), "", 4);
@@ -614,6 +623,7 @@ export async function safeFetch(url: string | URL, options: SafeFetchOptions = {
     bufferResponse = true,
     decodeCompressedResponse = false,
     agentOptions,
+    keepAliveInitialDelayMs,
     dispatcher,
     headers,
     ...init
@@ -621,8 +631,22 @@ export async function safeFetch(url: string | URL, options: SafeFetchOptions = {
   if (dispatcher && !policy?.allowLocal) {
     throw new Error("Custom fetch dispatchers are only allowed for explicit local-provider requests");
   }
+  if (
+    keepAliveInitialDelayMs !== undefined &&
+    (!Number.isSafeInteger(keepAliveInitialDelayMs) || keepAliveInitialDelayMs <= 0)
+  ) {
+    throw new Error("TCP keepalive initial delay must be a positive integer");
+  }
+  if (dispatcher && keepAliveInitialDelayMs !== undefined) {
+    throw new Error("TCP keepalive initial delay cannot be combined with a custom fetch dispatcher");
+  }
 
-  let current = await validateOutboundUrlForFetch(url, policy, dispatcher ? undefined : agentOptions);
+  let current = await validateOutboundUrlForFetch(
+    url,
+    policy,
+    dispatcher ? undefined : agentOptions,
+    dispatcher ? undefined : keepAliveInitialDelayMs,
+  );
   const redirects = policy?.maxRedirects ?? MAX_REDIRECTS;
   let currentHeaders = headers;
   let currentInit = { ...init };
@@ -649,7 +673,7 @@ export async function safeFetch(url: string | URL, options: SafeFetchOptions = {
         currentInit = { ...currentInit };
         delete (currentInit as { body?: unknown }).body;
       }
-      current = await validateOutboundUrlForFetch(nextUrl, policy, agentOptions);
+      current = await validateOutboundUrlForFetch(nextUrl, policy, agentOptions, keepAliveInitialDelayMs);
       continue;
     }
 

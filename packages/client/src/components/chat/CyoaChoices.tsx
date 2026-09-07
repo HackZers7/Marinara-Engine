@@ -11,6 +11,7 @@ import { useUIStore } from "../../stores/ui.store";
 import { cn } from "../../lib/utils";
 import type { Message } from "@marinara-engine/shared";
 import { useTranslation as useUiTranslation } from "react-i18next";
+import { buildCyoaChoiceSubmissionPayload } from "./cyoa-choice-submission";
 
 type CyoaChoice = {
   label: string;
@@ -42,6 +43,9 @@ export function CyoaChoices({ messages }: Props) {
   const { generate, retryAgents } = useGenerate();
   const activeChatId = useChatStore((s) => s.activeChatId);
   const isStreaming = useChatStore((s) => s.isStreaming);
+  const pendingSpatialTransition = useChatStore((s) =>
+    activeChatId ? (s.pendingSpatialTransitions.get(activeChatId) ?? null) : null,
+  );
   const impersonateCyoaChoices = useUIStore((s) => s.impersonateCyoaChoices);
   const setImpersonateCyoaChoices = useUIStore((s) => s.setImpersonateCyoaChoices);
   const updateMessageExtra = useUpdateMessageExtra(activeChatId);
@@ -148,31 +152,56 @@ export function CyoaChoices({ messages }: Props) {
   const handleChoice = useCallback(
     async (text: string) => {
       if (!activeChatId || isStreaming || isEditing) return;
+      if (persistedChoiceState?.messageId) {
+        await updateMessageExtra.mutateAsync({
+          messageId: persistedChoiceState.messageId,
+          extra: { cyoaChoices: [] },
+        });
+      }
       clearChoicesForActiveChat();
+      const queuedSpatialTransition =
+        pendingSpatialTransition?.status === "ready" ? pendingSpatialTransition.transition : null;
       if (impersonateCyoaChoices) {
         const { impersonatePresetId, impersonateConnectionId, impersonateBlockAgents, impersonatePromptTemplate } =
           useUIStore.getState();
-        const trimmedPromptTemplate = impersonatePromptTemplate.trim();
-        await generate({
-          chatId: activeChatId,
-          connectionId: null,
-          impersonate: true,
-          userMessage: text,
-          ...(impersonatePresetId ? { impersonatePresetId } : {}),
-          ...(impersonateConnectionId ? { impersonateConnectionId } : {}),
-          ...(impersonateBlockAgents ? { impersonateBlockAgents: true } : {}),
-          ...(trimmedPromptTemplate ? { impersonatePromptTemplate: trimmedPromptTemplate } : {}),
-        });
+        const impersonated = await generate(
+          buildCyoaChoiceSubmissionPayload({
+            chatId: activeChatId,
+            text,
+            pendingSpatialTransition: queuedSpatialTransition,
+            impersonation: {
+              presetId: impersonatePresetId,
+              connectionId: impersonateConnectionId,
+              blockAgents: impersonateBlockAgents,
+              promptTemplate: impersonatePromptTemplate,
+            },
+          }),
+        );
+        if (impersonated) {
+          await generate({ chatId: activeChatId, connectionId: null });
+        }
         return;
       }
 
-      await generate({
-        chatId: activeChatId,
-        connectionId: null,
-        userMessage: text,
-      });
+      await generate(
+        buildCyoaChoiceSubmissionPayload({
+          chatId: activeChatId,
+          text,
+          pendingSpatialTransition: queuedSpatialTransition,
+        }),
+      );
     },
-    [activeChatId, isStreaming, isEditing, impersonateCyoaChoices, clearChoicesForActiveChat, generate],
+    [
+      activeChatId,
+      isStreaming,
+      isEditing,
+      pendingSpatialTransition,
+      impersonateCyoaChoices,
+      persistedChoiceState?.messageId,
+      clearChoicesForActiveChat,
+      generate,
+      updateMessageExtra,
+    ],
   );
 
   const handleReroll = useCallback(async () => {
@@ -240,7 +269,7 @@ export function CyoaChoices({ messages }: Props) {
           onClick={() => setImpersonateCyoaChoices(!impersonateCyoaChoices)}
           disabled={controlsBusy}
           className={cn(
-            "inline-flex items-center rounded-full border px-2 py-1 text-[0.5625rem] font-semibold transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--primary)] active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-40",
+            "inline-flex items-center rounded-md border px-2 py-1 text-[0.5625rem] font-semibold transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--primary)] active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-40",
             impersonateCyoaChoices
               ? "mari-chrome-accent-surface mari-accent-animated border-[var(--marinara-chat-chrome-button-border-active)]"
               : "border-[var(--border)] bg-[var(--muted)]/20 text-[var(--foreground)]/60 hover:bg-[var(--muted)]/40 hover:text-[var(--foreground)] dark:border-white/10 dark:bg-black/35 dark:text-white/50 dark:hover:bg-white/10 dark:hover:text-white/80",
@@ -259,11 +288,17 @@ export function CyoaChoices({ messages }: Props) {
           type="button"
           onClick={isEditing ? handleCancelEdit : handleStartEdit}
           disabled={controlsBusy}
-          className="inline-flex items-center gap-1 rounded-full border border-[var(--border)] bg-[var(--muted)]/20 px-2 py-1 text-[0.5625rem] text-[var(--foreground)]/60 transition-all hover:border-[var(--border)] hover:bg-[var(--muted)]/40 hover:text-[var(--foreground)] disabled:cursor-not-allowed disabled:opacity-40 dark:border-white/10 dark:bg-black/35 dark:text-white/50 dark:hover:bg-white/10 dark:hover:text-white/80"
-          title={isEditing ?localizeUi("ui.chat.cyoachoices.cancelEditingChoices") :localizeUi("ui.chat.cyoachoices.editCyoaChoices")}
+          className="inline-flex items-center gap-1 rounded-md border border-[var(--border)] bg-[var(--muted)]/20 px-2 py-1 text-[0.5625rem] text-[var(--foreground)]/60 transition-all hover:border-[var(--border)] hover:bg-[var(--muted)]/40 hover:text-[var(--foreground)] disabled:cursor-not-allowed disabled:opacity-40 dark:border-white/10 dark:bg-black/35 dark:text-white/50 dark:hover:bg-white/10 dark:hover:text-white/80"
+          title={
+            isEditing
+              ? localizeUi("ui.chat.cyoachoices.cancelEditingChoices")
+              : localizeUi("ui.chat.cyoachoices.editCyoaChoices")
+          }
         >
           <Pencil size="0.625rem" />
-          <span>{isEditing ?localizeUi("chat.delete.dialog.cancel") :localizeUi("ui.noodle.noodlepostcard.edit")}</span>
+          <span>
+            {isEditing ? localizeUi("chat.delete.dialog.cancel") : localizeUi("ui.noodle.noodlepostcard.edit")}
+          </span>
         </button>
         <button
           type="button"
@@ -271,11 +306,13 @@ export function CyoaChoices({ messages }: Props) {
             void handleReroll();
           }}
           disabled={controlsBusy || isEditing}
-          className="inline-flex items-center gap-1 rounded-full border border-[var(--border)] bg-[var(--muted)]/20 px-2 py-1 text-[0.5625rem] text-[var(--foreground)]/60 transition-all hover:border-[var(--border)] hover:bg-[var(--muted)]/40 hover:text-[var(--foreground)] disabled:cursor-not-allowed disabled:opacity-40 dark:border-white/10 dark:bg-black/35 dark:text-white/50 dark:hover:bg-white/10 dark:hover:text-white/80"
+          className="inline-flex items-center gap-1 rounded-md border border-[var(--border)] bg-[var(--muted)]/20 px-2 py-1 text-[0.5625rem] text-[var(--foreground)]/60 transition-all hover:border-[var(--border)] hover:bg-[var(--muted)]/40 hover:text-[var(--foreground)] disabled:cursor-not-allowed disabled:opacity-40 dark:border-white/10 dark:bg-black/35 dark:text-white/50 dark:hover:bg-white/10 dark:hover:text-white/80"
           title={localizeUi("ui.chat.cyoachoices.reRollCyoaChoicesUsingTheLatestChatContext")}
         >
           {isRerolling ? <Loader2 size="0.625rem" className="animate-spin" /> : <Dices size="0.625rem" />}
-          <span>{isRerolling ?localizeUi("ui.chat.cyoachoices.rolling") :localizeUi("ui.chat.cyoachoices.reRoll")}</span>
+          <span>
+            {isRerolling ? localizeUi("ui.chat.cyoachoices.rolling") : localizeUi("ui.chat.cyoachoices.reRoll")}
+          </span>
         </button>
       </div>
       {isEditing ? (
@@ -327,15 +364,16 @@ export function CyoaChoices({ messages }: Props) {
               ) : (
                 <Check size="0.75rem" />
               )}
-              <span>{updateMessageExtra.isPending ?localizeUi("ui.noodle.noodlehome.saving") :localizeUi("ui.chat.cyoachoices.saveChoices")}</span>
+              <span>
+                {updateMessageExtra.isPending
+                  ? localizeUi("ui.noodle.noodlehome.saving")
+                  : localizeUi("ui.chat.cyoachoices.saveChoices")}
+              </span>
             </button>
           </div>
         </div>
       ) : (
-        <div
-          className="flex flex-wrap justify-center gap-2"
-          style={{ maxWidth: TRACKER_SAFE_MAX_WIDTH }}
-        >
+        <div className="flex flex-wrap justify-center gap-2" style={{ maxWidth: TRACKER_SAFE_MAX_WIDTH }}>
           {choices.map((choice, i) => (
             <button
               key={i}

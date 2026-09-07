@@ -3,9 +3,8 @@ import {
   GENERATION_PARAMETER_SEND_KEYS,
   SUMMARY_TAIL_MESSAGES,
   applyTrackerFieldLocksToGameStatePatch,
-  compileChatSummaryEntries,
   generationParametersSchema,
-  normalizeChatSummaryEntries,
+  normalizeInventoryTrackerRows,
   normalizeTextForMatch,
   normalizeSummaryTailMessages,
   normalizeWorldCustomFields,
@@ -20,7 +19,7 @@ import {
   type GameState,
   type GenerationParameterSendMap,
   type GenerationParameters,
-  type InventoryItem,
+  type InventoryTrackerRow,
   type MacroContext,
   type PlayerStats,
   type WrapFormat,
@@ -40,6 +39,10 @@ export {
   type LocalSidecarGenerationConnection,
 } from "../../services/generation/local-sidecar-generation-connection.js";
 export {
+  resolveRoleplayChatSummary,
+  resolveRoleplayChatSummaryForPrompt,
+} from "../../services/generation/roleplay-summary-retrieval.js";
+export {
   appendReadableAttachmentsToContent,
   buildReadableAttachmentBlocks,
   escapeXmlAttribute,
@@ -56,6 +59,7 @@ export type SimpleMessage = {
   images?: string[];
   files?: Array<{ type: string; data: string; filename?: string }>;
   contextKind?: "prompt" | "history" | "injection";
+  providerMetadata?: Record<string, unknown>;
 };
 export type SpeakerPrefixMessage = SimpleMessage & {
   characterId?: string | null;
@@ -64,6 +68,24 @@ export type SpeakerPrefixMessage = SimpleMessage & {
   providerMetadata?: Record<string, unknown>;
 };
 export type StoredGenerationParameters = Partial<GenerationParameters>;
+
+export function hasProviderMessagePayload(message: {
+  content: string;
+  images?: unknown[];
+  files?: unknown[];
+  providerMetadata?: Record<string, unknown>;
+  tool_calls?: unknown[];
+  tool_call_id?: string;
+}): boolean {
+  return (
+    !!message.content.trim() ||
+    !!message.images?.length ||
+    !!message.files?.length ||
+    Object.keys(message.providerMetadata ?? {}).length > 0 ||
+    !!message.tool_calls?.length ||
+    !!message.tool_call_id
+  );
+}
 
 /**
  * Preserve the route-layer export while sharing the same Persona policy with
@@ -102,6 +124,7 @@ export function buildGenerationGuideInstruction(
     {
       ...promptMacroContext,
       variables: { ...promptMacroContext.variables },
+      localVariables: { ...promptMacroContext.localVariables },
     },
     { trimResult: false },
   ).trim();
@@ -167,6 +190,122 @@ export function buildLockedPlayerStatsArrayPatch<T>({
   return { changed, patch, playerStats, values: lockedValues };
 }
 
+const INVENTORY_TRACKER_PLAYER_STATS_FIELDS = [
+  "inventoryTrackerCurrencies",
+  "inventoryTrackerEquipped",
+  "inventoryTrackerInventory",
+] as const;
+
+type InventoryTrackerPlayerStatsField = (typeof INVENTORY_TRACKER_PLAYER_STATS_FIELDS)[number];
+type InventoryTrackerPlayerStats = Pick<PlayerStats, InventoryTrackerPlayerStatsField>;
+
+function inventoryTrackerQuantityMap(
+  playerStats: InventoryTrackerPlayerStats,
+): Map<string, { name: string; quantity: number }> {
+  const quantities = new Map<string, { name: string; quantity: number }>();
+  for (const field of INVENTORY_TRACKER_PLAYER_STATS_FIELDS) {
+    for (const row of normalizeInventoryTrackerRows(playerStats[field])) {
+      const key = normalizeTextForMatch(row.name);
+      if (!key) continue;
+      const existing = quantities.get(key);
+      quantities.set(key, {
+        name: row.name,
+        quantity: (existing?.quantity ?? 0) + (row.qty ?? 1),
+      });
+    }
+  }
+  return quantities;
+}
+
+/** New owned quantities only; moving an item between tracker groups is not an acquisition. */
+export function findInventoryTrackerAcquisitions(
+  previousPlayerStats: InventoryTrackerPlayerStats,
+  nextPlayerStats: InventoryTrackerPlayerStats,
+): Array<{ name: string; quantity: number }> {
+  const previous = inventoryTrackerQuantityMap(previousPlayerStats);
+  const next = inventoryTrackerQuantityMap(nextPlayerStats);
+  const acquisitions: Array<{ name: string; quantity: number }> = [];
+  for (const [key, item] of next) {
+    const quantity = item.quantity - (previous.get(key)?.quantity ?? 0);
+    if (quantity > 0) acquisitions.push({ name: item.name, quantity });
+  }
+  return acquisitions;
+}
+
+// `clampInventoryTrackerQty` and `normalizeInventoryTrackerRows` now live in
+// `@marinara-engine/shared` so the hand-edit paths (tracker panel, HUD popover,
+// Agent Suite editor, chat game-state route) apply the same rules this route
+// already applied to agent output.
+
+export function buildLockedInventoryTrackerPatch({
+  data,
+  snapshot,
+  lockState,
+}: {
+  data: Record<string, unknown>;
+  snapshot: { playerStats?: unknown } | null | undefined;
+  lockState: GameState | null | undefined;
+}) {
+  const existingPlayerStats = parseSnapshotPlayerStats(snapshot);
+  const existingRows = (field: InventoryTrackerPlayerStatsField): InventoryTrackerRow[] => {
+    const rows = existingPlayerStats[field];
+    return Array.isArray(rows) ? (rows as InventoryTrackerRow[]) : [];
+  };
+
+  // Only a group the agent actually emitted may rewrite that group. Treating an
+  // absent key as an empty array wipes state the model simply did not mention
+  // this turn — the destructive absent-vs-empty failure mode from #2370/#2724.
+  const emittedCurrencies = Array.isArray(data.currencies);
+  const emittedEquipped = Array.isArray(data.equipped);
+  const emittedInventory = Array.isArray(data.inventory);
+
+  const currencies = emittedCurrencies
+    ? normalizeInventoryTrackerRows(data.currencies)
+    : existingRows("inventoryTrackerCurrencies");
+  const equipped = emittedEquipped
+    ? normalizeInventoryTrackerRows(data.equipped)
+    : existingRows("inventoryTrackerEquipped");
+  const carried = emittedInventory
+    ? normalizeInventoryTrackerRows(data.inventory)
+    : existingRows("inventoryTrackerInventory");
+
+  const excludedNames = new Set([...currencies, ...equipped].map((row) => normalizeTextForMatch(row.name)));
+  const inventory = carried.filter((row) => !excludedNames.has(normalizeTextForMatch(row.name)));
+
+  const rawPlayerStatsPatch: Partial<Record<InventoryTrackerPlayerStatsField, InventoryTrackerRow[]>> = {};
+  if (emittedCurrencies) rawPlayerStatsPatch.inventoryTrackerCurrencies = currencies;
+  if (emittedEquipped) rawPlayerStatsPatch.inventoryTrackerEquipped = equipped;
+  // Equipping an item has to drop it from a carried list the agent did not
+  // resend, so write the carried group when exclusivity actually changed it too.
+  if (emittedInventory || !isDeepStrictEqual(inventory, carried)) {
+    rawPlayerStatsPatch.inventoryTrackerInventory = inventory;
+  }
+
+  if (Object.keys(rawPlayerStatsPatch).length === 0) {
+    return { changed: false, patch: { playerStats: {} }, playerStats: existingPlayerStats, values: {} };
+  }
+
+  const lockedPatch = applyTrackerFieldLocksToGameStatePatch({ playerStats: rawPlayerStatsPatch }, lockState);
+  const lockedPlayerStatsPatch = extractPlayerStatsPatch(lockedPatch);
+  const values: Partial<Record<InventoryTrackerPlayerStatsField, InventoryTrackerRow[]>> = {};
+  for (const field of INVENTORY_TRACKER_PLAYER_STATS_FIELDS) {
+    const locked = lockedPlayerStatsPatch[field];
+    if (Array.isArray(locked)) values[field] = locked as InventoryTrackerRow[];
+    else if (rawPlayerStatsPatch[field]) values[field] = rawPlayerStatsPatch[field];
+  }
+
+  const changed = Object.entries(values).some(([field, rows]) => {
+    const existing = existingPlayerStats[field as keyof PlayerStats];
+    return !isDeepStrictEqual(rows, Array.isArray(existing) ? existing : []);
+  });
+  return {
+    changed,
+    patch: { playerStats: values },
+    playerStats: { ...existingPlayerStats, ...values },
+    values,
+  };
+}
+
 function parseSnapshotPersonaStats(snapshot: { personaStats?: unknown } | null | undefined): CharacterStat[] {
   const raw = snapshot?.personaStats;
   if (!raw) return [];
@@ -181,19 +320,15 @@ function parseSnapshotPersonaStats(snapshot: { personaStats?: unknown } | null |
 export function buildLockedPersonaTrackerPatch({
   stats,
   status,
-  inventory,
   hasStats,
   hasStatus,
-  hasInventory,
   snapshot,
   lockState,
 }: {
   stats: CharacterStat[];
   status: string;
-  inventory: InventoryItem[];
   hasStats?: boolean;
   hasStatus?: boolean;
-  hasInventory?: boolean;
   snapshot: { personaStats?: unknown; playerStats?: unknown } | null | undefined;
   lockState: GameState | null | undefined;
 }) {
@@ -202,7 +337,6 @@ export function buildLockedPersonaTrackerPatch({
 
   const rawPlayerStatsPatch: Record<string, unknown> = {};
   if (hasStatus ?? !!status) rawPlayerStatsPatch.status = status;
-  if (hasInventory ?? inventory.length > 0) rawPlayerStatsPatch.inventory = inventory;
   if (Object.keys(rawPlayerStatsPatch).length > 0) rawPatch.playerStats = rawPlayerStatsPatch;
 
   const patch = applyTrackerFieldLocksToGameStatePatch(rawPatch, lockState);
@@ -222,19 +356,11 @@ export function buildLockedPersonaTrackerPatch({
     playerStats.status = typeof lockedPlayerStatsPatch.status === "string" ? lockedPlayerStatsPatch.status : "";
     hasPlayerStatsPatch = true;
   }
-  if (Array.isArray(lockedPlayerStatsPatch.inventory)) {
-    playerStats.inventory = lockedPlayerStatsPatch.inventory as InventoryItem[];
-    hasPlayerStatsPatch = true;
-  }
-
   const playerStatsChanged = hasPlayerStatsPatch && !isDeepStrictEqual(playerStats, existingPlayerStats);
   if (playerStatsChanged) updates.playerStats = JSON.stringify(playerStats);
 
   return {
     changed: personaStatsChanged || playerStatsChanged,
-    inventory: Array.isArray(lockedPlayerStatsPatch.inventory)
-      ? (lockedPlayerStatsPatch.inventory as InventoryItem[])
-      : [],
     patch,
     updates,
   };
@@ -334,23 +460,47 @@ export function findLastIndex(messages: SimpleMessage[], role: string): number {
 
 function isLastMessagePromptBlock(content: unknown): boolean {
   if (typeof content !== "string") return false;
-  return /<\/?last_message>/i.test(content) || /(?:^|\n)\s*##\s+Last Message\s*(?:\n|$)/i.test(content);
+  const trimmed = content.trim();
+  const lowerContent = trimmed.toLowerCase();
+  if (lowerContent.startsWith("<last_message>") || lowerContent.endsWith("</last_message>")) return true;
+  const firstNewline = trimmed.indexOf("\n");
+  return isLastMessageHeadingLine(firstNewline >= 0 ? trimmed.slice(0, firstNewline) : trimmed);
+}
+
+function isLastMessageHeadingLine(line: string): boolean {
+  const heading = line.trim();
+  if (!heading.startsWith("##") || !/\s/u.test(heading[2] ?? "")) return false;
+  return heading.slice(2).trim().toLowerCase() === "last message";
 }
 
 function stripBoundaryLastMessageWrapper(content: string): string {
-  return content
-    .replace(/^\s*<last_message>\s*\n?/i, "")
-    .replace(/\n?\s*<\/last_message>\s*$/i, "")
-    .replace(/^\s*##\s+Last Message\s*\n/i, "")
-    .trim();
+  let stripped = content.trim();
+  if (stripped.toLowerCase().startsWith("<last_message>")) {
+    stripped = stripped.slice("<last_message>".length).trimStart();
+  }
+  if (stripped.toLowerCase().endsWith("</last_message>")) {
+    stripped = stripped.slice(0, -"</last_message>".length).trimEnd();
+  }
+  const firstNewline = stripped.indexOf("\n");
+  const firstLine = firstNewline >= 0 ? stripped.slice(0, firstNewline) : stripped;
+  if (isLastMessageHeadingLine(firstLine)) {
+    stripped = firstNewline >= 0 ? stripped.slice(firstNewline + 1) : "";
+  }
+  return stripped.trim();
 }
 
 function hasBoundaryChatHistoryClose(content: string): boolean {
-  return /\n?\s*<\/chat_history>\s*$/i.test(content);
+  const trimmed = content.trimEnd();
+  const closingTag = "</chat_history>";
+  return trimmed.slice(-closingTag.length).toLowerCase() === closingTag;
 }
 
 function stripBoundaryChatHistoryClose(content: string): string {
-  return content.replace(/\n?\s*<\/chat_history>\s*$/i, "").trimEnd();
+  const trimmed = content.trimEnd();
+  const closingTag = "</chat_history>";
+  return trimmed.slice(-closingTag.length).toLowerCase() === closingTag
+    ? trimmed.slice(0, -closingTag.length).trimEnd()
+    : trimmed;
 }
 
 function appendBoundaryChatHistoryClose(content: string): string {
@@ -517,7 +667,25 @@ export function getMessageHiddenFromAICharacterIds(message: { extra?: unknown })
   const value = parseExtra(message.extra).hiddenFromAICharacterIds;
   if (!Array.isArray(value)) return [];
   return Array.from(
-    new Set(value.filter((item): item is string => typeof item === "string").map((item) => item.trim()).filter(Boolean)),
+    new Set(
+      value
+        .filter((item): item is string => typeof item === "string")
+        .map((item) => item.trim())
+        .filter(Boolean),
+    ),
+  );
+}
+
+export function getMessageConversationStartCharacterIds(message: { extra?: unknown }): string[] {
+  const value = parseExtra(message.extra).conversationStartForCharacterIds;
+  if (!Array.isArray(value)) return [];
+  return Array.from(
+    new Set(
+      value
+        .filter((item): item is string => typeof item === "string")
+        .map((item) => item.trim())
+        .filter(Boolean),
+    ),
   );
 }
 
@@ -566,6 +734,22 @@ export function computeSummaryHideIds(args: {
   return messages
     .filter((message) => entryIdSet.has(message.id) && !tailIdSet.has(message.id))
     .map((message) => message.id);
+}
+
+/** Return the one-based range covered by selected messages in the full chat order. */
+export function computeSummaryMessageRange(
+  allMessages: readonly { id: string }[],
+  selectedMessages: readonly { id: string }[],
+): { startIndex: number; endIndex: number } | null {
+  const messageIndexes = new Map(allMessages.map((message, index) => [message.id, index + 1]));
+  const selectedIndexes = selectedMessages
+    .map((message) => messageIndexes.get(message.id))
+    .filter((index): index is number => index !== undefined);
+  if (selectedIndexes.length === 0) return null;
+  return {
+    startIndex: Math.min(...selectedIndexes),
+    endIndex: Math.max(...selectedIndexes),
+  };
 }
 
 /**
@@ -625,27 +809,6 @@ export function selectRollingSummaryMessages<T extends { id: string; extra?: unk
     .slice(lastBoundaryIndex + 1)
     .filter((message) => !isMessageHiddenFromAI(message)).length;
   return visible.slice(-Math.max(size, sinceBoundary));
-}
-
-export function resolveRoleplayChatSummary(
-  chatMode: string,
-  chatMetadata: Record<string, unknown>,
-  options: { excludeMessageIds?: readonly string[] } = {},
-): string | null {
-  if (!isRoleplaySummaryMode(chatMode)) return null;
-  const summary = ((chatMetadata.summary as string) ?? "").trim() || null;
-  const excludedMessageIds = new Set((options.excludeMessageIds ?? []).filter(Boolean));
-  if (excludedMessageIds.size === 0) return summary;
-
-  const entries = normalizeChatSummaryEntries(chatMetadata.summaryEntries);
-  // Legacy summaries have no per-message provenance, so they cannot be
-  // safely retained while regenerating a historical message.
-  if (entries.length === 0) return null;
-  const retainedEntries = entries.filter((entry) => {
-    const coveredMessageIds = [...(entry.messageIds ?? []), ...(entry.hiddenMessageIds ?? [])];
-    return !coveredMessageIds.some((messageId) => excludedMessageIds.has(messageId));
-  });
-  return retainedEntries.length === entries.length ? summary : compileChatSummaryEntries(retainedEntries);
 }
 
 function escapeRegex(value: string): string {
@@ -813,6 +976,8 @@ export function appendGenerationTailMessages(
   messages: SimpleMessage[],
   options: {
     assistantPrefill: string;
+    assistantReasoningPrefill: string;
+    supportsAssistantReasoningPrefill: boolean;
     followUpIteration: number;
     impersonate: boolean;
     isGoogleProvider: boolean;
@@ -827,13 +992,29 @@ export function appendGenerationTailMessages(
     !options.impersonate && options.isGoogleProvider && !!options.regenerateUserMessage;
   const assistantPrefill = options.assistantPrefill.trim();
   const shouldAppendAssistantPrefill = !options.impersonate && !!assistantPrefill;
+  const assistantReasoningPrefill = options.assistantReasoningPrefill.trim();
+  const shouldAppendReasoningPrefill =
+    !options.impersonate && options.supportsAssistantReasoningPrefill && !!assistantReasoningPrefill;
+  const shouldAppendAssistantMessage =
+    !options.impersonate && (shouldAppendAssistantPrefill || shouldAppendReasoningPrefill);
 
-  if (shouldAppendAssistantPrefill) {
+  if (shouldAppendAssistantMessage) {
     // Strip the trailing edge: Anthropic's Messages API rejects a final assistant
     // message ending in whitespace (HTTP 400), which surfaces to users as a refusal.
     // A prefill ending in "\n" or a space is common. The user-facing prefill is
     // rendered separately, so only what is sent to the API is trimmed.
-    messages.push({ role: "assistant", content: options.assistantPrefill.trimEnd() });
+    messages.push({
+      role: "assistant",
+      content: shouldAppendAssistantPrefill ? options.assistantPrefill.trimEnd() : "",
+      ...(shouldAppendReasoningPrefill
+        ? {
+            providerMetadata: {
+              reasoning_content: options.assistantReasoningPrefill.trimEnd(),
+              partial: true,
+            },
+          }
+        : {}),
+    });
   }
 
   if (shouldAppendGoogleUserRegeneration) {
@@ -862,6 +1043,43 @@ export function resolveActiveCharacterIds(
   return characterIds;
 }
 
+export function resolveCharacterActivityUpdate(
+  data: unknown,
+  chatCharacterIds: string[],
+): { activeCharacterIds: string[]; inactiveCharacterIds: string[] } | null {
+  if (!data || typeof data !== "object" || Array.isArray(data)) return null;
+  const requestedIds = (data as Record<string, unknown>).activeCharacterIds;
+  if (!Array.isArray(requestedIds) || requestedIds.length === 0) return null;
+
+  const allowedIds = new Set(chatCharacterIds);
+  const selectedIds = new Set<string>();
+  for (const id of requestedIds) {
+    if (typeof id !== "string" || !allowedIds.has(id)) return null;
+    selectedIds.add(id);
+  }
+
+  const activeCharacterIds = chatCharacterIds.filter((id) => selectedIds.has(id));
+  if (activeCharacterIds.length === 0) return null;
+  return {
+    activeCharacterIds,
+    inactiveCharacterIds: chatCharacterIds.filter((id) => !selectedIds.has(id)),
+  };
+}
+
+export function shouldRunCharacterActivityAgents(options: {
+  mode: string;
+  impersonate: boolean;
+  regenerateMessageId?: string | null;
+  continueMessageId?: string | null;
+}): boolean {
+  return (
+    (options.mode === "conversation" || options.mode === "roleplay") &&
+    !options.impersonate &&
+    !options.regenerateMessageId &&
+    !options.continueMessageId
+  );
+}
+
 export type GroupGenerationMode = "merged" | "individual";
 
 /** Resolve the stored generation mode for every group-capable chat mode. */
@@ -878,7 +1096,11 @@ export function shouldRestoreRegenerationCharacterTarget(
   characterIds: string[],
 ): boolean {
   const isRoleplayGroup = chatMode === "roleplay";
-  return !(isRoleplayGroup && characterIds.length > 1 && resolveGroupGenerationMode(chatMode, configuredMode) === "merged");
+  return !(
+    isRoleplayGroup &&
+    characterIds.length > 1 &&
+    resolveGroupGenerationMode(chatMode, configuredMode) === "merged"
+  );
 }
 
 export function resolvePromptCharacterIdsForTarget(
@@ -908,11 +1130,7 @@ export function resolveVisibleGameStateAnchor(
     const message = messages[index]!;
     const markedSystemAnchor =
       message.role === "system" && parseExtra(message.extra).gameStateAnchor === "checkpoint_restore";
-    if (
-      (message.role !== "assistant" && !markedSystemAnchor) ||
-      typeof message.id !== "string" ||
-      !message.id
-    ) {
+    if ((message.role !== "assistant" && !markedSystemAnchor) || typeof message.id !== "string" || !message.id) {
       continue;
     }
     const swipeIndex =
@@ -1079,6 +1297,9 @@ export function parseStoredGenerationParameters(raw: unknown): StoredGenerationP
     out.serviceTier = source.serviceTier as StoredGenerationParameters["serviceTier"];
   }
   if (typeof source.assistantPrefill === "string") out.assistantPrefill = source.assistantPrefill;
+  if (typeof source.assistantReasoningPrefill === "string") {
+    out.assistantReasoningPrefill = source.assistantReasoningPrefill;
+  }
   if (Array.isArray(source.customThinkingTags)) {
     out.customThinkingTags = normalizeThinkingTagPairs(source.customThinkingTags);
   }
@@ -1086,8 +1307,9 @@ export function parseStoredGenerationParameters(raw: unknown): StoredGenerationP
     out.customParameters = mergeCustomParameters({}, source.customParameters);
   }
   if (isPlainRecord(source.managedCustomParameters)) {
-    const managedCustomParameters =
-      generationParametersSchema.shape.managedCustomParameters.safeParse(source.managedCustomParameters);
+    const managedCustomParameters = generationParametersSchema.shape.managedCustomParameters.safeParse(
+      source.managedCustomParameters,
+    );
     if (managedCustomParameters.success) out.managedCustomParameters = managedCustomParameters.data;
   }
   if (isPlainRecord(source.enabledParameters)) {
@@ -1276,6 +1498,64 @@ type TrackerCharacterCardIdentity = {
   avatarCrop?: unknown;
 };
 
+function getExplicitNameAliases(value: unknown): string[] {
+  if (typeof value !== "string") return [];
+  const aliases = new Set<string>();
+  const patterns = [
+    /"([^"\n]{1,80})"/gu,
+    /“([^”\n]{1,80})”/gu,
+    /'([^'\n]{1,80})'/gu,
+    /‘([^’\n]{1,80})’/gu,
+    /\(([^()\n]{1,80})\)/gu,
+  ];
+  for (const pattern of patterns) {
+    for (const match of value.matchAll(pattern)) {
+      const alias = normalizeTextForMatch(match[1]);
+      if (alias) aliases.add(alias);
+    }
+  }
+  return [...aliases];
+}
+
+function buildUniqueCanonicalNames(names: readonly string[]): Map<string, string> {
+  const namesByKey = new Map<string, string>();
+  const duplicateKeys = new Set<string>();
+  for (const name of names) {
+    const trimmedName = name.trim();
+    const key = normalizeTextForMatch(trimmedName);
+    if (!key) continue;
+    if (namesByKey.has(key)) duplicateKeys.add(key);
+    else namesByKey.set(key, trimmedName);
+  }
+  for (const key of duplicateKeys) namesByKey.delete(key);
+  return namesByKey;
+}
+
+function resolveExplicitCanonicalName(value: unknown, namesByKey: Map<string, string>): string | null {
+  const exactName = namesByKey.get(normalizeTextForMatch(value));
+  if (exactName) return exactName;
+
+  const aliasMatches = getExplicitNameAliases(value)
+    .map((alias) => namesByKey.get(alias))
+    .filter((candidate): candidate is string => !!candidate);
+  const uniqueMatches = new Set(aliasMatches);
+  return uniqueMatches.size === 1 ? aliasMatches[0]! : null;
+}
+
+/** Canonicalize only structured Game Mode VN speaker labels, leaving prose and ambiguous aliases unchanged. */
+export function canonicalizeGamePartySpeakerLabels(content: string, canonicalNames: readonly string[]): string {
+  const namesByKey = buildUniqueCanonicalNames(canonicalNames);
+  if (!content || namesByKey.size === 0) return content;
+
+  return content.replace(
+    /^(\s*)\[([^\]\r\n]+)\](\s+\[(?:main|side|thought|whisper:[^\]\r\n]+)\]\s+\[[^\]\r\n]+\]\s*:)/gmu,
+    (line, indentation: string, speakerName: string, suffix: string) => {
+      const canonicalName = resolveExplicitCanonicalName(speakerName, namesByKey);
+      return canonicalName ? `${indentation}[${canonicalName}]${suffix}` : line;
+    },
+  );
+}
+
 export function applyTrackerCharacterCardIdentity(
   characters: Array<Record<string, unknown>>,
   cards: TrackerCharacterCardIdentity[],
@@ -1290,16 +1570,42 @@ export function applyTrackerCharacterCardIdentity(
     else cardsByName.set(name, card);
   }
   for (const name of duplicateNames) cardsByName.delete(name);
+  const canonicalCardNamesByKey = new Map([...cardsByName].map(([key, card]) => [key, card.name]));
 
   const matchedIds = new Set<string>();
+  const canonicalCharacters: Array<Record<string, unknown>> = [];
+  const canonicalIndexByCardId = new Map<string, number>();
   for (const character of characters) {
-    const card = cardsById.get(trackerCharacterIdKey(character)) ?? cardsByName.get(trackerCharacterNameKey(character));
-    if (!card) continue;
-    character.characterId = card.id;
-    character.avatarPath = card.avatarPath ?? null;
-    character.avatarCrop = card.avatarCrop ?? null;
+    const explicitCanonicalName = resolveExplicitCanonicalName(character.name, canonicalCardNamesByKey);
+    const card =
+      cardsById.get(trackerCharacterIdKey(character)) ??
+      cardsByName.get(trackerCharacterNameKey(character)) ??
+      (explicitCanonicalName ? cardsByName.get(normalizeTextForMatch(explicitCanonicalName)) : undefined);
+    if (!card) {
+      canonicalCharacters.push(character);
+      continue;
+    }
+
+    const canonicalCharacter = {
+      ...character,
+      characterId: card.id,
+      name: card.name,
+      avatarPath: card.avatarPath ?? null,
+      avatarCrop: card.avatarCrop ?? null,
+    };
+    const existingIndex = canonicalIndexByCardId.get(card.id);
+    if (existingIndex === undefined) {
+      canonicalIndexByCardId.set(card.id, canonicalCharacters.length);
+      canonicalCharacters.push(canonicalCharacter);
+    } else {
+      canonicalCharacters[existingIndex] = {
+        ...canonicalCharacters[existingIndex],
+        ...canonicalCharacter,
+      };
+    }
     matchedIds.add(card.id);
   }
+  characters.splice(0, characters.length, ...canonicalCharacters);
   return matchedIds;
 }
 

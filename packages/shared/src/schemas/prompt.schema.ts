@@ -20,6 +20,7 @@ export const markerTypeSchema = z.enum([
   "persona",
   "chat_history",
   "chat_summary",
+  "id_macro_cards",
   "world_info_before",
   "world_info_after",
   "dialogue_examples",
@@ -52,6 +53,7 @@ export const generationParametersSchema = z.object({
   verbosity: z.enum(["low", "medium", "high"]).nullable().default(null),
   serviceTier: z.enum(["flex", "priority"]).nullable().default(null),
   assistantPrefill: z.string().default(""),
+  assistantReasoningPrefill: z.string().default(""),
   customThinkingTags: z
     .array(
       z.object({
@@ -136,6 +138,7 @@ export const updatePromptGroupSchema = createPromptGroupSchema.omit({ presetId: 
 export const createPromptPresetSchema = z.object({
   name: z.string().min(1).max(200),
   description: z.string().default(""),
+  imagePath: z.string().nullable().default(null),
   conversationPrompt: z.string().default(""),
   gamePrompt: z.string().default(""),
   variableGroups: z.array(promptVariableGroupSchema).default([]),
@@ -149,6 +152,7 @@ export const createPromptPresetSchema = z.object({
 export const updatePromptPresetSchema = z.object({
   name: z.string().min(1).max(200).optional(),
   description: z.string().optional(),
+  imagePath: z.string().nullable().optional(),
   conversationPrompt: z.string().optional(),
   gamePrompt: z.string().optional(),
   sectionOrder: z.array(z.string()).optional(),

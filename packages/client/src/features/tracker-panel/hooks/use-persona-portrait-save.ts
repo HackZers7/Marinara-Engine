@@ -1,7 +1,7 @@
 import { useCallback, useRef } from "react";
 import { useTranslation as useUiTranslation } from "react-i18next";
 import { toast } from "sonner";
-import { useUpdatePersona } from "../../../hooks/use-characters";
+import { useUpdatePersonaTrackerCard } from "../../../hooks/use-characters";
 
 const PERSONA_PORTRAIT_SAVE_MAX_ATTEMPTS = 3;
 const PERSONA_PORTRAIT_SAVE_RETRY_DELAY_MS = 400;
@@ -21,7 +21,7 @@ interface PendingPersonaPortraitSave {
 
 export function usePersonaPortraitSaveCoordinator() {
   const { t: localizeUi } = useUiTranslation();
-  const { mutateAsync } = useUpdatePersona();
+  const { mutateAsync } = useUpdatePersonaTrackerCard();
   const pendingSaveByPersonaIdRef = useRef(new Map<string, PendingPersonaPortraitSave>());
   const latestSaveVersionByPersonaIdRef = useRef(new Map<string, number>());
   const nextSaveVersionRef = useRef(0);
@@ -75,13 +75,16 @@ export function usePersonaPortraitSaveCoordinator() {
     pendingSaveByPersonaIdRef.current.set(snapshot.id, { attempt: 1, snapshot, version });
   }, []);
 
-  const flushPersonaPortraitSave = useCallback((personaId: string) => {
-    const pendingSave = pendingSaveByPersonaIdRef.current.get(personaId);
-    if (!pendingSave) return;
-    pendingSaveByPersonaIdRef.current.delete(personaId);
-    flushQueueRef.current.push(pendingSave);
-    void drainPersonaPortraitSaves();
-  }, [drainPersonaPortraitSaves]);
+  const flushPersonaPortraitSave = useCallback(
+    (personaId: string) => {
+      const pendingSave = pendingSaveByPersonaIdRef.current.get(personaId);
+      if (!pendingSave) return;
+      pendingSaveByPersonaIdRef.current.delete(personaId);
+      flushQueueRef.current.push(pendingSave);
+      void drainPersonaPortraitSaves();
+    },
+    [drainPersonaPortraitSaves],
+  );
 
   return { queuePersonaPortraitSave, flushPersonaPortraitSave };
 }

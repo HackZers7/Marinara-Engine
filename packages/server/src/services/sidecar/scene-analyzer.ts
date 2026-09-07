@@ -11,6 +11,7 @@ import {
   LOCATION_KINDS,
   MUSIC_GENRES,
   MUSIC_INTENSITIES,
+  MAX_IMAGE_PROMPT_INSTRUCTIONS_LENGTH,
   type HudWidget,
   type GameNpc,
   type GameActiveState,
@@ -54,6 +55,8 @@ export interface SceneAnalyzerContext {
   currentAmbient?: string | null;
   /** Current tracked in-world location. */
   currentLocation?: string | null;
+  /** Encounter tier while in combat (#5161). Scoring-only — never sent to the analyzer LLM. */
+  enemyTier?: string | null;
   /** Current weather. */
   currentWeather: string | null;
   /** Current time of day. */
@@ -77,7 +80,10 @@ export interface SceneAnalyzerContext {
 /** Build the system prompt for scene analysis — kept minimal so all token
  *  budget goes to the user message where the actual choices live. */
 export function buildSceneAnalyzerSystemPrompt(ctx: SceneAnalyzerContext): string {
-  const generatedAudio = ctx.generateSoundEffects || (ctx.generateMusic && !ctx.useSpotifyMusic);
+  // Music is never a free-text prompt anymore (#5161): the analyzer emits
+  // genre/intensity hints and deterministic scoring picks the track — context
+  // tracks included. Only SFX still generate from analyzer-written prompts.
+  const generatedAudio = ctx.generateSoundEffects;
   return `You are a game state analyzer. Read the narration, then fill in the JSON template using ${
     generatedAudio
       ? "the exact provided tags for asset-backed fields and concise descriptive prompts for enabled generated audio"
@@ -115,8 +121,8 @@ function buildBackgroundOptions(ctx?: SceneAnalyzerContext): string[] {
   return options;
 }
 
-function compactImagePromptInstructions(value: string | null | undefined): string {
-  return (value ?? "").trim().replace(/\s+/g, " ").slice(0, 5000);
+export function compactImagePromptInstructions(value: string | null | undefined): string {
+  return (value ?? "").trim().replace(/\s+/g, " ").slice(0, MAX_IMAGE_PROMPT_INSTRUCTIONS_LENGTH);
 }
 
 function compactPromptLabel(value: string | null | undefined): string {
@@ -247,7 +253,6 @@ export function buildSceneAnalyzerUserPrompt(
   const locationKindOptions = [...LOCATION_KINDS, "null"].join(" | ");
   const useSpotifyMusic = !!ctx?.useSpotifyMusic;
   const generateSoundEffects = !!ctx?.generateSoundEffects;
-  const generateMusic = !!ctx?.generateMusic && !useSpotifyMusic;
   const spotifyOptions = (ctx?.availableSpotifyTracks ?? []).slice(0, 50);
   const recentSpotifyTracks = Array.from(
     new Set([ctx?.currentSpotifyTrack ?? null, ...(ctx?.recentSpotifyTracks ?? [])]),
@@ -317,10 +322,6 @@ export function buildSceneAnalyzerUserPrompt(
       ? [
           `2. AUDIO DIRECTION — Choose locationKind for ambient scoring, and set spotifyTrack to ONE Spotify URI from SPOTIFY TRACK OPTIONS that best fits the just-finished turn. Use null only if there are no suitable options. Do NOT output musicGenre or musicIntensity.`,
         ]
-      : generateMusic
-        ? [
-            `2. AUDIO DIRECTION — Choose locationKind for ambient scoring, and set music to a concise prompt for instrumental scene music. The prompt should describe genre, mood, intensity, and useful transitions. Use null only when the current music should continue.`,
-          ]
       : [
           `2. AUDIO DIRECTION — Choose compact musicGenre/musicIntensity/locationKind hints. Do NOT choose music or ambient file tags; Marinara maps these hints to assets deterministically. Do NOT output spotifyTrack.`,
         ]),
@@ -331,9 +332,7 @@ export function buildSceneAnalyzerUserPrompt(
         ? "short, concrete sound-generation prompts (for example: quiet footsteps on wet stone, distant wooden door slam)"
         : "sound effects (door slam, explosion, footsteps, impact)"
     }`,
-    ...(generateMusic
-      ? [`   - "music": a new instrumental music prompt only when the score should transition at this beat`]
-      : []),
+    `   - "sfxLoopCount": optional total play count from 1 to 5 when a sound should repeat on that beat; omit it for one play`,
     `   - "directions": rare cinematic effects at the exact beat they should happen, usually paired with a meaningful sound or reveal`,
     `   - "background": a DIFFERENT background tag if the characters move to a new location at that beat. The background stays the same until the NEXT segment that changes it, so only set "background" on the beat where characters actually arrive at a new location. Do NOT repeat the current background.`,
     `   Only include segments that HAVE at least one effect — omit empty segments.`,
@@ -356,8 +355,8 @@ export function buildSceneAnalyzerUserPrompt(
     ``,
     `RULES:`,
     `- Use ONLY the exact tags listed in the template below for asset-backed fields. If backgrounds:generated:<short-location-slug> is listed, replace <short-location-slug> with a short concrete location slug.${
-      generateSoundEffects || generateMusic
-        ? " Generated audio prompts are the only exception: describe the requested sound or instrumental music plainly."
+      generateSoundEffects
+        ? " Generated sound-effect prompts are the only exception: describe the requested sound plainly."
         : ""
     }`,
     `- Expressions and widget updates are handled by the GM model. Do NOT include them in your output.`,
@@ -367,11 +366,6 @@ export function buildSceneAnalyzerUserPrompt(
           `- Prefer a spotifyTrack that is not in RECENT SPOTIFY TRACKS when another suitable option exists.`,
           `- Do not include musicGenre or musicIntensity when Spotify music is enabled.`,
         ]
-      : generateMusic
-        ? [
-            `- music must be null or a concise instrumental generation prompt. Segment music prompts should describe the intended transition and must only appear when the score changes.`,
-            `- Do not include musicGenre, musicIntensity, or spotifyTrack when generated music is enabled.`,
-          ]
       : [
           `- musicGenre describes scene genre/vibe (fantasy, horror, romance, etc.), not weather. musicIntensity is calm for safe/rest/romance, tense for uncertainty/suspense, intense for combat/chase/climax.`,
           `- Do not include spotifyTrack when Spotify music is disabled.`,
@@ -382,6 +376,10 @@ export function buildSceneAnalyzerUserPrompt(
     `- Cinematic directions are spice, not punctuation. Use at most 2 total directions per turn, and never more than 1 direction in any 3-beat span. Prefer none for routine dialogue.`,
     `- Use directions for real visual beats: a door slamming, a blade impact, thunder, a memory fracture, a kiss/reveal close-up, a panic spike, a scene transition, or a major emotional turn. Do not attach directions to every line.`,
     `- The background should stay the SAME as long as the characters remain in the same location. Only change it in a segment when characters physically move to a different place.`,
+    `- Within segmentEffects, directions and background are optional. Omit them unless that beat needs a visual effect or location change.`,
+    ...(generateSoundEffects || (ctx?.availableSfx?.length ?? 0) > 0
+      ? [`- sfxLoopCount is optional and means the total number of sequential plays for each sfx on that beat (1-5).`]
+      : []),
     `- Generated reusable background prompts must be world-grounded scenery. Include concrete place details and any provided setting era/genre context; exclude characters, UI, text, and modern objects unless the world context supports them.`,
     ...(canGenerateIllustrations
       ? [
@@ -432,12 +430,14 @@ export function buildSceneAnalyzerUserPrompt(
   // Build ONE segment example showing the range
   const segmentFields: string[] = [];
   segmentFields.push(`      "segment": <0-${maxSegmentIndex}>`);
-  if (sfxLine) segmentFields.push(sfxLine);
-  if (generateMusic) segmentFields.push(`      "music": "<concise instrumental music transition prompt>"`);
+  if (sfxLine) {
+    segmentFields.push(sfxLine);
+    segmentFields.push(`      "sfxLoopCount": <1-5>`);
+  }
   segmentFields.push(
-    `      "directions": [{"effect":"<flash|screen_shake|pulse|slow_zoom|impact_zoom|tilt|desaturate|chromatic_aberration|film_grain|rain_streaks|spotlight|focus|vignette|letterbox|color_grade>","duration":<0.4-3>,"intensity":<0-1>}]  // optional, rare`,
+    `      "directions": [{"effect":"<flash|screen_shake|pulse|slow_zoom|impact_zoom|tilt|desaturate|chromatic_aberration|film_grain|rain_streaks|spotlight|focus|vignette|letterbox|color_grade>","duration":<0.4-3>,"intensity":<0-1>}]`,
   );
-  segmentFields.push(`${bgLine}  // optional — only when characters move to a new location`);
+  segmentFields.push(bgLine);
   const segmentBody = segmentFields.join(",\n");
 
   parts.push(
@@ -452,9 +452,7 @@ export function buildSceneAnalyzerUserPrompt(
       ? [
           `  "spotifyTrack": ${spotifyOptions.length > 0 ? `null OR "<one Spotify URI from SPOTIFY TRACK OPTIONS>"` : "null"},`,
         ]
-      : generateMusic
-        ? [`  "music": "<concise instrumental scene music prompt | null>",`]
-        : [`  "musicGenre": "<${musicGenreOptions}>",`, `  "musicIntensity": "<${musicIntensityOptions}>",`]),
+      : [`  "musicGenre": "<${musicGenreOptions}>",`, `  "musicIntensity": "<${musicIntensityOptions}>",`]),
     `  "reputationChanges": ${reputationHint},`,
     `  "segmentEffects": [`,
     `    {`,

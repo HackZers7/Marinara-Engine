@@ -10,20 +10,16 @@ import { eq } from "./file-query.js";
 export const CLEAN_HTML_ID = "default-clean-html";
 const COLLAPSE_NEWLINES_ID = "default-collapse-newlines";
 
-export const LEGACY_CLEAN_HTML_FIND_REGEX =
-  String.raw`[ \t]?<(?!--)(?!\/?(?:font|lie|filter)\b)(?:"[^"]*"|'[^']*'|[^'">])*>`;
+export const LEGACY_CLEAN_HTML_FIND_REGEX = String.raw`[ \t]?<(?!--)(?!\/?(?:font|lie|filter)\b)(?:"[^"]*"|'[^']*'|[^'">])*>`;
 
-export const CLEAN_HTML_FIND_REGEX =
-  String.raw`<(?:!DOCTYPE\b[^>]*|\/?(?!(?:font|lie|filter)\b)[A-Za-z][^>]*)>`;
+export const CLEAN_HTML_FIND_REGEX = String.raw`<(?:!DOCTYPE\b[^>]*|\/?(?!(?:font|lie|filter)\b)[A-Za-z][^>]*)>`;
 
 export function shouldMigrateCleanHtmlPattern(row: { id: string; findRegex: string }): boolean {
   return row.id === CLEAN_HTML_ID && row.findRegex === LEGACY_CLEAN_HTML_FIND_REGEX;
 }
 
 export async function seedDefaultRegexScripts(db: DB) {
-  const existing = await db
-    .select({ id: regexScripts.id, findRegex: regexScripts.findRegex })
-    .from(regexScripts);
+  const existing = await db.select({ id: regexScripts.id, findRegex: regexScripts.findRegex }).from(regexScripts);
 
   const existingIds = new Set(existing.map((r) => r.id));
   const timestamp = now();
@@ -41,6 +37,7 @@ export async function seedDefaultRegexScripts(db: DB) {
       promptOnly: "true",
       applyMode: "prompt",
       targetCharacterIds: "[]",
+      targetPromptPresetIds: "[]",
       order: 0,
       minDepth: null,
       maxDepth: null,
@@ -59,6 +56,7 @@ export async function seedDefaultRegexScripts(db: DB) {
       promptOnly: "false",
       applyMode: "display",
       targetCharacterIds: "[]",
+      targetPromptPresetIds: "[]",
       order: 10,
       minDepth: null,
       maxDepth: null,

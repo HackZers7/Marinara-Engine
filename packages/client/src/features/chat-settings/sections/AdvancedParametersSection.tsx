@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState, type KeyboardEvent } from "react";
 import { ChevronDown, Save, Settings2 } from "lucide-react";
 import { HelpTooltip } from "../../../components/ui/HelpTooltip";
+import { AgentSettingsActionButton } from "../../../components/chat/AgentSettingsControls";
 import {
   CHAT_PARAMETER_DEFAULTS,
   GenerationParametersFields,
@@ -28,6 +29,7 @@ const EDITABLE_PARAMETER_KEYS: Array<keyof EditableGenerationParameters> = [
   "verbosity",
   "serviceTier",
   "assistantPrefill",
+  "assistantReasoningPrefill",
   "customThinkingTags",
   "customParameters",
   "managedCustomParameters",
@@ -138,10 +140,15 @@ export function AdvancedParametersSection({
       if (!editableKeys.has(key)) sparse[key] = value;
     }
     for (const key of EDITABLE_PARAMETER_KEYS) {
+      if (key === "enabledParameters") continue;
       if (JSON.stringify(next[key]) !== JSON.stringify(defaults[key])) {
         sparse[key] = next[key];
       }
     }
+    // Send toggles are behavior, not merely editable values. Keep the explicit
+    // map even when it matches the editor fallback so an inherited preset value
+    // cannot make a disabled parameter reappear in the provider request.
+    sparse.enabledParameters = next.enabledParameters ?? STRICT_CONNECTION_PARAMETER_SEND_DEFAULTS;
     onChatParametersChange(sparse);
   };
   const toggleExpanded = () => setExpanded((open) => !open);
@@ -153,7 +160,7 @@ export function AdvancedParametersSection({
   };
 
   return (
-    <div className="border-b border-[var(--border)]">
+    <div data-chat-settings-section="advanced-parameters" className="border-b border-[var(--border)]">
       <div
         role="button"
         tabIndex={0}
@@ -165,10 +172,14 @@ export function AdvancedParametersSection({
         <span className="shrink-0 text-[var(--muted-foreground)]">
           <Settings2 size="0.875rem" />
         </span>
-        <span className="min-w-0 flex-1 text-xs font-semibold">{localizeUi("ui.chatSettings.advancedparameterssection.advancedParameters")}</span>
+        <span className="min-w-0 flex-1 text-xs font-semibold">
+          {localizeUi("ui.chatSettings.advancedparameterssection.advancedParameters")}
+        </span>
         <span className="flex shrink-0 items-center" onClick={(event) => event.stopPropagation()}>
           <HelpTooltip
-            text={localizeUi("ui.chatSettings.advancedparameterssection.overrideGenerationParametersForThisChatOnlyChangeThese")}
+            text={localizeUi(
+              "ui.chatSettings.advancedparameterssection.overrideGenerationParametersForThisChatOnlyChangeThese",
+            )}
             side="left"
           />
         </span>
@@ -214,12 +225,16 @@ export function AdvancedParametersSection({
                   selectOnFocus
                   className="w-20 rounded-lg bg-[var(--secondary)] px-3 py-1.5 text-xs outline-none ring-1 ring-transparent transition-shadow focus:ring-[var(--primary)]/40"
                 />
-                <span className="text-[0.625rem] text-[var(--muted-foreground)]">{localizeUi("ui.agents.agenteditor.messages")}</span>
+                <span className="text-[0.625rem] text-[var(--muted-foreground)]">
+                  {localizeUi("ui.agents.agenteditor.messages")}
+                </span>
               </div>
             )}
             <SettingsSwitch
               label={localizeUi("ui.chatSettings.advancedparameterssection.excludePastReasoning")}
-              description={localizeUi("ui.chatSettings.advancedparameterssection.keepStoredThinkingReasoningMetadataOutOfFuturePrompts")}
+              description={localizeUi(
+                "ui.chatSettings.advancedparameterssection.keepStoredThinkingReasoningMetadataOutOfFuturePrompts",
+              )}
               checked={excludeReasoningEnabled}
               onChange={onExcludePastReasoningChange}
               labelPosition="start"
@@ -235,8 +250,10 @@ export function AdvancedParametersSection({
               label={localizeUi("ui.chatSettings.advancedparameterssection.imageCaptioning")}
               description={
                 hasCaptioningConnection
-                  ?localizeUi("ui.chatSettings.advancedparameterssection.describeImageAttachmentsWithASelectedConnectionInsteadOf")
-                  :localizeUi("ui.chatSettings.advancedparameterssection.addAConnectionBeforeEnablingImageCaptioning")
+                  ? localizeUi(
+                      "ui.chatSettings.advancedparameterssection.describeImageAttachmentsWithASelectedConnectionInsteadOf",
+                    )
+                  : localizeUi("ui.chatSettings.advancedparameterssection.addAConnectionBeforeEnablingImageCaptioning")
               }
               checked={captioningEnabled}
               onChange={(checked) =>
@@ -259,7 +276,9 @@ export function AdvancedParametersSection({
             />
             {captioningEnabled && (
               <label className="block space-y-1 px-1">
-                <span className="text-[0.6875rem] font-medium text-[var(--muted-foreground)]">{localizeUi("ui.chatSettings.advancedparameterssection.captioningConnection")}</span>
+                <span className="text-[0.6875rem] font-medium text-[var(--muted-foreground)]">
+                  {localizeUi("ui.chatSettings.advancedparameterssection.captioningConnection")}
+                </span>
                 <select
                   value={selectedCaptioningConnectionId ?? ""}
                   onChange={(event) =>
@@ -272,12 +291,16 @@ export function AdvancedParametersSection({
                   {chatConnectionCanCaption ? (
                     <option value="">{localizeUi("ui.agents.agenteditor.useChatConnection")}</option>
                   ) : (
-                    <option value="" disabled>{localizeUi("ui.chatSettings.advancedparameterssection.selectACaptioningConnection")}</option>
+                    <option value="" disabled>
+                      {localizeUi("ui.chatSettings.advancedparameterssection.selectACaptioningConnection")}
+                    </option>
                   )}
                   {connectionOptions.map((connection) => (
                     <option key={connection.id} value={connection.id}>
                       {connection.name}
-                      {connection.model ?localizeUi("ui.chatSettings.advancedparameterssection.value1", { value1: connection.model }) : ""}
+                      {connection.model
+                        ? localizeUi("ui.chatSettings.advancedparameterssection.value1", { value1: connection.model })
+                        : ""}
                     </option>
                   ))}
                 </select>
@@ -285,7 +308,9 @@ export function AdvancedParametersSection({
             )}
           </div>
           {canSaveConnectionDefaults && (
-            <button
+            <AgentSettingsActionButton
+              type="button"
+              variant="primary"
               onClick={() => {
                 saveDefaults.mutate({
                   id: connectionId,
@@ -296,16 +321,17 @@ export function AdvancedParametersSection({
                   },
                 });
               }}
-              className="w-full rounded-lg bg-[var(--primary)]/10 px-3 py-1.5 text-[0.625rem] font-medium text-[var(--primary)] ring-1 ring-[var(--primary)]/20 transition-colors hover:bg-[var(--primary)]/20"
+              className="w-full"
             >
               <Save size="0.625rem" className="inline mr-1 -mt-px" />
-              {saveDefaults.isPending ?localizeUi("chat.settings.inlineEditor.saving") :localizeUi("ui.chatSettings.advancedparameterssection.saveAsConnectionDefault")}
-            </button>
+              {saveDefaults.isPending
+                ? localizeUi("chat.settings.inlineEditor.saving")
+                : localizeUi("ui.chatSettings.advancedparameterssection.saveAsConnectionDefault")}
+            </AgentSettingsActionButton>
           )}
-          <button
-            onClick={() => onChatParametersChange({})}
-            className="w-full rounded-lg bg-[var(--secondary)] px-3 py-1.5 text-[0.625rem] text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)]"
-          >{localizeUi("ui.chatSettings.advancedparameterssection.resetToDefaults")}</button>
+          <AgentSettingsActionButton type="button" onClick={() => onChatParametersChange({})} className="w-full">
+            {localizeUi("ui.chatSettings.advancedparameterssection.resetToDefaults")}
+          </AgentSettingsActionButton>
         </div>
       )}
     </div>

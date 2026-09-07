@@ -31,6 +31,7 @@ export interface CreateGameTurnStoryboardKeyframeInput {
   mangaPanelPrompt?: string;
   imagePrompt?: string;
   videoPrompt?: string;
+  animationSuitability?: string;
   characters?: string;
   continuityNotes?: string;
   cameraMotion?: string;
@@ -174,11 +175,12 @@ export function createGameStoryboardsStorage(db: DB) {
             mangaPanelPrompt: frame.mangaPanelPrompt ?? "",
             imagePrompt: frame.imagePrompt ?? "",
             videoPrompt: frame.videoPrompt ?? "",
+            animationSuitability: frame.animationSuitability ?? "",
             characters: frame.characters ?? "[]",
             continuityNotes: frame.continuityNotes ?? "",
             cameraMotion: frame.cameraMotion ?? "",
             transitionHint: frame.transitionHint ?? "",
-            durationSeconds: frame.durationSeconds ?? 6,
+            durationSeconds: frame.durationSeconds ?? 5,
             aspectRatio: frame.aspectRatio ?? "16:9",
             chatImageId: frame.chatImageId ?? null,
             sceneVideoId: frame.sceneVideoId ?? null,

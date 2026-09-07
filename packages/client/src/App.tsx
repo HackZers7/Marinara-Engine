@@ -20,6 +20,7 @@ import { CustomThemeInjector } from "./components/layout/CustomThemeInjector";
 import { PersonalExtensionInjector } from "./components/layout/PersonalExtensionInjector";
 import { ModelDownloadModal } from "./components/modals/ModelDownloadModal";
 import { WhatsNewModal } from "./components/modals/WhatsNewModal";
+import { StorageMigrationNoticeModal } from "./components/modals/StorageMigrationNoticeModal";
 import { AppDialogRenderer } from "./components/ui/AppDialogRenderer";
 import { ChibiProfessorMariEasterEgg } from "./components/ui/ChibiProfessorMariEasterEgg";
 import { CsrfOriginWarningBanner } from "./components/diagnostics/CsrfOriginWarningBanner";
@@ -29,12 +30,14 @@ import {
   getDefaultAppAccentColor,
   getDefaultAppBackgroundColor,
   getDefaultChatChromeTextColor,
+  MOBILE_SHELL_MEDIA_QUERY,
   useUIStore,
 } from "./stores/ui.store";
 import { useSidecarStore } from "./stores/sidecar.store";
 import { useDialogStore } from "./stores/dialog.store";
 import { api } from "./lib/api-client";
 import { forceRefreshSpa } from "./lib/browser-runtime";
+import { formatRuntimeBuild, getServerRuntimeBuild, isRuntimeBuildCurrent } from "./lib/runtime-build";
 import {
   getCssColorFallback,
   getCssGradientColorStops,
@@ -44,12 +47,17 @@ import {
 import { normalizeThemeCss } from "./lib/theme-css";
 import { useLegacyThemeMigration, useThemes } from "./hooks/use-themes";
 import { useSettingsSync } from "./hooks/use-settings-sync";
+import { useStorageMigrationNotice } from "./hooks/use-storage-migration-notice";
 import { useCustomNotificationSoundStatus } from "./hooks/use-custom-notification-sound";
+import { useReducedAmbientEffects } from "./hooks/use-reduced-ambient-effects";
 import { installLongTaskWarner } from "./lib/perf-diagnostics";
+import { getStoreBackLayers } from "./lib/back-layers";
+import { initBackNavigation, syncBackNavigation } from "./lib/back-navigation";
 import { setCustomNotificationSoundUrl } from "./lib/notification-sound";
 
 const VERSION_RECOVERY_KEY = "marinara:pwa-version-recovery";
 const VERSION_CHECK_INTERVAL_MS = 5 * 60_000;
+const CLIENT_BUILD = formatRuntimeBuild(APP_VERSION, __MARINARA_BUILD_COMMIT__);
 const LazyModalRenderer = lazy(() =>
   import("./components/layout/ModalRenderer").then((module) => ({ default: module.ModalRenderer })),
 );
@@ -61,6 +69,7 @@ type HealthResponse = {
   status: string;
   timestamp: string;
   version: string;
+  build?: string | null;
 };
 
 type CustomFontFace = {
@@ -88,7 +97,6 @@ const APP_ACCENT_CUSTOM_VARIABLES = [
 const ACCENT_RGB_TICK_MS = 500;
 const ACCENT_RGB_SOLID_CYCLE_MS = 7_200;
 const ACCENT_RGB_GRADIENT_STOP_MS = 6_000;
-const CUSTOM_CURSOR_ANIMATED_RECOLOR_MS = 6_000;
 const CUSTOM_CURSOR_RECOLOR_SCROLL_FREEZE_MS = 360;
 const TOAST_DURATION_MS = 6_000;
 const TOAST_VISIBLE_LIMIT = 3;
@@ -172,7 +180,7 @@ export class AppRecoveryBoundary extends Component<{ children: ReactNode }, { er
               <p className="mt-2 text-sm text-[var(--marinara-chat-chrome-panel-muted)]">
                 {t("ui.app.recovery.description")}
               </p>
-              <pre className="mt-3 max-h-32 overflow-auto rounded-lg border border-[var(--marinara-chat-chrome-panel-border)] bg-[var(--marinara-chat-chrome-highlight-bg)] p-2 text-xs text-[var(--marinara-chat-chrome-accent)]">
+              <pre className="mari-chrome-accent-text-muted mari-accent-animated mt-3 max-h-32 overflow-auto rounded-lg border border-[var(--marinara-chat-chrome-panel-border)] bg-[var(--marinara-chat-chrome-highlight-bg)] p-2 text-xs">
                 {errorMessage}
               </pre>
               <div className="mt-4 flex flex-wrap gap-2">
@@ -482,6 +490,7 @@ export function App() {
   const appAccentPulseMode = useUIStore((s) => s.appAccentPulseMode);
   const appAccentRgbMode = useUIStore((s) => s.appAccentRgbMode);
   const customCursorEnabled = useUIStore((s) => s.customCursorEnabled);
+  const reduceAmbientEffects = useReducedAmbientEffects();
   const chatChromeTextColor = useUIStore((s) => s.chatChromeTextColor);
   const hasModalOpen = useUIStore((s) => s.modal !== null);
   const rightPanelOpen = useUIStore((s) => s.rightPanelOpen);
@@ -506,6 +515,11 @@ export function App() {
   const [whatsNewOpen, setWhatsNewOpen] = useState(false);
   const [whatsNewResolved, setWhatsNewResolved] = useState(false);
   const handleWhatsNewResolved = useCallback(() => setWhatsNewResolved(true), []);
+  // Shares the modal's query via the cache; gating the prompter on the QUERY
+  // (pending or a notice still waiting) instead of the modal's open state
+  // closes the race where the prompter fires in the window before the notice
+  // fetch resolves.
+  const { data: migrationNotice, isPending: migrationNoticePending } = useStorageMigrationNotice();
 
   useEffect(() => {
     setCustomNotificationSoundUrl(customNotificationSound?.url ?? null);
@@ -514,6 +528,23 @@ export function App() {
   // [#3104 diagnostic] warn on long main-thread tasks (see lib/perf-diagnostics.ts)
   useEffect(() => {
     installLongTaskWarner();
+  }, []);
+
+  // Hardware / gesture back dismisses the topmost overlay instead of exiting.
+  useEffect(() => {
+    initBackNavigation(getStoreBackLayers);
+    // Overlay state is persisted, so the app can boot with panels already open.
+    syncBackNavigation();
+    const unsubscribeUI = useUIStore.subscribe(syncBackNavigation);
+    const unsubscribeDialog = useDialogStore.subscribe(syncBackNavigation);
+    // Whether a shell panel counts as an overlay depends on the viewport.
+    const shellQuery = window.matchMedia(MOBILE_SHELL_MEDIA_QUERY);
+    shellQuery.addEventListener("change", syncBackNavigation);
+    return () => {
+      unsubscribeUI();
+      unsubscribeDialog();
+      shellQuery.removeEventListener("change", syncBackNavigation);
+    };
   }, []);
 
   useEffect(() => {
@@ -578,6 +609,15 @@ export function App() {
 
   useEffect(() => {
     const root = document.documentElement;
+    if (reduceAmbientEffects) root.dataset.marinaraReducedEffects = "true";
+    else delete root.dataset.marinaraReducedEffects;
+    return () => {
+      delete root.dataset.marinaraReducedEffects;
+    };
+  }, [reduceAmbientEffects]);
+
+  useEffect(() => {
+    const root = document.documentElement;
     const background = appBackgroundColor.trim();
     const defaultBackground = getDefaultAppBackgroundColor(theme);
     const resolvedBackground = getCssColorFallback(background, defaultBackground);
@@ -609,11 +649,17 @@ export function App() {
   useEffect(() => {
     const root = document.documentElement;
     const syncEffectsPausedState = () => {
-      if (document.visibilityState === "visible" && document.hasFocus() && !pauseChromeEffectsForAppearance) {
+      const paused = !(
+        document.visibilityState === "visible" &&
+        document.hasFocus() &&
+        !pauseChromeEffectsForAppearance
+      );
+      if (!paused) {
         delete root.dataset.marinaraEffectsPaused;
       } else {
         root.dataset.marinaraEffectsPaused = "true";
       }
+      window.dispatchEvent(new CustomEvent("marinara:effects-paused", { detail: { paused } }));
     };
 
     syncEffectsPausedState();
@@ -660,9 +706,8 @@ export function App() {
     let cursorRecolorFreezeTimer: ReturnType<typeof window.setTimeout> | null = null;
     let cursorRecolorFrozen = false;
     let pendingCursorAccent: string | null = null;
-    let lastCursorRecolorAt = 0;
 
-    const applyCursorAccent = (cursorAccent: string, options: { slow?: boolean } = {}) => {
+    const applyCursorAccent = (cursorAccent: string) => {
       if (!customCursorEnabled) {
         pendingCursorAccent = null;
         return;
@@ -671,15 +716,7 @@ export function App() {
         pendingCursorAccent = cursorAccent;
         return;
       }
-      if (customCursorEnabled && options.slow && lastCursorRecolorAt > 0) {
-        const now = performance.now();
-        if (now - lastCursorRecolorAt < CUSTOM_CURSOR_ANIMATED_RECOLOR_MS) {
-          pendingCursorAccent = cursorAccent;
-          return;
-        }
-      }
       pendingCursorAccent = null;
-      lastCursorRecolorAt = performance.now();
       setAccentCursorVariable(root, cursorAccent, theme);
     };
 
@@ -693,7 +730,7 @@ export function App() {
       if (pendingCursorAccent !== null) {
         const nextCursorAccent = pendingCursorAccent;
         pendingCursorAccent = null;
-        applyCursorAccent(nextCursorAccent, { slow: accentAnimationEnabled });
+        applyCursorAccent(nextCursorAccent);
       }
     };
 
@@ -762,7 +799,6 @@ export function App() {
         root.style.setProperty("--marinara-chat-chrome-accent", liveAccent);
         root.style.setProperty("--marinara-chat-chrome-accent-gradient", liveGradient);
       }
-      applyCursorAccent(liveAccent, { slow: true });
       setAccentModeDataset();
     };
 
@@ -788,7 +824,10 @@ export function App() {
 
       accentAnimationTimer = window.setTimeout(() => {
         accentAnimationTimer = null;
-        if (!accentAnimationEnabled || !canRunAccentAnimation(reducedMotionQuery, pauseChromeEffectsForAppearance)) {
+        if (
+          !accentAnimationEnabled ||
+          !canRunAccentAnimation(reducedMotionQuery, pauseChromeEffectsForAppearance || reduceAmbientEffects)
+        ) {
           stopAccentAnimation();
           return;
         }
@@ -807,7 +846,10 @@ export function App() {
     };
 
     const syncAccentAnimationState = () => {
-      if (accentAnimationEnabled && canRunAccentAnimation(reducedMotionQuery, pauseChromeEffectsForAppearance)) {
+      if (
+        accentAnimationEnabled &&
+        canRunAccentAnimation(reducedMotionQuery, pauseChromeEffectsForAppearance || reduceAmbientEffects)
+      ) {
         if (isTextEntryFocused()) {
           // Root accent ticks invalidate styles across the entire Roleplay
           // surface in Firefox. Freeze the current accent while the user is
@@ -825,7 +867,13 @@ export function App() {
       syncAccentAnimationState();
     };
 
-    if (!accentAnimationEnabled) {
+    if (accentAnimationEnabled) {
+      // Keep the custom cursor on the selected solid accent. Resolving a
+      // color-mix() cursor through getComputedStyle on every live accent tick
+      // causes a synchronous style flush that becomes noticeable in long sessions.
+      applyCursorAccent(solidAccent);
+      setAccentModeDataset();
+    } else {
       applyStaticAccent();
     }
     syncAccentAnimationState();
@@ -868,6 +916,7 @@ export function App() {
     appAccentRgbMode,
     customCursorEnabled,
     pauseChromeEffectsForAppearance,
+    reduceAmbientEffects,
     theme,
     themeAccentPulseConfig.enabled,
     themeAccentPulseConfig.source,
@@ -924,12 +973,13 @@ export function App() {
           return;
         }
 
-        if (health.version === APP_VERSION) {
+        const serverBuild = getServerRuntimeBuild(health);
+        if (isRuntimeBuildCurrent(APP_VERSION, CLIENT_BUILD, health)) {
           sessionStorage.removeItem(VERSION_RECOVERY_KEY);
           return;
         }
 
-        await recoverFromVersionSkew(health.version);
+        await recoverFromVersionSkew(serverBuild);
       } catch {
         // Ignore version checks when the network is unavailable.
       }
@@ -1026,9 +1076,20 @@ export function App() {
         onOpenChange={setWhatsNewOpen}
         onResolved={handleWhatsNewResolved}
       />
-      <AgentUpdatePrompter
+      <StorageMigrationNoticeModal
         presentationAllowed={
           whatsNewResolved && !hasModalOpen && !hasAppDialogOpen && !whatsNewOpen && (isLite || !showDownloadModal)
+        }
+      />
+      <AgentUpdatePrompter
+        presentationAllowed={
+          whatsNewResolved &&
+          !hasModalOpen &&
+          !hasAppDialogOpen &&
+          !whatsNewOpen &&
+          !migrationNoticePending &&
+          !migrationNotice &&
+          (isLite || !showDownloadModal)
         }
       />
       {!isLite && <ModelDownloadModal open={showDownloadModal} onClose={() => setShowDownloadModal(false)} />}

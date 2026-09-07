@@ -35,11 +35,12 @@ import {
   Check,
   UserMinus,
   Tag,
+  Bot,
 } from "lucide-react";
 import { confirmNonEmptyFolderDelete, showConfirmDialog } from "../../lib/app-dialogs";
 import { handleFolderRenameKeyDown, useFolderRenameGesture } from "../../hooks/use-folder-rename-gesture";
 import { useTouchFolderDrag } from "../../hooks/use-touch-folder-drag";
-import { cn, getAvatarCropStyle, parseAvatarCropJson } from "../../lib/utils";
+import { cn, getAvatarCropStyle } from "../../lib/utils";
 import { api } from "../../lib/api-client";
 import { SelectionActionBar } from "../ui/SelectionActionBar";
 import { SmoothFolderContent } from "../ui/SmoothFolderContent";
@@ -55,26 +56,7 @@ import {
 } from "../../lib/card-library-search";
 import { clearActiveChatResourceDrag, writeChatResourceDragPayload } from "../../lib/chat-resource-drag";
 import { ChatResourceActionButton } from "../chat/ChatResourceActionButton";
-
-type PersonaRow = {
-  id: string;
-  name: string;
-  comment?: string;
-  creator?: string;
-  personaVersion?: string;
-  creatorNotes?: string;
-  description: string;
-  personality: string;
-  scenario: string;
-  backstory: string;
-  appearance: string;
-  avatarPath: string | null;
-  /** JSON-encoded AvatarCrop, or empty string when unset. */
-  avatarCrop?: string;
-  isActive: string | boolean;
-  createdAt: string;
-  tags?: string;
-};
+import type { Persona } from "@marinara-engine/shared";
 
 type PersonaGroupRow = { id: string; name: string; description: string; personaIds: string };
 type ParsedPersonaGroupRow = PersonaGroupRow & { memberIds: string[] };
@@ -98,15 +80,15 @@ function parseDroppedPersonaIds(payload: string): unknown {
   }
 }
 
-function estimateTokens(p: PersonaRow): number {
+function estimateTokens(p: Persona): number {
   const text = [p.description, p.personality, p.scenario, p.backstory, p.appearance].join("");
   return Math.ceil(text.length / 4);
 }
 
-function getPersonaPreviewMetadata(p: PersonaRow): string | null {
+function getPersonaPreviewMetadata(p: Persona): string | null {
   const parts: string[] = [];
-  const creator = p.creator?.trim() ?? "";
-  const version = p.personaVersion?.trim() ?? "";
+  const creator = p.creator.trim();
+  const version = p.personaVersion.trim();
 
   if (creator) parts.push(`by ${creator}`);
   if (version) parts.push(`v${version}`);
@@ -153,6 +135,7 @@ export function PersonasPanel() {
   const deletePGroup = useDeletePersonaGroup();
   const openPersonaDetail = useUIStore((s) => s.openPersonaDetail);
   const openPersonaLibrary = useUIStore((s) => s.openPersonaLibrary);
+  const openBotBrowser = useUIStore((s) => s.openBotBrowser);
   const openModal = useUIStore((s) => s.openModal);
 
   const fileRef = useRef<HTMLInputElement>(null);
@@ -166,7 +149,7 @@ export function PersonasPanel() {
   const [selectedPersonaIds, setSelectedPersonaIds] = useState<Set<string>>(new Set());
   const [exportingSelected, setExportingSelected] = useState(false);
   const clientOnlyPersonaFilterActive = favFilter !== "all" || activeTag !== null;
-  const [completeFilteredPersonas, setCompleteFilteredPersonas] = useState<PersonaRow[] | null>(null);
+  const [completeFilteredPersonas, setCompleteFilteredPersonas] = useState<Persona[] | null>(null);
   const [completePersonasLoading, setCompletePersonasLoading] = useState(false);
   const serverSearch = useMemo(() => parseCardLibrarySearchQuery(search).text, [search]);
   const personaPages = usePersonaPages({ search: serverSearch, sort });
@@ -188,8 +171,6 @@ export function PersonasPanel() {
   const touchSafePersonaDragMode = useTouchSafePersonaDragMode();
   const nativePersonaDragEnabled = !touchSafePersonaDragMode;
 
-  const isActive = (p: PersonaRow) => p.isActive === true || p.isActive === "true";
-
   useEffect(() => {
     let cancelled = false;
     if (!clientOnlyPersonaFilterActive) {
@@ -203,7 +184,7 @@ export function PersonasPanel() {
     setCompletePersonasLoading(true);
     fetchAllPersonaPages({ search: serverSearch, sort })
       .then((rows) => {
-        if (!cancelled) setCompleteFilteredPersonas(rows as PersonaRow[]);
+        if (!cancelled) setCompleteFilteredPersonas(rows);
       })
       .catch(() => {
         if (!cancelled) {
@@ -218,7 +199,7 @@ export function PersonasPanel() {
     return () => {
       cancelled = true;
     };
-  }, [clientOnlyPersonaFilterActive, serverSearch, sort, localizeUi]);
+  }, [clientOnlyPersonaFilterActive, serverSearch, sort, localizeUi, personaPages.dataUpdatedAt]);
 
   const handleCreate = () => {
     openModal("create-persona");
@@ -249,23 +230,13 @@ export function PersonasPanel() {
     [avatarTargetId, uploadAvatar],
   );
 
-  const rawList = useMemo(() => (personas as PersonaRow[] | undefined) ?? [], [personas]);
-
-  const parseTags = (p: PersonaRow): string[] => {
-    try {
-      return p.tags ? JSON.parse(p.tags) : [];
-    } catch {
-      return [];
-    }
-  };
-
   const allTags = useMemo(() => {
     const tagSet = new Set<string>();
-    for (const p of rawList) {
-      for (const t of parseTags(p)) tagSet.add(t);
+    for (const p of personas) {
+      for (const t of p.tags) tagSet.add(t);
     }
     return [...tagSet].sort((a, b) => a.localeCompare(b));
-  }, [rawList]);
+  }, [personas]);
 
   const handleDeleteTag = useCallback(
     async (tag: string) => {
@@ -280,11 +251,11 @@ export function PersonasPanel() {
         return;
       }
       try {
-        const allPersonas = (await fetchAllPersonaPages({ sort })) as PersonaRow[];
-        const affected = allPersonas.filter((p) => parseTags(p).includes(tag));
+        const allPersonas = await fetchAllPersonaPages({ sort });
+        const affected = allPersonas.filter((p) => p.tags.includes(tag));
         for (const p of affected) {
-          const newTags = parseTags(p).filter((t) => t !== tag);
-          await updatePersona.mutateAsync({ id: p.id, tags: JSON.stringify(newTags) });
+          const newTags = p.tags.filter((t) => t !== tag);
+          await updatePersona.mutateAsync({ id: p.id, tags: newTags });
         }
         if (activeTag === tag) setActiveTag(null);
       } catch {
@@ -295,10 +266,10 @@ export function PersonasPanel() {
   );
 
   const personaMap = useMemo(() => {
-    const map = new Map<string, PersonaRow>();
-    for (const p of rawList) map.set(p.id, p);
+    const map = new Map<string, Persona>();
+    for (const p of personas) map.set(p.id, p);
     return map;
-  }, [rawList]);
+  }, [personas]);
 
   const parsedGroups = useMemo<ParsedPersonaGroupRow[]>(() => {
     if (!personaGroupsRaw) return [];
@@ -443,16 +414,16 @@ export function PersonasPanel() {
   });
 
   const filteredList = useMemo(() => {
-    let arr = rawList;
+    let arr = personas;
     const query = parseCardLibrarySearchQuery(search);
     // Filter by active status
     if (favFilter === "active") {
-      arr = arr.filter((p) => p.isActive === true || p.isActive === "true");
+      arr = arr.filter((p) => p.isActive);
     } else if (favFilter === "inactive") {
-      arr = arr.filter((p) => p.isActive !== true && p.isActive !== "true");
+      arr = arr.filter((p) => !p.isActive);
     }
     arr = arr.filter((p) => {
-      const tags = parseTags(p);
+      const tags = p.tags;
       return matchesCardLibrarySearch(
         {
           name: p.name,
@@ -473,10 +444,10 @@ export function PersonasPanel() {
     });
     // Filter by active tag
     if (activeTag) {
-      arr = arr.filter((p) => parseTags(p).includes(activeTag));
+      arr = arr.filter((p) => p.tags.includes(activeTag));
     }
     return arr;
-  }, [rawList, favFilter, search, activeTag]);
+  }, [personas, favFilter, search, activeTag]);
 
   const list = useMemo(() => {
     const arr = [...filteredList];
@@ -588,14 +559,38 @@ export function PersonasPanel() {
 
   return (
     <div className="flex min-h-full flex-col gap-2 p-3">
-      <button
-        onClick={openPersonaLibrary}
-        className="mari-chrome-control mari-chrome-control--primary w-full text-xs"
-        title={localizeUi("ui.panels.personaspanel.openPersonasLibrary")}
+      <div
+        className="mari-chrome-segmented mari-chrome-segmented--two"
+        data-component="PersonaLibraryActions"
+        style={{ gridTemplateColumns: "repeat(2, minmax(0, 1fr))" }}
       >
-        <VenetianMask size="0.875rem" />
-        {localizeUi("ui.panels.personaspanel.openPersonasLibrary")}
-      </button>
+        <button
+          type="button"
+          onClick={openBotBrowser}
+          className="mari-chrome-segmented__button min-w-0 justify-center gap-1 overflow-hidden px-1.5 py-2 text-[0.625rem] leading-normal"
+          title={localizeUi("ui.panels.resourceLibraryLauncher.downloadCards")}
+        >
+          <span className="shrink-0 leading-none">
+            <Bot size="0.875rem" />
+          </span>
+          <span className="inline-flex min-h-4 min-w-0 items-center justify-center truncate whitespace-nowrap pb-px leading-normal">
+            {localizeUi("ui.panels.resourceLibraryLauncher.download")}
+          </span>
+        </button>
+        <button
+          type="button"
+          onClick={openPersonaLibrary}
+          className="mari-chrome-segmented__button min-w-0 justify-center gap-1 overflow-hidden px-1.5 py-2 text-[0.625rem] leading-normal"
+          title={localizeUi("ui.panels.personaspanel.openPersonasLibrary")}
+        >
+          <span className="shrink-0 leading-none">
+            <VenetianMask size="0.875rem" />
+          </span>
+          <span className="inline-flex min-h-4 min-w-0 items-center justify-center truncate whitespace-nowrap pb-px leading-normal">
+            {localizeUi("ui.panels.resourceLibraryLauncher.openLibrary")}
+          </span>
+        </button>
+      </div>
 
       {/* Actions */}
       <div className="flex gap-2">
@@ -795,7 +790,7 @@ export function PersonasPanel() {
                   value2: group.name,
                 })}
                 title={localizeUi("ui.panels.backgroundpicker.doubleClickDoubleTapOrPressF2ToRename")}
-                className="group relative flex cursor-pointer items-center gap-1.5 rounded-lg px-2 py-1.5 transition-all hover:bg-[var(--sidebar-accent)]/40"
+                className="group relative flex cursor-pointer items-center gap-1.5 rounded-lg px-2 py-1.5 transition-all hover:bg-[var(--sidebar-accent)]/40 max-md:pr-12 [@media(pointer:coarse)]:pr-12"
                 onClick={(event) =>
                   handleFolderRenameGesture(group.id, event, {
                     onSingleClick: () => setExpandedGroupId(isExpanded ? null : group.id),
@@ -847,12 +842,26 @@ export function PersonasPanel() {
                   )}
                 </div>
                 {folderMemberIds.length > 0 && (
-                  <span className="shrink-0 text-[0.5625rem] text-[var(--muted-foreground)]">
+                  <span
+                    data-folder-item-count="inline"
+                    className="shrink-0 text-[0.5625rem] text-[var(--muted-foreground)] max-md:hidden [@media(pointer:coarse)]:hidden"
+                  >
                     {folderMemberIds.length}
                   </span>
                 )}
 
-                <div className="absolute right-2 top-1/2 flex -translate-y-1/2 shrink-0 items-center gap-0.5 rounded-lg bg-[var(--sidebar)] px-1 py-0.5 opacity-0 shadow-sm ring-1 ring-[var(--border)] transition-opacity group-hover:opacity-100 max-md:opacity-100">
+                <div
+                  data-folder-actions
+                  className="pointer-events-none absolute right-2 top-1/2 flex -translate-y-1/2 shrink-0 items-center gap-0.5 rounded-lg bg-[var(--sidebar)] px-1 py-0.5 opacity-0 shadow-sm ring-1 ring-[var(--border)] transition-opacity group-hover:opacity-100 [@media(pointer:fine)]:group-focus-within:opacity-100 max-md:opacity-100 [@media(pointer:coarse)]:opacity-100 group-hover:[&_button]:pointer-events-auto [@media(pointer:fine)]:group-focus-within:[&_button]:pointer-events-auto max-md:[&_button]:pointer-events-auto [@media(pointer:coarse)]:[&_button]:pointer-events-auto"
+                >
+                  {folderMemberIds.length > 0 && (
+                    <span
+                      data-folder-item-count="actions"
+                      className="hidden px-1 text-[0.5625rem] text-[var(--muted-foreground)] max-md:inline [@media(pointer:coarse)]:inline"
+                    >
+                      {folderMemberIds.length}
+                    </span>
+                  )}
                   <button
                     onClick={(e) => {
                       e.stopPropagation();
@@ -896,6 +905,7 @@ export function PersonasPanel() {
                             openPersonaDetail(pid);
                           }}
                           onKeyDown={(e) => {
+                            if (e.target !== e.currentTarget) return;
                             if (e.key === "Enter" || e.key === " ") {
                               e.preventDefault();
                               if (selectionMode) {
@@ -933,7 +943,7 @@ export function PersonasPanel() {
                           role="button"
                           tabIndex={0}
                           className={cn(
-                            "group group/member flex touch-pan-y cursor-pointer items-center gap-2 rounded-lg p-1.5 text-xs transition-all hover:bg-[var(--sidebar-accent)]",
+                            "group group/member relative flex touch-pan-y cursor-pointer items-center gap-2 rounded-lg p-1.5 text-xs transition-all hover:bg-[var(--sidebar-accent)]",
                             touchSafePersonaDragMode && "select-none",
                             selectionMode &&
                               isBulkSelected &&
@@ -982,13 +992,18 @@ export function PersonasPanel() {
                                 src={p.avatarPath}
                                 alt=""
                                 className="h-full w-full rounded-lg object-cover"
-                                style={getAvatarCropStyle(parseAvatarCropJson(p.avatarCrop))}
+                                style={getAvatarCropStyle(p.avatarCrop)}
                               />
                             ) : (
                               <User size="0.625rem" />
                             )}
                           </div>
-                          <div className={cn("min-w-0 flex-1", !selectionMode && "pr-14")}>
+                          <div
+                            className={cn(
+                              "min-w-0 flex-1",
+                              !selectionMode && "pr-0 max-md:pr-14 [@media(pointer:coarse)]:pr-14",
+                            )}
+                          >
                             <div className="truncate text-[0.75rem] font-medium">{p.name}</div>
                             {p.comment && (
                               <div className="truncate text-[0.5625rem] italic text-[var(--muted-foreground)]">
@@ -1005,7 +1020,7 @@ export function PersonasPanel() {
                             </div>
                           </div>
                           {!selectionMode && (
-                            <div className="flex items-center gap-0.5 opacity-0 transition-opacity group-hover/member:opacity-100 max-md:opacity-100">
+                            <div className="pointer-events-none absolute right-1 top-1/2 flex -translate-y-1/2 items-center gap-0.5 rounded-lg bg-[var(--sidebar)] p-0.5 opacity-0 shadow-sm ring-1 ring-[var(--border)] transition-opacity group-hover/member:opacity-100 [@media(pointer:fine)]:group-focus-within/member:opacity-100 max-md:opacity-100 [@media(pointer:coarse)]:opacity-100 group-hover/member:[&_button]:pointer-events-auto [@media(pointer:fine)]:group-focus-within/member:[&_button]:pointer-events-auto max-md:[&_button]:pointer-events-auto [@media(pointer:coarse)]:[&_button]:pointer-events-auto">
                               <ChatResourceActionButton
                                 payload={{ version: 1, kind: "persona", ids: [pid], label: p.name }}
                                 className="flex h-6 min-h-6 w-6 items-center justify-center p-0"
@@ -1072,7 +1087,7 @@ export function PersonasPanel() {
 
       <div className="stagger-children flex min-h-8 flex-col gap-1 rounded-xl transition-colors">
         {visibleRootPersonas.map((persona) => {
-          const active = isActive(persona);
+          const active = persona.isActive;
           const isBulkSelected = selectedPersonaIds.has(persona.id);
           const personaMetadata = getPersonaPreviewMetadata(persona);
 
@@ -1181,7 +1196,7 @@ export function PersonasPanel() {
                       alt=""
                       loading="lazy"
                       className="h-full w-full rounded-xl object-cover"
-                      style={getAvatarCropStyle(parseAvatarCropJson(persona.avatarCrop))}
+                      style={getAvatarCropStyle(persona.avatarCrop)}
                     />
                   ) : (
                     <User size="1rem" />
@@ -1198,8 +1213,10 @@ export function PersonasPanel() {
               </button>
 
               {/* Info */}
-              <div className={cn("min-w-0 flex-1", !selectionMode && "pr-32")}>
-                <div className="truncate text-sm font-medium">{persona.name}</div>
+              <div
+                className={cn("min-w-0 flex-1", !selectionMode && "pr-0 max-md:pr-32 [@media(pointer:coarse)]:pr-32")}
+              >
+                <div className="w-fit max-w-full truncate text-sm font-medium">{persona.name}</div>
                 {persona.comment && (
                   <div className="truncate text-[0.625rem] italic text-[var(--muted-foreground)]">
                     {persona.comment}
@@ -1215,7 +1232,7 @@ export function PersonasPanel() {
 
               {/* Actions */}
               {!selectionMode && (
-                <div className="absolute right-2 top-1/2 -translate-y-1/2 flex shrink-0 items-center gap-0.5 rounded-lg bg-[var(--sidebar)] px-1 py-0.5 opacity-0 shadow-sm ring-1 ring-[var(--border)] transition-opacity group-hover:opacity-100 max-md:opacity-100">
+                <div className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 flex shrink-0 items-center gap-0.5 rounded-lg bg-[var(--sidebar)] px-1 py-0.5 opacity-0 shadow-sm ring-1 ring-[var(--border)] transition-opacity group-hover:opacity-100 [@media(pointer:fine)]:group-focus-within:opacity-100 max-md:opacity-100 [@media(pointer:coarse)]:opacity-100 group-hover:[&_button]:pointer-events-auto [@media(pointer:fine)]:group-focus-within:[&_button]:pointer-events-auto max-md:[&_button]:pointer-events-auto [@media(pointer:coarse)]:[&_button]:pointer-events-auto">
                   <ChatResourceActionButton
                     payload={{ version: 1, kind: "persona", ids: [persona.id], label: persona.name }}
                   />
@@ -1283,7 +1300,7 @@ export function PersonasPanel() {
         >
           {personaPages.isFetchingNextPage
             ? localizeUi("ui.characters.characterlibraryview.loading")
-            : localizeUi("ui.panels.characterspanel.loadMoreValue1Loaded", { value1: rawList.length })}
+            : localizeUi("ui.panels.characterspanel.loadMoreValue1Loaded", { value1: personas.length })}
         </PanelLoadMoreBar>
       )}
 

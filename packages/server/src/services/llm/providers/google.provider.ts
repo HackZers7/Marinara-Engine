@@ -5,6 +5,7 @@ import { createHash, createSign } from "crypto";
 import {
   BaseLLMProvider,
   llmFetch,
+  llmHttpErrorFromResponse,
   sanitizeApiError,
   type ChatCompletionResult,
   type ChatMessage,
@@ -70,6 +71,25 @@ interface GeminiEmbeddingPayload {
 
 type GoogleProviderKind = "google" | "google_vertex";
 
+export function resolveGoogleFunctionCallingMode(toolChoice: ChatOptions["toolChoice"]): "AUTO" | "ANY" {
+  return toolChoice === "required" ? "ANY" : "AUTO";
+}
+
+export function applyGoogleFunctionCallingMode(
+  body: Record<string, unknown>,
+  toolChoice: ChatOptions["toolChoice"],
+): void {
+  const toolConfig = isRecord(body.toolConfig) ? body.toolConfig : {};
+  const functionCallingConfig = isRecord(toolConfig.functionCallingConfig) ? toolConfig.functionCallingConfig : {};
+  body.toolConfig = {
+    ...toolConfig,
+    functionCallingConfig: {
+      ...functionCallingConfig,
+      mode: resolveGoogleFunctionCallingMode(toolChoice),
+    },
+  };
+}
+
 interface GoogleServiceAccountKey {
   client_email?: string;
   private_key?: string;
@@ -90,6 +110,25 @@ function normalizeGoogleBaseUrl(baseUrl: string): string {
     return url.toString().replace(/\/+$/, "");
   } catch {
     return trimmed;
+  }
+}
+
+export function normalizeGoogleGenerativeLanguageBaseUrl(baseUrl: string): string {
+  const normalized = normalizeGoogleBaseUrl(baseUrl);
+  try {
+    const url = new URL(normalized);
+    const pathname = url.pathname.replace(/\/+$/, "").replace(/\/v1(?=\/|$)/i, "/v1beta");
+    url.pathname = /\/v\d/i.test(pathname) ? pathname : `${pathname}/v1beta`;
+    // Base-URL query or fragment text cannot safely precede model endpoint suffixes.
+    url.search = "";
+    url.hash = "";
+    return url.toString().replace(/\/+$/, "");
+  } catch {
+    const clean = normalized
+      .split(/[?#]/, 1)[0]!
+      .replace(/\/+$/, "")
+      .replace(/\/v1(?=\/|$)/i, "/v1beta");
+    return /\/v\d/i.test(clean) ? clean : `${clean}/v1beta`;
   }
 }
 
@@ -532,8 +571,10 @@ export class GoogleProvider extends BaseLLMProvider {
         ? resolveGeminiThinkingConfig(model, options, maxTokens ?? 4096)
         : undefined;
 
-    let base = normalizeGoogleBaseUrl(this.baseUrl);
-    if (this.providerKind === "google" && !/\/v\d/.test(base)) base += "/v1beta";
+    const base =
+      this.providerKind === "google"
+        ? normalizeGoogleGenerativeLanguageBaseUrl(this.baseUrl)
+        : normalizeGoogleBaseUrl(this.baseUrl);
     const url =
       this.providerKind === "google_vertex"
         ? buildGoogleVertexModelUrl(base, model, "generateContent")
@@ -562,7 +603,6 @@ export class GoogleProvider extends BaseLLMProvider {
         ...(options.stop?.length ? { stopSequences: options.stop } : {}),
       },
       tools: formatGoogleTools(options.tools),
-      toolConfig: { functionCallingConfig: { mode: "AUTO" } },
     };
 
     if (systemMessages.length > 0) {
@@ -570,6 +610,7 @@ export class GoogleProvider extends BaseLLMProvider {
     }
 
     this.applyCustomParameters(body, options);
+    applyGoogleFunctionCallingMode(body, options.toolChoice);
     const authHeaders =
       this.providerKind === "google_vertex"
         ? await googleAuthHeadersForVertex(this.apiKey)
@@ -589,7 +630,7 @@ export class GoogleProvider extends BaseLLMProvider {
     if (!response.ok) {
       const errorText = await readDecodedText();
       const label = this.providerKind === "google_vertex" ? "Vertex AI Gemini API" : "Gemini API";
-      throw new Error(`${label} error ${response.status}: ${sanitizeApiError(errorText)}`);
+      throw llmHttpErrorFromResponse(`${label} error ${response.status}: ${sanitizeApiError(errorText)}`, response);
     }
 
     const json = JSON.parse(await readDecodedText()) as GeminiResponsePayload;
@@ -642,8 +683,10 @@ export class GoogleProvider extends BaseLLMProvider {
 
     // Ensure the base URL includes the /v1beta path segment required by the Gemini API.
     // Proxies like api.linkapi.ai need this appended (SillyTavern does it automatically).
-    let base = normalizeGoogleBaseUrl(this.baseUrl);
-    if (this.providerKind === "google" && !/\/v\d/.test(base)) base += "/v1beta";
+    const base =
+      this.providerKind === "google"
+        ? normalizeGoogleGenerativeLanguageBaseUrl(this.baseUrl)
+        : normalizeGoogleBaseUrl(this.baseUrl);
 
     // When thinking is enabled, force non-streaming (generateContent) because
     // proxies like linkapi.ai strip thought parts from SSE streams but return
@@ -748,7 +791,7 @@ export class GoogleProvider extends BaseLLMProvider {
     if (!response.ok) {
       const errorText = await readDecodedText();
       const label = this.providerKind === "google_vertex" ? "Vertex AI Gemini API" : "Gemini API";
-      throw new Error(`${label} error ${response.status}: ${sanitizeApiError(errorText)}`);
+      throw llmHttpErrorFromResponse(`${label} error ${response.status}: ${sanitizeApiError(errorText)}`, response);
     }
 
     // ── Non-streaming path (also used when thinking is enabled) ──
@@ -904,8 +947,10 @@ export class GoogleProvider extends BaseLLMProvider {
     const label = this.providerKind === "google_vertex" ? "Vertex AI Gemini" : "Gemini API";
     const requestModel = model.replace(/^models\//, "") || "gemini-embedding-001";
     const timeoutMs = getEmbeddingRequestTimeoutMs();
-    let base = normalizeGoogleBaseUrl(this.baseUrl);
-    if (this.providerKind === "google" && !/\/v\d/.test(base)) base += "/v1beta";
+    const base =
+      this.providerKind === "google"
+        ? normalizeGoogleGenerativeLanguageBaseUrl(this.baseUrl)
+        : normalizeGoogleBaseUrl(this.baseUrl);
     const url =
       this.providerKind === "google_vertex"
         ? buildGoogleVertexModelUrl(base, requestModel, "embedContent")
@@ -935,7 +980,10 @@ export class GoogleProvider extends BaseLLMProvider {
 
       if (!response.ok) {
         const body = await response.text().catch(() => "");
-        throw new Error(`${label} batch embedding request failed (${response.status}): ${sanitizeApiError(body)}`);
+        throw llmHttpErrorFromResponse(
+          `${label} batch embedding request failed (${response.status}): ${sanitizeApiError(body)}`,
+          response,
+        );
       }
       return parseGeminiBatchEmbeddingResponse((await response.json()) as GeminiEmbeddingPayload, texts.length);
     }
@@ -956,7 +1004,10 @@ export class GoogleProvider extends BaseLLMProvider {
 
       if (!response.ok) {
         const body = await response.text().catch(() => "");
-        throw new Error(`${label} embedding request failed (${response.status}): ${sanitizeApiError(body)}`);
+        throw llmHttpErrorFromResponse(
+          `${label} embedding request failed (${response.status}): ${sanitizeApiError(body)}`,
+          response,
+        );
       }
       embeddings.push(parseGeminiEmbeddingResponse((await response.json()) as GeminiEmbeddingPayload));
     }

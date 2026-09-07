@@ -3,7 +3,16 @@
 // Replaces the chat area when editing a character.
 // Sections: Metadata, Card, Convo, Lorebook, Sprites, Gallery, Colors, Stats, Advanced
 // ──────────────────────────────────────────────
-import { useState, useEffect, useRef, useCallback, type ChangeEvent, type ReactNode, type SyntheticEvent } from "react";
+import {
+  useState,
+  useEffect,
+  useRef,
+  useCallback,
+  useMemo,
+  type ChangeEvent,
+  type ReactNode,
+  type SyntheticEvent,
+} from "react";
 import { toast } from "sonner";
 import { useQueryClient } from "@tanstack/react-query";
 import {
@@ -46,12 +55,16 @@ import {
   type SpriteInfo,
 } from "../../hooks/use-characters";
 import { ConvoProfileFields } from "./ConvoProfileFields";
+import { CharacterScheduleEditorModal } from "../chat/CharacterScheduleEditorModal";
 import { useUIStore } from "../../stores/ui.store";
 import { lorebookKeys, useLorebook, useUpdateLorebook } from "../../hooks/use-lorebooks";
 import { useConnections } from "../../hooks/use-connections";
 import { useInstalledCapabilityPackages } from "../../hooks/use-capability-packages";
 import { showConfirmDialog, showPromptDialog } from "../../lib/app-dialogs";
 import { formatCardVersionTimestamp, getCardVersionTitle } from "../../lib/card-version-history";
+import { dataImageUrlToFile } from "../../lib/data-image-file";
+import { mergeEmbeddedCharacterCardFields } from "../../lib/character-import";
+import { parsePngCharacterCard } from "../../lib/png-parser";
 import { SpriteGenerationModal } from "../ui/SpriteGenerationModal";
 import { AvatarGenerationModal } from "../ui/AvatarGenerationModal";
 import { AvatarCropWidget } from "../ui/AvatarCropWidget";
@@ -61,6 +74,7 @@ import { CallClipGenerationModal } from "../ui/CallClipGenerationModal";
 import { ImageUploadDropzone } from "../ui/ImageUploadDropzone";
 import { CustomEmojiTagButton } from "../ui/CustomEmojiTagButton";
 import { CharacterRegexSection } from "./CharacterRegexSection";
+import { NameAliasesSection } from "../ui/NameAliasesSection";
 import {
   ArrowDown,
   ArrowLeft,
@@ -84,6 +98,7 @@ import {
   Palette,
   FolderOpen,
   Film,
+  Link2,
   Loader2,
   Swords,
   Crop,
@@ -97,19 +112,16 @@ import {
   Scissors,
   MessageCircle,
   Pencil,
+  Check,
 } from "lucide-react";
-import {
-  cn,
-  copyToClipboard,
-  generateClientId,
-  getAvatarCropStyle,
-  type AvatarCrop,
-  type LegacyAvatarCrop,
-} from "../../lib/utils";
+import { cn, copyToClipboard, generateClientId, getAvatarCropStyle } from "../../lib/utils";
+import { normalizeAvatarCrop, type WeekSchedule } from "@marinara-engine/shared";
 import { extractColorsFromImage } from "../../lib/avatar-color-extraction";
+import { buildCardAssetMarkdown } from "../../lib/card-asset-links";
 import { HelpTooltip } from "../ui/HelpTooltip";
 import { api } from "../../lib/api-client";
 import { downloadSpriteFile } from "../../lib/sprite-download";
+import { downloadUrlToDevice } from "../../lib/file-download";
 import { ColorPicker } from "../ui/ColorPicker";
 import { StatIconPicker } from "../ui/StatIconPicker";
 import { MacroTextarea } from "../ui/MacroTextarea";
@@ -117,7 +129,7 @@ import { Modal } from "../ui/Modal";
 import { SpriteFrameEditor } from "../ui/SpriteFrameEditor";
 import { SpriteWandCleanupEditor } from "../ui/SpriteWandCleanupEditor";
 import { ExportFormatDialog, type ExportFormatChoice } from "../ui/ExportFormatDialog";
-import { EditorTabRail } from "../ui/EditorTabRail";
+import { EditorTabNavigation } from "../ui/EditorTabNavigation";
 import { EditorSectionAnchor, EditorSectionJumps } from "../ui/EditorSectionJumps";
 import { SettingsSwitch } from "../panels/settings/SettingControls";
 import {
@@ -289,6 +301,7 @@ export function CharacterEditor() {
   const duplicateCharacter = useDuplicateCharacter();
   const createPersona = useCreatePersona();
   const uploadPersonaAvatar = useUploadPersonaAvatar();
+  const uploadCharacterSheet = useUploadCharacterGalleryImage(characterId ?? "");
   const { data: connectionsList } = useConnections();
 
   const [activeTab, setActiveTab] = useState<TabId>(
@@ -327,6 +340,7 @@ export function CharacterEditor() {
   const [avatarUploading, setAvatarUploading] = useState(false);
   const [exportDialogOpen, setExportDialogOpen] = useState(false);
   const [avatarGeneratorOpen, setAvatarGeneratorOpen] = useState(false);
+  const [characterSheetGeneratorOpen, setCharacterSheetGeneratorOpen] = useState(false);
   const [newTag, setNewTag] = useState("");
   const [showUnsavedWarning, setShowUnsavedWarning] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -395,12 +409,10 @@ export function CharacterEditor() {
   }, []);
 
   // Embedding a lorebook into the card mutates the character server-side
-  // (data.character_book + the embeddedLorebook pointer). When the editor is
-  // clean, the detail-query refetch re-syncs formData for us; when it is dirty
-  // the parse effect skips that re-sync, so patch formData directly — otherwise
-  // a later Save would send the stale pre-embed data and silently revert it.
+  // (data.character_book + the embeddedLorebook pointer). Mirror that mutation
+  // in local formData immediately. Besides preserving dirty edits, this lets
+  // the Embed action react before the query refetch.
   const handleLorebookEmbedded = useCallback((lorebookId: string, characterBook: unknown) => {
-    if (!dirtyRef.current) return;
     setFormData((prev) => {
       if (!prev) return prev;
       const extensions = { ...(prev.extensions ?? {}) } as Record<string, unknown>;
@@ -418,17 +430,14 @@ export function CharacterEditor() {
 
   // "Remove from card" clears the embedded lorebook server-side
   // (data.character_book + the embeddedLorebook pointer) immediately. Mirror
-  // handleLorebookEmbedded's reconciliation: when the editor is clean the
-  // detail-query refetch re-syncs formData for us; when it is dirty the parse
-  // effect skips that re-sync, so patch formData directly — otherwise a later
-  // Save would resend the stale pre-remove data and silently re-embed it. The
-  // linked standalone lorebook, if any, is left untouched.
+  // handleLorebookEmbedded's reconciliation immediately so the Embed action
+  // becomes available again without waiting for a query refetch. The linked
+  // standalone lorebook, if any, is left untouched.
   const handleLorebookUnembedded = useCallback(() => {
     if (lorebookEmbedInFlightRef.current) {
       toast.error(localizeUi("ui.characters.charactereditor.waitForTheEmbeddedLorebookUpdateToFinishBefore"));
       return;
     }
-    if (!dirtyRef.current) return;
     setFormData((prev) => {
       if (!prev) return prev;
       const extensions = { ...(prev.extensions ?? {}) } as Record<string, unknown>;
@@ -454,6 +463,23 @@ export function CharacterEditor() {
       markDirty();
     },
     [formatQuotes, markDirty, setExtensionValue],
+  );
+
+  const handleGeneratedCharacterSheet = useCallback(
+    async (dataUrl: string) => {
+      let file: File;
+      try {
+        file = dataImageUrlToFile(dataUrl, `${formData?.name || "character"}-sheet`);
+      } catch {
+        throw new Error(localizeUi("ui.characters.charactersheet.generatedSaveFailed"));
+      }
+      const uploaded = await uploadCharacterSheet.mutateAsync([file]);
+      const image = uploaded[0];
+      if (!image) throw new Error(localizeUi("ui.characters.charactersheet.generatedSaveFailed"));
+      updateExtension("characterSheetImageId", image.id);
+      toast.success(localizeUi("ui.characters.charactersheet.created"));
+    },
+    [formData?.name, localizeUi, updateExtension, uploadCharacterSheet],
   );
 
   const beginAvatarUpload = useCallback(() => {
@@ -535,6 +561,7 @@ export function CharacterEditor() {
     const shouldClearAvatarCrop = fallbackAvatarCrop !== undefined;
     const fallbackDirty = dirtyRef.current;
     const editRevisionAtUploadStart = editRevisionRef.current;
+    const formDataAtUploadStart = formData;
 
     const reader = new FileReader();
     reader.onload = async () => {
@@ -551,7 +578,30 @@ export function CharacterEditor() {
         setDirtyState(true);
       }
       try {
-        await uploadAvatar.mutateAsync({ id: uploadCharacterId, avatar: dataUrl });
+        let replacementData: CharacterData | undefined;
+        if ((file.type === "image/png" || file.name.toLowerCase().endsWith(".png")) && formDataAtUploadStart) {
+          try {
+            const card = await parsePngCharacterCard(file);
+            const baseData = shouldClearAvatarCrop
+              ? {
+                  ...formDataAtUploadStart,
+                  extensions: { ...formDataAtUploadStart.extensions, avatarCrop: null },
+                }
+              : formDataAtUploadStart;
+            replacementData = mergeEmbeddedCharacterCardFields(baseData, card.json) ?? undefined;
+          } catch {
+            // Ordinary PNG avatars carry no card metadata and keep the current character fields.
+          }
+        }
+        await uploadAvatar.mutateAsync({ id: uploadCharacterId, avatar: dataUrl, data: replacementData });
+        if (
+          replacementData &&
+          isCurrentAvatarUpload(uploadToken, uploadCharacterId) &&
+          editRevisionRef.current === editRevisionAtUploadStart
+        ) {
+          setFormData(replacementData);
+          setDirtyState(false);
+        }
       } catch {
         if (!isCurrentAvatarUpload(uploadToken, uploadCharacterId)) return;
         setAvatarPreview(fallbackAvatarPreview);
@@ -726,7 +776,7 @@ export function CharacterEditor() {
 
     const rpgStats = formData.extensions.rpgStats as RPGStatsConfig | undefined;
     const personaStats = rpgStats
-      ? JSON.stringify({
+      ? {
           enabled: !!rpgStats.enabled,
           bars: [
             { name: "Satiety", value: 100, max: 100, color: "#f59e0b" },
@@ -735,8 +785,8 @@ export function CharacterEditor() {
             { name: "Mood", value: 100, max: 100, color: "#eab308" },
           ],
           rpgStats,
-        })
-      : "";
+        }
+      : null;
 
     try {
       const created = (await createPersona.mutateAsync({
@@ -744,6 +794,7 @@ export function CharacterEditor() {
         comment: formData.creator_notes ?? "",
         creator: formData.creator ?? "",
         personaVersion: formData.character_version ?? "1.0",
+        versioningEnabled: formData.extensions.versioningEnabled !== false,
         creatorNotes: formData.creator_notes ?? "",
         description: formData.description ?? "",
         personality: formData.personality ?? "",
@@ -753,11 +804,9 @@ export function CharacterEditor() {
         nameColor: (formData.extensions.nameColor as string) ?? "",
         dialogueColor: (formData.extensions.dialogueColor as string) ?? "",
         boxColor: (formData.extensions.boxColor as string) ?? "",
-        trackerCardColors: serializeTrackerCardColorConfig(
-          parseTrackerCardColorConfig(formData.extensions.trackerCardColors),
-        ),
+        trackerCardColors: parseTrackerCardColorConfig(formData.extensions.trackerCardColors),
         personaStats,
-        tags: JSON.stringify(formData.tags ?? []),
+        tags: formData.tags ?? [],
       })) as { id?: string };
 
       const personaId = created?.id;
@@ -857,7 +906,13 @@ export function CharacterEditor() {
 
   const headerActionButtonClass = "mari-editor-action inline-flex";
   const saveDisabled = !dirty || saving || avatarUploading || lorebookEmbedding;
-  const saveLabel = avatarUploading ? "Uploading…" : lorebookEmbedding ? "Embedding…" : saving ? "Saving…" : "Save";
+  const saveLabel = avatarUploading
+    ? localizeUi("editor.save.uploading")
+    : lorebookEmbedding
+      ? localizeUi("editor.save.embedding")
+      : saving
+        ? localizeUi("editor.save.saving")
+        : localizeUi("editor.save.action");
   const saveButtonClass = cn(
     "mari-editor-action mari-editor-action--primary mari-editor-action--save inline-flex",
     saveDisabled && "cursor-not-allowed opacity-50",
@@ -971,10 +1026,22 @@ export function CharacterEditor() {
         onClose={() => setAvatarGeneratorOpen(false)}
         onUseAvatar={handleGeneratedAvatar}
       />
+      <AvatarGenerationModal
+        open={characterSheetGeneratorOpen}
+        mode="character-sheet"
+        title={localizeUi("ui.characters.charactersheet.createTitle")}
+        entityName={formData.name || localizeUi("ui.characters.charactersheet.characterFallback")}
+        defaultAppearance={
+          ((formData.extensions.appearance as string | undefined) || formData.description || formData.personality) ?? ""
+        }
+        defaultAvatarUrl={avatarPreview}
+        onClose={() => setCharacterSheetGeneratorOpen(false)}
+        onUseAvatar={handleGeneratedCharacterSheet}
+      />
 
       {/* ── Header ── */}
-      <div className="mari-editor-header">
-        <div className="mari-editor-header-main max-md:min-w-full">
+      <div className="mari-editor-header mari-editor-header--with-nav">
+        <div className="mari-editor-header-main mari-editor-header-main--identity">
           <button
             type="button"
             onClick={handleClose}
@@ -997,7 +1064,7 @@ export function CharacterEditor() {
                 src={avatarPreview}
                 alt={formData.name}
                 className="pointer-events-none h-full w-full object-cover"
-                style={getAvatarCropStyle(formData.extensions.avatarCrop as AvatarCrop | LegacyAvatarCrop | undefined)}
+                style={getAvatarCropStyle(normalizeAvatarCrop(formData.extensions.avatarCrop))}
               />
             ) : (
               <User size="1.375rem" className="text-white" />
@@ -1054,10 +1121,19 @@ export function CharacterEditor() {
           </div>
         </div>
 
+        <EditorTabNavigation tabs={TABS} activeId={activeTab} onChange={setActiveTab} />
+
         <div className="mari-editor-actions flex">
-          <button type="button" onClick={handleSave} disabled={saveDisabled} className={saveButtonClass}>
+          <button
+            type="button"
+            onClick={handleSave}
+            disabled={saveDisabled}
+            className={saveButtonClass}
+            aria-label={saveLabel}
+            title={saveLabel}
+          >
             <Save size="0.9375rem" />
-            <span>{saveLabel}</span>
+            <span className="mari-editor-save-label">{saveLabel}</span>
           </button>
           {headerActions}
         </div>
@@ -1100,10 +1176,8 @@ export function CharacterEditor() {
         </div>
       )}
 
-      {/* ── Body: Tabs + Content ── */}
-      <div className="mari-editor-body @max-5xl:flex-col">
-        <EditorTabRail tabs={TABS} activeId={activeTab} onChange={setActiveTab} />
-
+      {/* ── Body ── */}
+      <div className="mari-editor-body">
         {/* Tab Content */}
         <div className="mari-editor-content @max-5xl:p-4">
           <div className="mari-editor-content-inner">
@@ -1155,10 +1229,22 @@ export function CharacterEditor() {
                 characterName={formData.name}
                 defaultAppearance={(formData.extensions.appearance as string) ?? formData.description}
                 defaultAvatarUrl={avatarPreview}
+                characterSheetImageId={
+                  typeof formData.extensions.characterSheetImageId === "string"
+                    ? formData.extensions.characterSheetImageId
+                    : null
+                }
+                useCharacterSheetAsReference={formData.extensions.useCharacterSheetAsReference === true}
+                updateExtension={updateExtension}
+                onCreateCharacterSheet={() => setCharacterSheetGeneratorOpen(true)}
               />
             )}
             {activeTab === "gallery" && characterId && (
-              <CharacterGalleryTab characterId={characterId} characterName={formData.name} />
+              <CharacterGalleryTab
+                characterId={characterId}
+                characterName={formData.name}
+                onCreateCharacterSheet={() => setCharacterSheetGeneratorOpen(true)}
+              />
             )}
             {activeTab === "colors" && (
               <ColorsTab formData={formData} updateExtension={updateExtension} avatarUrl={avatarPreview} />
@@ -1296,6 +1382,7 @@ function CharacterDescriptionTab({
   updateField: <K extends keyof CharacterData>(key: K, value: CharacterData[K]) => void;
 }) {
   const { t: localizeUi } = useUiTranslation();
+  const selfCharacterId = useUIStore((s) => s.characterDetailId);
   return (
     <div className="mari-editor-panel space-y-3 p-3">
       <SectionHeader
@@ -1310,6 +1397,7 @@ function CharacterDescriptionTab({
         rows={12}
         title={localizeUi("chat.settings.inlineEditor.fields.description")}
         showMarkdownPreview
+        selfCharacterId={selfCharacterId}
         className="w-full resize-y rounded-xl border border-[var(--border)] bg-[var(--secondary)] p-4 text-sm leading-relaxed outline-none transition-colors placeholder:text-[var(--muted-foreground)]/40 focus:border-[var(--primary)]/40 focus:ring-1 focus:ring-[var(--primary)]/20"
       />
       <p className="mt-1.5 text-right text-[0.625rem] text-[var(--muted-foreground)]">
@@ -1337,6 +1425,7 @@ function TextareaTab({
   rows?: number;
 }) {
   const { t: localizeUi } = useUiTranslation();
+  const selfCharacterId = useUIStore((s) => s.characterDetailId);
   return (
     <div className="mari-editor-panel space-y-3 p-3">
       <SectionHeader title={title} subtitle={subtitle} helpText={helpText} />
@@ -1347,6 +1436,7 @@ function TextareaTab({
         rows={rows}
         title={title}
         showMarkdownPreview
+        selfCharacterId={selfCharacterId}
         className="w-full resize-y rounded-xl border border-[var(--border)] bg-[var(--secondary)] p-4 text-sm leading-relaxed outline-none transition-colors placeholder:text-[var(--muted-foreground)]/40 focus:border-[var(--primary)]/40 focus:ring-1 focus:ring-[var(--primary)]/20"
       />
       <p className="mt-1.5 text-right text-[0.625rem] text-[var(--muted-foreground)]">
@@ -1368,29 +1458,82 @@ function ConvoTab({
   characterId?: string;
 }) {
   const ext = formData.extensions;
+  const { t: localizeUi } = useUiTranslation();
+  const [scheduleOpen, setScheduleOpen] = useState(false);
+  // The schedule is runtime state, not card content, so it saves on its own
+  // rather than through the editor form. Routing it through `updateExtension`
+  // would mark the card dirty and raise a discard prompt for a routine that is
+  // regenerated every week.
+  const updateCharacter = useUpdateCharacter();
+  const savedCharacter = useCharacter(characterId ?? null);
+  const savedData = (() => {
+    const rawData = (savedCharacter.data as { data?: unknown } | undefined)?.data;
+    if (!rawData) return undefined;
+    try {
+      return (typeof rawData === "string" ? JSON.parse(rawData) : rawData) as CharacterData;
+    } catch {
+      return undefined;
+    }
+  })();
+  const savedExtensions = savedData?.extensions;
+  // Read the saved card, not the form: the schedule saves on its own, so the
+  // in-progress form copy goes stale as soon as the editor writes one.
+  const schedule =
+    (savedExtensions?.conversationSchedule as WeekSchedule | undefined) ??
+    (ext.conversationSchedule as WeekSchedule | undefined);
   return (
     // Key by the edited character so transient edit state resets on switch. The
     // editor reuses this component instance while moving between characters.
-    <ConvoProfileFields
-      key={characterId ?? "new-character"}
-      kind={kind}
-      entityKey={characterId ?? "new-character"}
-      baseName={formData.name}
-      displayName={(ext.convoDisplayName as string) ?? ""}
-      onDisplayNameChange={(v) => updateExtension("convoDisplayName", v)}
-      displayNameInCard={ext.convoDisplayNameInCard === true}
-      onDisplayNameInCardChange={(v) => updateExtension("convoDisplayNameInCard", v)}
-      aboutMe={(ext.aboutMe as string) ?? ""}
-      onAboutMeChange={(v) => updateExtension("aboutMe", v)}
-      behavior={ext.convoBehavior as ConvoBehaviorConfig | undefined}
-      onBehaviorChange={(b) => updateExtension("convoBehavior", b)}
-      imageInstructions={(ext.conversationImageInstructions as string) ?? ""}
-      onImageInstructionsChange={(value) => updateExtension("conversationImageInstructions", value)}
-      applyImageInstructionsToNoodle={ext.applyConversationImageInstructionsToNoodle === true}
-      onApplyImageInstructionsToNoodleChange={(value) =>
-        updateExtension("applyConversationImageInstructionsToNoodle", value)
-      }
-    />
+    <>
+      <ConvoProfileFields
+        key={characterId ?? "new-character"}
+        kind={kind}
+        entityKey={characterId ?? "new-character"}
+        baseName={formData.name}
+        displayName={(ext.convoDisplayName as string) ?? ""}
+        onDisplayNameChange={(v) => updateExtension("convoDisplayName", v)}
+        displayNameInCard={ext.convoDisplayNameInCard === true}
+        onDisplayNameInCardChange={(v) => updateExtension("convoDisplayNameInCard", v)}
+        aboutMe={(ext.aboutMe as string) ?? ""}
+        onAboutMeChange={(v) => updateExtension("aboutMe", v)}
+        behavior={ext.convoBehavior as ConvoBehaviorConfig | undefined}
+        onBehaviorChange={(b) => updateExtension("convoBehavior", b)}
+        imageInstructions={(ext.conversationImageInstructions as string) ?? ""}
+        onImageInstructionsChange={(value) => updateExtension("conversationImageInstructions", value)}
+        applyImageInstructionsToNoodle={ext.applyConversationImageInstructionsToNoodle === true}
+        onApplyImageInstructionsToNoodleChange={(value) =>
+          updateExtension("applyConversationImageInstructionsToNoodle", value)
+        }
+        schedule={schedule}
+        onEditSchedule={kind === "character" && characterId ? () => setScheduleOpen(true) : undefined}
+      />
+      {/* No chatId: the schedule belongs to the character, so the editor works
+        without a chat open. The draft routes fall back to the default connection. */}
+      <CharacterScheduleEditorModal
+        open={scheduleOpen && !!characterId}
+        characterId={characterId ?? ""}
+        characterName={formData.name}
+        schedule={schedule}
+        onClose={() => setScheduleOpen(false)}
+        onSave={(savedCharacterId, updated) =>
+          updateCharacter.mutate(
+            {
+              id: savedCharacterId,
+              data: { extensions: { conversationSchedule: updated } },
+              skipVersionSnapshot: true,
+            },
+            {
+              onError: (error) =>
+                toast.error(
+                  error instanceof Error
+                    ? error.message
+                    : localizeUi("ui.chat.characterscheduleeditormodal.failedToSaveSchedule"),
+                ),
+            },
+          )
+        }
+      />
+    </>
   );
 }
 
@@ -1439,7 +1582,7 @@ function MetadataTab({
   const { t } = useTranslation();
   // Read existing crop in either current or legacy shape; the widget handles both
   // and writes back the current shape on first interaction.
-  const savedCrop = (formData.extensions.avatarCrop as AvatarCrop | LegacyAvatarCrop | undefined) ?? null;
+  const savedCrop = normalizeAvatarCrop(formData.extensions.avatarCrop);
 
   return (
     <div className="space-y-5">
@@ -1448,20 +1591,6 @@ function MetadataTab({
         subtitle={localizeUi("ui.characters.metadatatab.basicCharacterInfoAvatarNameTitleCreatorVersionTags")}
         helpText={CHARACTER_METADATA_HELP}
       />
-
-      <div className="space-y-1.5">
-        <span className="inline-flex items-center gap-1 text-xs font-medium text-[var(--muted-foreground)]">
-          {t("editor.avatar.label")}
-          <HelpTooltip text={t("editor.avatar.character.help")} />
-        </span>
-        <AvatarReplaceActions
-          hasAvatar={Boolean(avatarPreview)}
-          uploading={avatarUploading}
-          generationAvailable={imageGenerationAvailable}
-          onUpload={onSelectAvatar}
-          onGenerate={onGenerateAvatar}
-        />
-      </div>
 
       {characterId && (
         <div className="flex flex-wrap items-center gap-2 rounded-xl border border-[var(--border)] bg-[var(--secondary)]/70 px-3 py-2">
@@ -1487,17 +1616,32 @@ function MetadataTab({
         </div>
       )}
 
-      {/* Avatar Crop */}
-      {avatarPreview && (
-        <AvatarCropWidget
-          src={avatarPreview}
-          alt={formData.name}
-          crop={savedCrop}
-          onChange={(next) => updateExtension("avatarCrop", next)}
-          onRemove={onRemoveAvatar}
-          removing={removingAvatar}
+      <div className="space-y-1.5">
+        <span className="inline-flex items-center gap-1 text-xs font-medium text-[var(--muted-foreground)]">
+          {t("editor.avatar.label")}
+          <HelpTooltip text={t("editor.avatar.character.help")} />
+        </span>
+
+        {/* Avatar Crop */}
+        {avatarPreview && (
+          <AvatarCropWidget
+            src={avatarPreview}
+            alt={formData.name}
+            crop={savedCrop}
+            onChange={(next) => updateExtension("avatarCrop", next)}
+            onRemove={onRemoveAvatar}
+            removing={removingAvatar}
+          />
+        )}
+
+        <AvatarReplaceActions
+          hasAvatar={Boolean(avatarPreview)}
+          uploading={avatarUploading}
+          generationAvailable={imageGenerationAvailable}
+          onUpload={onSelectAvatar}
+          onGenerate={onGenerateAvatar}
         />
-      )}
+      </div>
 
       <div className="grid gap-4 sm:grid-cols-2">
         <label className="space-y-1.5 sm:col-span-2">
@@ -1554,16 +1698,31 @@ function MetadataTab({
           />
         </label>
         <div className="space-y-1.5">
-          <span className="inline-flex items-center gap-1 text-xs font-medium text-[var(--muted-foreground)]">
-            {localizeUi("ui.characters.metadatatab.version")}{" "}
-            <HelpTooltip
-              text={localizeUi("ui.characters.metadatatab.versionNumberForTrackingChangesToThisCharacterDefinition")}
+          <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1">
+            <span className="inline-flex items-center gap-1 text-xs font-medium text-[var(--muted-foreground)]">
+              {localizeUi("ui.characters.metadatatab.version")}{" "}
+              <HelpTooltip
+                text={localizeUi("ui.characters.metadatatab.versionNumberForTrackingChangesToThisCharacterDefinition")}
+              />
+            </span>
+            <SettingsSwitch
+              checked={formData.extensions.versioningEnabled !== false}
+              onChange={(enabled) => {
+                updateExtension("versioningEnabled", enabled);
+                if (enabled && !formData.character_version.trim()) updateField("character_version", "1.0");
+              }}
+              label={localizeUi("ui.cardversionhistory.automaticVersioning")}
+              labelPosition="end"
+              title={localizeUi("ui.cardversionhistory.automaticVersioningDescription")}
+              className="min-h-11 gap-2 rounded-md px-1 py-0"
+              labelClassName="text-xs font-medium text-[var(--muted-foreground)]"
             />
-          </span>
+          </div>
           <input
             value={formData.character_version}
             onChange={(e) => updateField("character_version", e.target.value)}
-            className="w-full rounded-xl border border-[var(--border)] bg-[var(--secondary)] px-3 py-2 text-sm outline-none focus:border-[var(--primary)]/40 focus:ring-1 focus:ring-[var(--primary)]/20"
+            disabled={formData.extensions.versioningEnabled === false}
+            className="w-full rounded-xl border border-[var(--border)] bg-[var(--secondary)] px-3 py-2 text-sm outline-none focus:border-[var(--primary)]/40 focus:ring-1 focus:ring-[var(--primary)]/20 disabled:cursor-not-allowed disabled:opacity-50"
             placeholder="1.0"
           />
           <CharacterVersionHistoryPanel
@@ -1664,6 +1823,7 @@ function MetadataTab({
           rows={4}
           title={localizeUi("ui.characters.metadatatab.creatorNotes")}
           showMarkdownPreview
+          selfCharacterId={characterId}
           className="w-full resize-y rounded-xl border border-[var(--border)] bg-[var(--secondary)] p-3 text-sm outline-none placeholder:text-[var(--muted-foreground)]/40 focus:border-[var(--primary)]/40 focus:ring-1 focus:ring-[var(--primary)]/20"
           placeholder={localizeUi("ui.characters.metadatatab.notesAboutThisCharacterIntendedUseTipsForBest")}
         />
@@ -2045,6 +2205,7 @@ function DialogueTab({
   updateField: <K extends keyof CharacterData>(key: K, value: CharacterData[K]) => void;
 }) {
   const { t: localizeUi } = useUiTranslation();
+  const selfCharacterId = useUIStore((s) => s.characterDetailId);
   const greetingKeysRef = useRef<string[]>([]);
 
   while (greetingKeysRef.current.length < formData.alternate_greetings.length) {
@@ -2112,6 +2273,7 @@ function DialogueTab({
           rows={6}
           title={localizeUi("ui.characters.dialoguetab.firstMessage")}
           showMarkdownPreview
+          selfCharacterId={selfCharacterId}
           className="w-full resize-y rounded-xl border border-[var(--border)] bg-[var(--secondary)] p-4 text-sm leading-relaxed outline-none placeholder:text-[var(--muted-foreground)]/40 focus:border-[var(--primary)]/40 focus:ring-1 focus:ring-[var(--primary)]/20"
           placeholder={localizeUi("ui.characters.dialoguetab.whatIsTheCharacterSFirstMessageWhenA")}
         />
@@ -2185,6 +2347,7 @@ function DialogueTab({
               rows={3}
               title={localizeUi("ui.characters.dialoguetab.alternateGreetingValue1", { value1: i + 1 })}
               showMarkdownPreview
+              selfCharacterId={selfCharacterId}
               className="w-full resize-y rounded-xl border border-[var(--border)] bg-[var(--secondary)] p-3 text-sm outline-none placeholder:text-[var(--muted-foreground)]/40 focus:border-[var(--primary)]/40"
               placeholder={localizeUi("ui.characters.dialoguetab.greetingValue1", { value1: i + 1 })}
             />
@@ -2209,6 +2372,7 @@ function DialogueTab({
           rows={10}
           title={localizeUi("chat.settings.inlineEditor.fields.exampleDialogue")}
           showMarkdownPreview
+          selfCharacterId={selfCharacterId}
           className="w-full resize-y rounded-xl border border-[var(--border)] bg-[var(--secondary)] p-4 font-mono text-xs leading-relaxed outline-none placeholder:text-[var(--muted-foreground)]/40 focus:border-[var(--primary)]/40 focus:ring-1 focus:ring-[var(--primary)]/20"
           placeholder={localizeUi("ui.characters.dialoguetab.startUserHelloCharWavesExcitedlyHeyThere")}
         />
@@ -2252,6 +2416,7 @@ function AdvancedTab({
           rows={6}
           title={localizeUi("ui.characters.advancedtab.systemPrompt")}
           showMarkdownPreview
+          selfCharacterId={characterId}
           className="w-full resize-y rounded-xl border border-[var(--border)] bg-[var(--secondary)] p-4 text-sm outline-none placeholder:text-[var(--muted-foreground)]/40 focus:border-[var(--primary)]/40 focus:ring-1 focus:ring-[var(--primary)]/20"
           placeholder={localizeUi(
             "ui.characters.advancedtab.characterSpecificInstructionsInsertedThroughCharsysinfoOrTheCharacter",
@@ -2270,6 +2435,7 @@ function AdvancedTab({
           rows={4}
           title={localizeUi("ui.characters.advancedtab.postHistoryInstructions")}
           showMarkdownPreview
+          selfCharacterId={characterId}
           className="w-full resize-y rounded-xl border border-[var(--border)] bg-[var(--secondary)] p-4 text-sm outline-none placeholder:text-[var(--muted-foreground)]/40 focus:border-[var(--primary)]/40 focus:ring-1 focus:ring-[var(--primary)]/20"
           placeholder={localizeUi("ui.characters.advancedtab.textInsertedAfterTheChatHistoryButBeforeGeneration")}
         />
@@ -2287,6 +2453,7 @@ function AdvancedTab({
           rows={4}
           title={localizeUi("ui.characters.advancedtab.depthPrompt")}
           showMarkdownPreview
+          selfCharacterId={characterId}
           className="w-full resize-y rounded-xl border border-[var(--border)] bg-[var(--secondary)] p-3 text-sm outline-none focus:border-[var(--primary)]/40"
           placeholder={localizeUi("ui.characters.advancedtab.promptInjectedAtASpecificDepthInTheChat")}
         />
@@ -2433,7 +2600,149 @@ function characterClipTrimLabel(clip: CharacterGalleryClip) {
   return `${formatTrimSecond(start)} -> ${formatTrimSecond(end)}`;
 }
 
-function CharacterGalleryTab({ characterId, characterName }: { characterId: string; characterName?: string }) {
+function CharacterSheetSection({
+  characterId,
+  characterName,
+  characterSheetImageId,
+  useAsReference,
+  updateExtension,
+  onCreateCharacterSheet,
+}: {
+  characterId: string;
+  characterName: string;
+  characterSheetImageId: string | null;
+  useAsReference: boolean;
+  updateExtension: (key: string, value: unknown) => void;
+  onCreateCharacterSheet: () => void;
+}) {
+  const { t: localizeUi } = useUiTranslation();
+  const { data: images, isLoading } = useCharacterGalleryImages(characterId);
+  const upload = useUploadCharacterGalleryImage(characterId);
+  const selectedImage = images?.find((image) => image.id === characterSheetImageId) ?? null;
+  const selectionMissing = Boolean(characterSheetImageId && !isLoading && !selectedImage);
+
+  const chooseImage = useCallback(
+    (imageId: string) => {
+      updateExtension("characterSheetImageId", imageId);
+    },
+    [updateExtension],
+  );
+
+  const handleUpload = useCallback(
+    async (files: File[]) => {
+      const file = files[0];
+      if (!file) return;
+      try {
+        const uploaded = await upload.mutateAsync([file]);
+        const image = uploaded[0];
+        if (image) chooseImage(image.id);
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : localizeUi("ui.characters.charactersheet.uploadFailed"));
+      }
+    },
+    [chooseImage, localizeUi, upload],
+  );
+
+  const clearSelection = useCallback(() => {
+    updateExtension("characterSheetImageId", null);
+    updateExtension("useCharacterSheetAsReference", false);
+  }, [updateExtension]);
+
+  return (
+    <section className="space-y-6 border-t border-[var(--border)] pt-5">
+      <SectionHeader
+        title={localizeUi("ui.characters.charactersheet.title")}
+        subtitle={localizeUi("ui.characters.charactersheet.subtitle")}
+      />
+
+      <div className="grid gap-5 lg:grid-cols-[minmax(0,1.2fr)_minmax(18rem,0.8fr)]">
+        <div className="overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--card)]">
+          {selectedImage ? (
+            <img
+              src={selectedImage.url}
+              alt={localizeUi("ui.characters.charactersheet.previewAlt", { name: characterName })}
+              className="max-h-[32rem] w-full bg-[var(--secondary)] object-contain"
+            />
+          ) : (
+            <div className="flex min-h-64 flex-col items-center justify-center gap-3 bg-[var(--secondary)] px-6 text-center">
+              <Image size="2rem" className="text-[var(--muted-foreground)]/50" aria-hidden="true" />
+              <div>
+                <p className="text-sm font-semibold">{localizeUi("ui.characters.charactersheet.emptyTitle")}</p>
+                <p className="mt-1 text-xs text-[var(--muted-foreground)]">
+                  {localizeUi("ui.characters.charactersheet.emptyDescription")}
+                </p>
+              </div>
+            </div>
+          )}
+        </div>
+
+        <div className="space-y-4">
+          <button
+            type="button"
+            onClick={onCreateCharacterSheet}
+            disabled={upload.isPending}
+            className="mari-editor-action mari-editor-action--primary inline-flex w-full justify-center disabled:cursor-wait disabled:opacity-60"
+          >
+            <Wand2 size="0.875rem" />
+            {localizeUi("ui.characters.charactersheet.createWithAi")}
+          </button>
+
+          <ImageUploadDropzone
+            multiple={false}
+            label={
+              selectedImage
+                ? localizeUi("ui.characters.charactersheet.replace")
+                : localizeUi("ui.characters.charactersheet.upload")
+            }
+            pending={upload.isPending}
+            pendingLabel={localizeUi("ui.characters.charactersheet.uploading")}
+            dragLabel={localizeUi("ui.characters.charactersheet.dropImage")}
+            onFilesSelected={(files) => void handleUpload(files)}
+            icon={<Upload size="1rem" />}
+            className="w-full"
+          />
+
+          <SettingsSwitch
+            label={<span className="font-medium">{localizeUi("ui.characters.charactersheet.useAsReference")}</span>}
+            description={localizeUi("ui.characters.charactersheet.useAsReferenceDescription")}
+            checked={Boolean(selectedImage) && useAsReference}
+            disabled={!selectedImage}
+            onChange={(checked) => updateExtension("useCharacterSheetAsReference", checked)}
+            labelPosition="start"
+            className="justify-between rounded-xl border border-[var(--border)] bg-[var(--card)] p-4"
+          />
+
+          <p className="rounded-xl border border-[var(--border)] bg-[var(--secondary)] px-3 py-2 text-xs text-[var(--muted-foreground)]">
+            {selectedImage && useAsReference
+              ? localizeUi("ui.characters.charactersheet.activeStatus")
+              : localizeUi("ui.characters.charactersheet.avatarFallbackStatus")}
+          </p>
+
+          {(selectedImage || selectionMissing) && (
+            <button
+              type="button"
+              onClick={clearSelection}
+              className="mari-editor-action inline-flex w-full justify-center text-red-500"
+            >
+              <X size="0.875rem" />
+              {localizeUi("ui.characters.charactersheet.remove")}
+            </button>
+          )}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function CharacterGalleryTab({
+  characterId,
+  characterName,
+  onCreateCharacterSheet,
+}: {
+  characterId: string;
+  characterName?: string;
+  onCreateCharacterSheet: () => void;
+}) {
   const { t: localizeUi } = useUiTranslation();
   const [mediaTab, setMediaTab] = useState<CharacterGalleryMediaTab>("images");
   const { data: images, isLoading } = useCharacterGalleryImages(characterId);
@@ -2442,6 +2751,34 @@ function CharacterGalleryTab({ characterId, characterName }: { characterId: stri
   const setAvatar = useSetCharacterGalleryImageAsAvatar(characterId);
   const tag = useTagCharacterGalleryImage(characterId);
   const [lightbox, setLightbox] = useState<CharacterGalleryImage | null>(null);
+  const [selectingImages, setSelectingImages] = useState(false);
+  const [selectedImageIds, setSelectedImageIds] = useState<Set<string>>(() => new Set());
+  const selectedImages = useMemo(
+    () => images?.filter((image) => selectedImageIds.has(image.id)) ?? [],
+    [images, selectedImageIds],
+  );
+
+  useEffect(() => {
+    const availableIds = new Set(images?.map((image) => image.id) ?? []);
+    setSelectedImageIds((current) => {
+      const next = new Set([...current].filter((id) => availableIds.has(id)));
+      return next.size === current.size ? current : next;
+    });
+  }, [images]);
+
+  const leaveImageSelection = useCallback(() => {
+    setSelectingImages(false);
+    setSelectedImageIds(new Set());
+  }, []);
+
+  const toggleImageSelection = useCallback((imageId: string) => {
+    setSelectedImageIds((current) => {
+      const next = new Set(current);
+      if (next.has(imageId)) next.delete(imageId);
+      else next.add(imageId);
+      return next;
+    });
+  }, []);
 
   const handleUpload = useCallback(
     (files: File[]) => {
@@ -2463,8 +2800,16 @@ function CharacterGalleryTab({ characterId, characterName }: { characterId: stri
       ) {
         return;
       }
-      remove.mutate(image.id);
-      if (lightbox?.id === image.id) setLightbox(null);
+      try {
+        await remove.mutateAsync(image.id);
+        if (lightbox?.id === image.id) setLightbox(null);
+      } catch (error) {
+        toast.error(
+          error instanceof Error
+            ? error.message
+            : localizeUi("ui.characters.charactergallerytab.failedToDeleteCharacterImage"),
+        );
+      }
     },
     [lightbox?.id, remove, localizeUi],
   );
@@ -2483,6 +2828,80 @@ function CharacterGalleryTab({ characterId, characterName }: { characterId: stri
       }
     },
     [setAvatar, localizeUi],
+  );
+
+  const handleBatchDownload = useCallback(async () => {
+    if (selectedImages.length === 0) return;
+    if (
+      !(await showConfirmDialog({
+        title: localizeUi("ui.gallery.batch.downloadTitle"),
+        message: localizeUi("ui.gallery.batch.downloadMessage", { count: selectedImages.length }),
+        confirmLabel: localizeUi("ui.gallery.batch.download"),
+      }))
+    ) {
+      return;
+    }
+    try {
+      let failedDownloads = 0;
+      for (const [index, image] of selectedImages.entries()) {
+        try {
+          await downloadUrlToDevice(image.url, image.filePath.split("/").pop() || `character-gallery-${index + 1}.png`);
+        } catch {
+          failedDownloads += 1;
+        }
+      }
+      if (failedDownloads > 0) {
+        toast.error(
+          localizeUi("ui.gallery.batch.downloadPartial", {
+            completed: selectedImages.length - failedDownloads,
+            count: selectedImages.length,
+            failed: failedDownloads,
+          }),
+        );
+        return;
+      }
+      toast.success(localizeUi("ui.gallery.batch.downloadStarted", { count: selectedImages.length }));
+    } catch {
+      toast.error(localizeUi("ui.gallery.batch.downloadFailed"));
+    }
+  }, [localizeUi, selectedImages]);
+
+  const handleBatchDelete = useCallback(async () => {
+    if (selectedImages.length === 0) return;
+    if (
+      !(await showConfirmDialog({
+        title: localizeUi("ui.gallery.batch.deleteTitle"),
+        message: localizeUi("ui.gallery.batch.deleteMessage", { count: selectedImages.length }),
+        confirmLabel: localizeUi("ui.gallery.batch.delete"),
+        tone: "destructive",
+      }))
+    ) {
+      return;
+    }
+    try {
+      for (const image of selectedImages) await remove.mutateAsync(image.id);
+      toast.success(localizeUi("ui.gallery.batch.deleted", { count: selectedImages.length }));
+      leaveImageSelection();
+    } catch {
+      toast.error(localizeUi("ui.characters.charactergallerytab.failedToDeleteCharacterImage"));
+    }
+  }, [leaveImageSelection, localizeUi, remove, selectedImages]);
+
+  // Copies the PORTABLE image reference (card://self/gallery/<file>) — resolves
+  // to whichever character speaks the message, so it survives export/import
+  // where character ids are regenerated. Filenames round-trip in native exports.
+  const handleCopyReference = useCallback(
+    async (image: CharacterGalleryImage) => {
+      const filename = image.filePath.split("/").pop() ?? "";
+      if (!filename) return;
+      const label = image.prompt.trim() || filename.replace(/\.[^.]+$/, "");
+      const ok = await copyToClipboard(
+        buildCardAssetMarkdown(label, `card://self/gallery/${encodeURIComponent(filename)}`),
+      );
+      if (ok) toast.success(localizeUi("ui.characters.charactergallerytab.referenceCopied"));
+      else toast.error(localizeUi("ui.characters.charactergallerytab.failedToCopyReference"));
+    },
+    [localizeUi],
   );
 
   return (
@@ -2505,8 +2924,9 @@ function CharacterGalleryTab({ characterId, characterName }: { characterId: stri
               key={tab.id}
               type="button"
               onClick={() => setMediaTab(tab.id)}
+              aria-pressed={active}
               className={cn(
-                "flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold transition-colors",
+                "flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-semibold transition-colors",
                 active
                   ? "bg-[var(--primary)] text-[var(--primary-foreground)] shadow-sm"
                   : "text-[var(--muted-foreground)] hover:bg-[var(--muted)] hover:text-[var(--foreground)]",
@@ -2522,6 +2942,51 @@ function CharacterGalleryTab({ characterId, characterName }: { characterId: stri
 
       {mediaTab === "images" ? (
         <>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  if (selectingImages) leaveImageSelection();
+                  else setSelectingImages(true);
+                }}
+                className="mari-editor-action inline-flex"
+              >
+                {selectingImages ? <X size="0.875rem" /> : <Check size="0.875rem" />}
+                {localizeUi(selectingImages ? "ui.gallery.batch.cancel" : "ui.gallery.batch.selectImages")}
+              </button>
+              <button
+                type="button"
+                disabled={!images?.length}
+                onClick={() => {
+                  setSelectingImages(true);
+                  setSelectedImageIds(new Set(images?.map((image) => image.id) ?? []));
+                }}
+                className="mari-editor-action inline-flex disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <Check size="0.875rem" />
+                {localizeUi("ui.gallery.batch.selectAll")}
+              </button>
+              {selectingImages ? (
+                <span className="text-xs font-semibold text-[var(--muted-foreground)]">
+                  {localizeUi("ui.gallery.batch.selected", { count: selectedImages.length })}
+                </span>
+              ) : null}
+            </div>
+            <button
+              type="button"
+              onClick={onCreateCharacterSheet}
+              className="mari-editor-action mari-editor-action--primary inline-flex max-sm:w-full max-sm:justify-center"
+            >
+              <Wand2 size="0.875rem" />
+              {localizeUi("ui.characters.charactersheet.createWithAi")}
+            </button>
+          </div>
+
+          <p className="rounded-lg bg-[var(--secondary)] px-3 py-2 text-xs leading-relaxed text-[var(--muted-foreground)] ring-1 ring-[var(--border)]">
+            {localizeUi("ui.gallery.batch.hint")}
+          </p>
+
           <ImageUploadDropzone
             label={localizeUi("ui.characters.charactergallerytab.uploadCharacterImages")}
             pending={upload.isPending}
@@ -2533,62 +2998,117 @@ function CharacterGalleryTab({ characterId, characterName }: { characterId: stri
           />
 
           {isLoading ? (
-            <div className="grid grid-cols-3 gap-3 md:grid-cols-4">
+            <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 sm:gap-3 md:grid-cols-4">
               {Array.from({ length: 4 }).map((_, i) => (
                 <div key={i} className="shimmer aspect-square rounded-xl" />
               ))}
             </div>
           ) : images && images.length > 0 ? (
-            <div className="grid grid-cols-3 gap-3 md:grid-cols-4">
+            <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 sm:gap-3 md:grid-cols-4">
               {images.map((image) => (
                 <div
                   key={image.id}
-                  className="group relative overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--card)] transition-all hover:border-[var(--primary)]/30 hover:shadow-md"
+                  className={cn(
+                    "mari-gallery-card group relative overflow-hidden rounded-xl border bg-[var(--card)] transition-all hover:shadow-md",
+                    selectedImageIds.has(image.id)
+                      ? "border-[var(--primary)] ring-2 ring-[var(--primary)]/45"
+                      : "border-[var(--border)] hover:border-[var(--primary)]/30",
+                  )}
                 >
-                  <CustomEmojiTagButton image={image} onApply={(patch) => tag.mutate({ imageId: image.id, patch })} />
+                  {!selectingImages ? (
+                    <CustomEmojiTagButton image={image} onApply={(patch) => tag.mutate({ imageId: image.id, patch })} />
+                  ) : (
+                    <button
+                      type="button"
+                      aria-pressed={selectedImageIds.has(image.id)}
+                      aria-label={localizeUi("ui.gallery.batch.toggleImage")}
+                      onClick={() => toggleImageSelection(image.id)}
+                      className={cn(
+                        "absolute right-2 top-2 z-10 flex h-7 w-7 items-center justify-center rounded-full border shadow-lg transition-colors",
+                        selectedImageIds.has(image.id)
+                          ? "border-[var(--primary)] bg-[var(--primary)] text-[var(--primary-foreground)]"
+                          : "border-white/65 bg-black/55 text-transparent hover:bg-black/75",
+                      )}
+                    >
+                      <Check size="0.9rem" />
+                    </button>
+                  )}
                   <button
                     type="button"
                     className="block aspect-square w-full bg-[var(--secondary)]"
-                    onClick={() => setLightbox(image)}
+                    onClick={() => (selectingImages ? toggleImageSelection(image.id) : setLightbox(image))}
                   >
                     <img
                       src={image.url}
                       alt={image.prompt || characterName || "Character image"}
+                      loading="lazy"
+                      decoding="async"
                       className="h-full w-full object-cover"
                     />
                   </button>
-                  <div className="absolute inset-x-0 bottom-0 flex items-center justify-between bg-gradient-to-t from-black/75 via-black/25 to-transparent p-2 opacity-0 transition-opacity group-hover:opacity-100 max-md:opacity-100">
-                    <span className="max-w-[8rem] truncate text-[0.6875rem] font-medium text-white/85">
+                  <div
+                    className={cn(
+                      "absolute inset-x-0 bottom-0 flex items-center justify-between bg-gradient-to-t from-black/75 via-black/25 to-transparent p-2 transition-opacity",
+                      selectingImages && !selectedImageIds.has(image.id)
+                        ? "pointer-events-none opacity-0"
+                        : "opacity-0 group-hover:opacity-100 group-[&:focus-within]:opacity-100 max-md:opacity-100",
+                    )}
+                  >
+                    <span className="max-w-[8rem] truncate text-[0.6875rem] font-medium text-white/85 max-md:hidden">
                       {new Date(image.createdAt).toLocaleDateString()}
                     </span>
-                    <div className="flex gap-1">
+                    <div className="ml-auto flex gap-1">
+                      {!selectingImages ? (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => void handleCopyReference(image)}
+                            className="rounded-lg bg-white/15 p-1.5 text-white transition-colors hover:bg-white/25"
+                            title={localizeUi("ui.characters.charactergallerytab.copyImageReference")}
+                          >
+                            <Link2 size="0.75rem" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void handleSetAvatar(image)}
+                            disabled={setAvatar.isPending}
+                            className="rounded-lg bg-white/15 p-1.5 text-white transition-colors hover:bg-white/25 disabled:opacity-50"
+                            title={localizeUi("ui.characters.charactergallerytab.setAsAvatar")}
+                          >
+                            {setAvatar.isPending ? (
+                              <Loader2 size="0.75rem" className="animate-spin" />
+                            ) : (
+                              <User size="0.75rem" />
+                            )}
+                          </button>
+                        </>
+                      ) : null}
+                      {selectingImages ? (
+                        <button
+                          type="button"
+                          onClick={() => void handleBatchDownload()}
+                          className="rounded-lg bg-white/15 p-1.5 text-white transition-colors hover:bg-white/25"
+                          title={localizeUi("ui.gallery.batch.download")}
+                        >
+                          <Download size="0.75rem" />
+                        </button>
+                      ) : (
+                        <a
+                          href={image.url}
+                          download
+                          className="rounded-lg bg-white/15 p-1.5 text-white transition-colors hover:bg-white/25"
+                          title={localizeUi("ui.characters.charactergallerytab.download")}
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          <Download size="0.75rem" />
+                        </a>
+                      )}
                       <button
                         type="button"
-                        onClick={() => void handleSetAvatar(image)}
-                        disabled={setAvatar.isPending}
-                        className="rounded-lg bg-white/15 p-1.5 text-white transition-colors hover:bg-white/25 disabled:opacity-50"
-                        title={localizeUi("ui.characters.charactergallerytab.setAsAvatar")}
-                      >
-                        {setAvatar.isPending ? (
-                          <Loader2 size="0.75rem" className="animate-spin" />
-                        ) : (
-                          <User size="0.75rem" />
-                        )}
-                      </button>
-                      <a
-                        href={image.url}
-                        download
+                        onClick={() => void (selectingImages ? handleBatchDelete() : handleDelete(image))}
+                        disabled={remove.isPending}
                         className="rounded-lg bg-white/15 p-1.5 text-white transition-colors hover:bg-white/25"
-                        title={localizeUi("ui.characters.charactergallerytab.download")}
-                        onClick={(e) => e.stopPropagation()}
-                      >
-                        <Download size="0.75rem" />
-                      </a>
-                      <button
-                        type="button"
-                        onClick={() => void handleDelete(image)}
-                        className="rounded-lg bg-white/15 p-1.5 text-white transition-colors hover:bg-white/25"
-                        title={localizeUi("lorebook.editor.batch.delete")}
+                        title={localizeUi(selectingImages ? "ui.gallery.batch.delete" : "lorebook.editor.batch.delete")}
                       >
                         <Trash2 size="0.75rem" />
                       </button>
@@ -2645,6 +3165,15 @@ function CharacterGalleryTab({ characterId, characterName }: { characterId: stri
               >
                 <Download size="0.875rem" />
               </a>
+              <button
+                type="button"
+                onClick={() => void handleDelete(lightbox)}
+                className="rounded-lg bg-black/60 p-2 text-white transition-colors hover:bg-black/80"
+                title={localizeUi("lorebook.editor.batch.delete")}
+                aria-label={localizeUi("lorebook.editor.batch.delete")}
+              >
+                <Trash2 size="0.875rem" />
+              </button>
               <button
                 type="button"
                 onClick={() => setLightbox(null)}
@@ -3510,11 +4039,19 @@ function SpritesTab({
   characterName,
   defaultAppearance,
   defaultAvatarUrl,
+  characterSheetImageId,
+  useCharacterSheetAsReference,
+  updateExtension,
+  onCreateCharacterSheet,
 }: {
   characterId: string;
   characterName?: string;
   defaultAppearance?: string;
   defaultAvatarUrl?: string | null;
+  characterSheetImageId: string | null;
+  useCharacterSheetAsReference: boolean;
+  updateExtension: (key: string, value: unknown) => void;
+  onCreateCharacterSheet: () => void;
 }) {
   const { t: localizeUi } = useUiTranslation();
   type SpriteCategory = "expressions" | "full-body" | "clips";
@@ -3581,8 +4118,9 @@ function SpritesTab({
           key={tab.id}
           type="button"
           onClick={() => setCategory(tab.id)}
+          aria-pressed={category === tab.id}
           className={cn(
-            "rounded-lg px-3 py-1.5 text-xs font-medium transition-colors",
+            "rounded-md px-3 py-1.5 text-xs font-medium transition-colors",
             category === tab.id
               ? "bg-[var(--primary)]/15 text-[var(--primary)]"
               : "text-[var(--muted-foreground)] hover:text-[var(--foreground)]",
@@ -3879,6 +4417,17 @@ function SpritesTab({
     [characterId, displayExpression, uploadSprite, wandCleanupSprite, localizeUi],
   );
 
+  const characterSheetSection = (
+    <CharacterSheetSection
+      characterId={characterId}
+      characterName={characterName ?? ""}
+      characterSheetImageId={characterSheetImageId}
+      useAsReference={useCharacterSheetAsReference}
+      updateExtension={updateExtension}
+      onCreateCharacterSheet={onCreateCharacterSheet}
+    />
+  );
+
   if (category === "clips") {
     return (
       <div className="space-y-6">
@@ -3887,6 +4436,8 @@ function SpritesTab({
           subtitle={localizeUi("ui.characters.spritestab.uploadVnStyleSpritesAndVideoCallClipsFor")}
           helpText={CHARACTER_SPRITES_HELP}
         />
+
+        {characterSheetSection}
 
         {categoryTabs}
 
@@ -3902,6 +4453,8 @@ function SpritesTab({
         subtitle={localizeUi("ui.characters.spritestab.uploadVnStyleSpritesForDifferentExpressionsTheExpression")}
         helpText={CHARACTER_SPRITES_HELP}
       />
+
+      {characterSheetSection}
 
       {categoryTabs}
 
@@ -4637,6 +5190,7 @@ function ColorsTab({
   const nameColor = (formData.extensions.nameColor as string) ?? "";
   const dialogueColor = (formData.extensions.dialogueColor as string) ?? "";
   const boxColor = (formData.extensions.boxColor as string) ?? "";
+  const nameAliases = (formData.extensions.nameAliases as string[] | undefined) ?? [];
   const [extracting, setExtracting] = useState(false);
 
   const handleExtract = async () => {
@@ -4691,7 +5245,7 @@ function ColorsTab({
                   value1: formData.name || localizeUi("ui.characters.cardlibrarydetailcard.character"),
                 })}
                 className="h-full w-full object-cover"
-                style={getAvatarCropStyle(formData.extensions.avatarCrop as AvatarCrop | LegacyAvatarCrop | undefined)}
+                style={getAvatarCropStyle(normalizeAvatarCrop(formData.extensions.avatarCrop))}
               />
             ) : (
               <User size="1rem" className="text-white" />
@@ -4759,6 +5313,12 @@ function ColorsTab({
         onChange={(v) => updateExtension("boxColor", v)}
         label={localizeUi("ui.characters.colorstab.messageBoxColor")}
         helpText="Background color for this character's chat message bubbles. Use a semi-transparent color for best results (e.g. rgba)."
+      />
+      {/* Name Aliases */}
+      <NameAliasesSection
+        aliases={nameAliases}
+        onChange={(next) => updateExtension("nameAliases", next)}
+        nameColor={nameColor}
       />
     </div>
   );

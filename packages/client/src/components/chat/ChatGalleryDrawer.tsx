@@ -6,16 +6,23 @@ import { useEffect, useMemo, useRef, type CSSProperties } from "react";
 import { cn } from "../../lib/utils";
 import { ChatGallery } from "./ChatGallery";
 import {
-  ROLEPLAY_POPOVER_CLOSE_BUTTON,
-  ROLEPLAY_POPOVER_CLOSE_ICON_SIZE,
-  ROLEPLAY_POPOVER_HEADER,
-  ROLEPLAY_POPOVER_SCROLL_AREA,
-  ROLEPLAY_POPOVER_SHELL,
-  ROLEPLAY_POPOVER_TITLE,
-} from "./roleplay-popover-styles";
-import type { Chat } from "@marinara-engine/shared";
+  NEUTRAL_PANEL_CLOSE_BUTTON,
+  NEUTRAL_PANEL_CLOSE_ICON_SIZE,
+  NEUTRAL_PANEL_HEADER,
+  NEUTRAL_PANEL_SCROLL_AREA,
+  NEUTRAL_PANEL_SHELL,
+  NEUTRAL_PANEL_TITLE,
+} from "../ui/neutral-surface-styles";
+import {
+  BUILT_IN_AGENTS,
+  customAgentHasCapability,
+  isAgentConfigDeleted,
+  parseAgentSettingsRecord,
+  type Chat,
+} from "@marinara-engine/shared";
 import type { ChatImage } from "../../hooks/use-gallery";
-import { useInstalledCapabilityPackages } from "../../hooks/use-capability-packages";
+import { useAgentConfigs } from "../../hooks/use-agents";
+import { useCapabilityAgentRegistry, useInstalledCapabilityPackages } from "../../hooks/use-capability-packages";
 import { isDesktopShellNavigationTarget } from "../../lib/chat-floating-ui-events";
 import { parseChatMetadata } from "../../lib/chat-display";
 import {
@@ -32,6 +39,8 @@ interface ChatGalleryDrawerProps {
   anchor?: ChatToolbarFloatingPanelAnchor;
   /** Manually trigger the Illustrator agent */
   onIllustrate?: () => void | Promise<void>;
+  /** Manually trigger an active custom image-generation agent. */
+  onIllustrateWithAgent?: (agentType: string) => void | Promise<void>;
   /** Generate an on-demand Conversation selfie. */
   onGenerateSelfie?: (characterId?: string) => void | Promise<void>;
   selfieCharacters?: Array<{ id: string; name: string }>;
@@ -58,6 +67,7 @@ export function ChatGalleryDrawer({
   onClose,
   anchor,
   onIllustrate,
+  onIllustrateWithAgent,
   onGenerateSelfie,
   selfieCharacters,
   onGenerateBackground,
@@ -68,11 +78,10 @@ export function ChatGalleryDrawer({
 }: ChatGalleryDrawerProps) {
   const { t: localizeUi } = useUiTranslation();
   const panelRef = useRef<HTMLDivElement | null>(null);
-  const chatMetadata = useMemo(
-    () => parseChatMetadata(chat.metadata) as GalleryChatMetadata,
-    [chat.metadata],
-  );
+  const chatMetadata = useMemo(() => parseChatMetadata(chat.metadata) as GalleryChatMetadata, [chat.metadata]);
   const { data: installedCapabilities = [] } = useInstalledCapabilityPackages(open);
+  const { data: capabilityAgents = [] } = useCapabilityAgentRegistry(open);
+  const { data: agentConfigs = [] } = useAgentConfigs(open);
   const illustratorInstalled = installedCapabilities.some(
     (item) => item.id === "illustrator" && item.status === "active",
   );
@@ -86,9 +95,26 @@ export function ChatGalleryDrawer({
       ? conversationSelfiesEnabled
       : chat.mode === "game"
         ? chatMetadata.enableSpriteGeneration === true
-        : chatMetadata.enableAgents === true &&
-          chatMetadata.activeAgentIds?.includes("illustrator");
+        : chatMetadata.enableAgents === true && chatMetadata.activeAgentIds?.includes("illustrator");
   const illustratorAvailable = illustratorInstalled && illustratorEnabledForChat;
+  const customImageAgents = useMemo(() => {
+    if (chatMetadata.enableAgents !== true || !onIllustrateWithAgent) return [];
+    const activeAgentIds = new Set(chatMetadata.activeAgentIds ?? []);
+    const reservedAgentIds = new Set([
+      ...BUILT_IN_AGENTS.map((agent) => agent.id),
+      ...capabilityAgents.map((agent) => agent.id),
+    ]);
+    return agentConfigs
+      .filter(
+        (agent) =>
+          activeAgentIds.has(agent.type) &&
+          !reservedAgentIds.has(agent.type) &&
+          !isAgentConfigDeleted(agent.settings) &&
+          customAgentHasCapability(parseAgentSettingsRecord(agent.settings), "trigger_image_generation"),
+      )
+      .map((agent) => ({ id: agent.type, name: agent.name }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }, [agentConfigs, capabilityAgents, chatMetadata.activeAgentIds, chatMetadata.enableAgents, onIllustrateWithAgent]);
 
   useEffect(() => {
     if (!open || typeof document === "undefined") return;
@@ -127,26 +153,35 @@ export function ChatGalleryDrawer({
         ref={panelRef}
         data-chat-floating-panel
         className={cn(
-          ROLEPLAY_POPOVER_SHELL,
+          NEUTRAL_PANEL_SHELL,
           "mari-chat-gallery-drawer fixed bottom-3 z-[70] flex w-[min(44rem,calc(100vw-var(--mari-chat-ui-inset-left,0px)-var(--mari-chat-ui-inset-right,0px)-1.5rem))] flex-col overflow-hidden max-md:inset-x-2 max-md:bottom-[calc(0.75rem+env(safe-area-inset-bottom))] max-md:top-[calc(3.5rem+env(safe-area-inset-top))] max-md:w-auto",
           anchor ? "" : "right-[calc(var(--mari-chat-ui-inset-right,0px)+0.75rem)] top-14",
         )}
         style={panelStyle}
       >
         {/* Header */}
-        <div className={cn(ROLEPLAY_POPOVER_HEADER, "flex items-center justify-between")}>
-          <h3 className={ROLEPLAY_POPOVER_TITLE}>
-            <Image size="0.8125rem" className="shrink-0 text-[var(--muted-foreground)]" />{localizeUi("chat.toolbar.gallery")}</h3>
-          <button type="button" onClick={onClose} aria-label={localizeUi("ui.chat.chatgallerydrawer.closeGallery")} className={ROLEPLAY_POPOVER_CLOSE_BUTTON}>
-            <X size={ROLEPLAY_POPOVER_CLOSE_ICON_SIZE} />
+        <div className={cn(NEUTRAL_PANEL_HEADER, "flex items-center justify-between")}>
+          <h3 className={NEUTRAL_PANEL_TITLE}>
+            <Image size="0.8125rem" className="shrink-0 text-[var(--muted-foreground)]" />
+            {localizeUi("chat.toolbar.gallery")}
+          </h3>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label={localizeUi("ui.chat.chatgallerydrawer.closeGallery")}
+            className={NEUTRAL_PANEL_CLOSE_BUTTON}
+          >
+            <X size={NEUTRAL_PANEL_CLOSE_ICON_SIZE} />
           </button>
         </div>
 
-        <div className={cn(ROLEPLAY_POPOVER_SCROLL_AREA, "flex-1 overflow-y-auto")}>
+        <div className={cn(NEUTRAL_PANEL_SCROLL_AREA, "flex-1 overflow-y-auto")}>
           <ChatGallery
             chatId={chat.id}
             mode={chat.mode}
             onIllustrate={illustratorAvailable ? onIllustrate : undefined}
+            illustrateAgents={customImageAgents}
+            onIllustrateWithAgent={onIllustrateWithAgent}
             onGenerateSelfie={illustratorAvailable ? onGenerateSelfie : undefined}
             selfieCharacters={selfieCharacters}
             onGenerateStoryboard={onGenerateStoryboard}

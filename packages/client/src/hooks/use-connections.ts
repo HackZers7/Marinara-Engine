@@ -6,7 +6,7 @@ import { api } from "../lib/api-client";
 import { useUIStore } from "../stores/ui.store";
 import { useChatStore } from "../stores/chat.store";
 import { chatKeys } from "./use-chats";
-import type { APIProvider, Chat, ConnectionTestResult } from "@marinara-engine/shared";
+import type { APIProvider, Chat, ConnectionTestResult, ImageGenerationQuality } from "@marinara-engine/shared";
 
 export const connectionKeys = {
   all: ["connections"] as const,
@@ -54,11 +54,18 @@ export type CreateConnectionPayload = {
   comfyuiWorkflow?: string | null;
   imageService?: string | null;
   imageEndpointId?: string | null;
+  imagePromptInstructions?: string | null;
+  imageGenerationQuality?: ImageGenerationQuality;
   videoGenerationSource?: string | null;
   videoService?: string | null;
+  audioSource?: string | null;
+  audioVoice?: string | null;
+  audioSoundEffects?: boolean;
+  audioMusic?: boolean;
   promptPresetId?: string | null;
   maxTokensOverride?: number | null;
   maxParallelJobs?: number;
+  maxRequestsPerMinute?: number | null;
   treatAsLocalEndpoint?: boolean;
   claudeFastMode?: boolean;
 };

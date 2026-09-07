@@ -83,14 +83,12 @@ export function normalizeManualIllustratorPromptModeInstruction(promptTemplate: 
     /<(?:output_format|output_schema|response_format|json_schema)\b[^>]*>[\s\S]*?<\/(?:output_format|output_schema|response_format|json_schema)>/giu,
     "",
   );
-  const withoutOutputSchemaFences = withoutTaggedOutputSchemas.replace(
-    /```(?:json)?\s*[\s\S]*?```/giu,
-    (block) =>
-      /\b(?:shouldGenerate|generateBackground)\b|["'](?:prompt|negativePrompt|style|characters|aspectRatio|reason)["']\s*:/iu.test(
-        block,
-      )
-        ? ""
-        : block,
+  const withoutOutputSchemaFences = withoutTaggedOutputSchemas.replace(/```(?:json)?\s*[\s\S]*?```/giu, (block) =>
+    /\b(?:shouldGenerate|generateBackground)\b|["'](?:prompt|negativePrompt|style|characters|aspectRatio|reason)["']\s*:/iu.test(
+      block,
+    )
+      ? ""
+      : block,
   );
   const lines = withoutOutputSchemaFences.split("\n");
   const outputSchemaStart = lines.findIndex((line) => {
@@ -125,9 +123,7 @@ export function normalizeManualIllustratorPromptModeInstruction(promptTemplate: 
         /\b(?:generate|illustrate|create|draw)\b[^\n]{0,100}\bonly\b[^\n]{0,100}\b(?:if|when|for)\b/iu.test(
           normalized,
         ) ||
-        /\bonly\b[^\n]{0,100}\b(?:generate|illustrate|create|draw)\b[^\n]{0,100}\b(?:if|when|for)\b/iu.test(
-          normalized,
-        )
+        /\bonly\b[^\n]{0,100}\b(?:generate|illustrate|create|draw)\b[^\n]{0,100}\b(?:if|when|for)\b/iu.test(normalized)
       ) {
         return false;
       }
@@ -142,9 +138,7 @@ export function normalizeManualIllustratorPromptModeInstruction(promptTemplate: 
         return false;
       }
       if (
-        /\b(?:generation|illustration)\s+(?:decision|cadence|interval|frequency|cooldown)\b/iu.test(
-          normalized,
-        ) ||
+        /\b(?:generation|illustration)\s+(?:decision|cadence|interval|frequency|cooldown)\b/iu.test(normalized) ||
         /\b(?:run|trigger|generate|illustrate)\b[^\n]{0,100}\bevery\s+\d+\b[^\n]{0,60}\b(?:turn|message|response)s?\b/iu.test(
           normalized,
         )
@@ -238,6 +232,7 @@ export function buildManualIllustratorPromptMessages(args: {
   contextSize: unknown;
   selectedPromptTemplate?: string;
   styleInstruction?: string;
+  imagePromptInstructions?: string;
 }): ChatMessage[] {
   const promptModeInstruction = normalizeManualIllustratorPromptModeInstruction(args.selectedPromptTemplate ?? "");
   const systemPrompt = [
@@ -253,6 +248,9 @@ export function buildManualIllustratorPromptMessages(args: {
     args.styleInstruction
       ? `Additional Image Style instruction for the image prompt you write: ${args.styleInstruction}\nCombine it with the selected Illustrator prompt mode. It may refine rendering and visual treatment, but it must not replace or weaken the selected format, layout, framing, or text requirements.`
       : "No visual style profile is selected. Infer only the visual treatment supported by the scene context.",
+    args.imagePromptInstructions
+      ? `<image_prompting_instructions>\nApply these image-backend instructions when writing the provider-ready prompt. They are instructions, not text to copy into the prompt:\n${args.imagePromptInstructions}\n</image_prompting_instructions>`
+      : "",
     buildCharacterPersonaContext(args.context),
   ].join("\n\n");
   const messages: ChatMessage[] = [
@@ -295,6 +293,7 @@ export async function writeManualIllustratorPromptPlan(args: {
   illustratorAgent: ResolvedAgent;
   context: AgentContext;
   styleInstruction?: string;
+  imagePromptInstructions?: string;
   signal?: AbortSignal;
   debugLog?: (message: string, ...args: unknown[]) => void;
 }): Promise<ManualIllustratorPromptResult> {
@@ -309,6 +308,7 @@ export async function writeManualIllustratorPromptPlan(args: {
     contextSize: args.illustratorAgent.settings.contextSize,
     selectedPromptTemplate,
     styleInstruction: args.styleInstruction,
+    imagePromptInstructions: args.imagePromptInstructions,
   });
   args.debugLog?.(
     "[debug/illustrator/manual-illustration-prompt] messages:\n%s",

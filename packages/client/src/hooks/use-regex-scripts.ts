@@ -20,6 +20,7 @@ export interface RegexScriptRow {
   promptOnly: string;
   applyMode?: string | null;
   targetCharacterIds: string;
+  targetPromptPresetIds: string;
   order: number;
   minDepth: number | null;
   maxDepth: number | null;
@@ -38,6 +39,16 @@ export function useCreateRegexScript() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (data: Record<string, unknown>) => api.post<RegexScriptRow>("/regex-scripts", data),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: regexKeys.all });
+    },
+  });
+}
+
+export function useImportRegexScript() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (data: Record<string, unknown>) => api.post<RegexScriptRow>("/regex-scripts/import", data),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: regexKeys.all });
     },
