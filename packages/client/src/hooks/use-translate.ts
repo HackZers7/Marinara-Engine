@@ -60,6 +60,7 @@ export function useTranslate() {
           targetLanguage: store.config.outputTargetLanguage,
           connectionId: store.config.connectionId,
           systemPrompt: store.config.outputSystemPrompt,
+          maxTokens: store.config.outputMaxTokens,
           deeplApiKey: store.config.deeplApiKey,
           deeplxUrl: store.config.deeplxUrl,
         });

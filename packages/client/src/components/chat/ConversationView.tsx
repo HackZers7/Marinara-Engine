@@ -17,6 +17,7 @@ import { useTranslation, useTranslation as useUiTranslation } from "react-i18nex
 import { Loader2, ChevronUp, Settings2, Image as ImageIcon, ArrowRightLeft } from "lucide-react";
 import { ConversationMessage } from "./ConversationMessage";
 import { ConversationInput } from "./ConversationInput";
+import { AgentTrackBar } from "../agents/AgentTrackBar";
 import { ConversationGamesPicker } from "./ConversationGamesPicker";
 import { SceneBanner, EndSceneBar } from "./SceneBanner";
 import { ChatBranchSelector } from "./ChatBranchSelector";
@@ -1459,6 +1460,9 @@ export function ConversationView({
           capabilityProps={{ chatId, open: true, onClose: closeGameSetup }}
         />
       )}
+
+      {/* ── Agent track bar — circular progress widgets (above input, below messages) ── */}
+      <AgentTrackBar chatId={chatId} />
 
       {/* ── Input area ── */}
       <ConversationInput

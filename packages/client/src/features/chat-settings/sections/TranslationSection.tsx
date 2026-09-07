@@ -103,6 +103,16 @@ export function TranslationSection({ metadata, textConnections, onMetadataChange
               onChange={(value) => updatePrompt("translationOutputPrompt", value)}
               onRestore={() => onMetadataChange({ translationOutputPrompt: null })}
             />
+            <TranslationMaxTokensField
+              label={`${localizeUi("ui.chatSettings.translationsection.outgoingMessagePrompt")} — Max Tokens`}
+              value={metadata.translationInputMaxTokens as number | undefined}
+              onChange={(value) => onMetadataChange({ translationInputMaxTokens: value })}
+            />
+            <TranslationMaxTokensField
+              label={`${localizeUi("ui.chatSettings.translationsection.incomingResponsePrompt")} — Max Tokens`}
+              value={metadata.translationOutputMaxTokens as number | undefined}
+              onChange={(value) => onMetadataChange({ translationOutputMaxTokens: value })}
+            />
           </>
         )}
 
@@ -240,6 +250,40 @@ function TranslationPromptField({
         onChange={(event) => onChange(event.target.value)}
         rows={5}
         className="min-h-28 w-full resize-y rounded-lg bg-[var(--secondary)] px-3 py-2 font-mono text-xs leading-relaxed outline-none ring-1 ring-transparent transition-shadow focus:ring-[var(--primary)]/40"
+      />
+    </div>
+  );
+}
+
+function TranslationMaxTokensField({
+  label,
+  value,
+  onChange,
+}: {
+  label: string;
+  value: number | undefined;
+  onChange: (value: number | null) => void;
+}) {
+  return (
+    <div>
+      <label className="text-[0.6875rem] font-medium text-[var(--muted-foreground)]">
+        {label}
+        <HelpTooltip
+          text="Maximum tokens for AI translation. Leave empty for default (4096). Set to 0 for the provider's maximum."
+          size="0.625rem"
+        />
+      </label>
+      <input
+        type="number"
+        min={0}
+        step={1}
+        value={value ?? ""}
+        onChange={(event) => {
+          const raw = event.target.value;
+          onChange(raw === "" ? null : Number(raw));
+        }}
+        placeholder="4096"
+        className="mt-0.5 w-full rounded-lg bg-[var(--secondary)] px-3 py-2 text-xs outline-none ring-1 ring-transparent transition-shadow focus:ring-[var(--primary)]/40"
       />
     </div>
   );

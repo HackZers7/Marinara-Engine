@@ -8,6 +8,8 @@ export interface TranslationConfig {
   connectionId?: string;
   inputSystemPrompt?: string;
   outputSystemPrompt?: string;
+  inputMaxTokens?: number;
+  outputMaxTokens?: number;
   deeplApiKey?: string;
   deeplxUrl?: string;
 }

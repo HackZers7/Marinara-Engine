@@ -1487,6 +1487,14 @@ export function ChatArea() {
       connectionId: chatMeta.translationConnectionId,
       inputSystemPrompt,
       outputSystemPrompt,
+      inputMaxTokens:
+        typeof chatMeta.translationInputMaxTokens === "number" ? chatMeta.translationInputMaxTokens : undefined,
+      outputMaxTokens:
+        typeof chatMeta.translationOutputMaxTokens === "number"
+          ? chatMeta.translationOutputMaxTokens
+          : typeof chatMeta.translationMaxTokens === "number"
+            ? chatMeta.translationMaxTokens
+            : undefined,
       deeplApiKey: chatMeta.translationDeeplApiKey,
       deeplxUrl: chatMeta.translationDeeplxUrl,
     });
@@ -1500,6 +1508,9 @@ export function ChatArea() {
     chatMeta.translationPrompt,
     chatMeta.translationInputPrompt,
     chatMeta.translationOutputPrompt,
+    chatMeta.translationMaxTokens,
+    chatMeta.translationInputMaxTokens,
+    chatMeta.translationOutputMaxTokens,
     chatMeta.translationDeeplApiKey,
     chatMeta.translationDeeplxUrl,
   ]);

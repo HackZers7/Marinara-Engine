@@ -10,15 +10,17 @@
 // single LLM call to reduce total requests. Agents with different
 // connections are grouped separately and run in parallel.
 // ──────────────────────────────────────────────
-import type { AgentResult, AgentContext } from "@marinara-engine/shared";
+import type { AgentResult, AgentContext, AgentPhase } from "@marinara-engine/shared";
 import type { BaseLLMProvider } from "../llm/base-provider.js";
 import {
   executeAgent,
   executeAgentBatch,
   resolveAgentResultType,
+  shouldRunAgentIndividually,
   type AgentExecConfig,
   type AgentToolContext,
 } from "./agent-executor.js";
+import { randomUUID } from "node:crypto";
 import { logger } from "../../lib/logger.js";
 import { settleAgentJobsWithConcurrencyLimit } from "./agent-concurrency.js";
 export { settleAgentJobsWithConcurrencyLimit } from "./agent-concurrency.js";
@@ -41,6 +43,18 @@ export interface AgentInjection {
 
 /** Callback fired whenever an agent produces a result. */
 export type AgentResultCallback = (result: AgentResult) => void;
+
+/**
+ * Callback fired right before an agent's LLM request is actually sent.
+ * `batchId` groups agents that share a single LLM call so the client can
+ * render them as one visual cluster.
+ */
+export type AgentStartCallback = (start: {
+  agentType: string;
+  agentName: string;
+  phase: string;
+  batchId?: string | null;
+}) => void;
 
 // ──────────────────────────────────────────────
 // Grouping — batch agents by (provider instance, model)
@@ -165,6 +179,8 @@ async function executeGroup(
   group: AgentGroup,
   context: AgentContext,
   onResult?: AgentResultCallback,
+  onStart?: AgentStartCallback,
+  plannedBatchIds?: Map<string, string>,
 ): Promise<AgentResult[]> {
   const groupContext = buildAgentContext(group.agents[0]!, context);
   // Separate tool-using agents (can't be batched) from regular agents.
@@ -172,6 +188,18 @@ async function executeGroup(
   // is applied after parsing the grouped response so it cannot fire early mid-agent.
   const toolAgents = group.agents.filter((a) => shouldUseToolsDuringAgentExecution(a));
   const batchAgents = group.agents.filter((a) => !shouldUseToolsDuringAgentExecution(a));
+
+  // Safe start-callback wrapper — matches the onResult pattern below.
+  // Agents that share a single LLM request get the same batchId so the
+  // client can render them as one visual cluster. Tool/isolated agents
+  // pass batchId=null to signal "own request".
+  const safeOnStart = (agent: ResolvedAgent, batchId: string | null) => {
+    try {
+      onStart?.({ agentType: agent.type, agentName: agent.name, phase: agent.phase, batchId });
+    } catch {
+      /* swallow */
+    }
+  };
 
   logger.debug("[agent-pipeline] executeGroup: %d batchable, %d tool-using %j", batchAgents.length, toolAgents.length, {
     batch: batchAgents.map((a) => a.type),
@@ -188,14 +216,44 @@ async function executeGroup(
     }
   };
 
+  // Split agents that go to the shared batched LLM call from ones that
+  // `executeAgentBatch` splits out into their own request (compact/isolated
+  // types like expression/illustrator/etc.). Mirror the split here so the
+  // start events carry accurate batchId grouping.
+  const trulyBatched = batchAgents.filter((a) => !shouldRunAgentIndividually(a));
+  const isolatedFromBatch = batchAgents.filter((a) => shouldRunAgentIndividually(a));
+  // A group with exactly one batched agent won't actually be batched (the
+  // executor short-circuits to a single call) — treat it as isolated.
+  // Prefer the id the client already knows about (from the pre-flight plan)
+  // over minting a new one, so the widget can render the batch cluster the
+  // instant the queue arrives and doesn't have to re-cluster on agent_start.
+  const preplannedBatchId =
+    trulyBatched.length >= 2 ? plannedBatchIds?.get(trulyBatched[0]!.id) ?? null : null;
+  const sharedBatchId = preplannedBatchId ?? (trulyBatched.length >= 2 ? randomUUID() : null);
+
   const batchResultsPromise =
     batchAgents.length > 0
-      ? executeAgentBatch(batchAgents, groupContext, group.provider, group.model).then((results) => {
-          for (const result of results) {
-            safeOnResult(result);
-          }
+      ? (async () => {
+          // Agents that share one LLM request are flipped to "running" in one
+          // shot — that mirrors the single HTTP call that actually goes out.
+          // Isolated ones ride the inner concurrency limiter inside
+          // executeAgentBatch (AGENT_BATCH_FALLBACK_MAX_CONCURRENT), so we
+          // hand it an onIsolatedStart callback and let it fire per-agent
+          // start events only when a worker actually schedules the request.
+          for (const agent of trulyBatched) safeOnStart(agent, sharedBatchId);
+          const results = await executeAgentBatch(
+            batchAgents,
+            groupContext,
+            group.provider,
+            group.model,
+            (config) => {
+              const agent = isolatedFromBatch.find((candidate) => candidate.id === config.id);
+              if (agent) safeOnStart(agent, null);
+            },
+          );
+          for (const result of results) safeOnResult(result);
           return results;
-        })
+        })()
       : Promise.resolve([] as AgentResult[]);
   if (toolAgents.length > AGENT_GROUP_MAX_CONCURRENT_TOOL_CALLS) {
     logger.warn(
@@ -207,11 +265,17 @@ async function executeGroup(
   const toolResultsPromise = settleAgentJobsWithConcurrencyLimit(
     toolAgents,
     AGENT_GROUP_MAX_CONCURRENT_TOOL_CALLS,
-    (agent) =>
-      executeAgent(agent, buildAgentContext(agent, context), agent.provider, agent.model, agent.toolContext).then((result) => {
+    (agent) => {
+      // Fire onStart when the concurrency limiter actually schedules this
+      // agent — not when it's still waiting in the queue — so the widget
+      // flips to "running" in sync with the real LLM request. Tool agents
+      // always fire their own request, so batchId is null.
+      safeOnStart(agent, null);
+      return executeAgent(agent, buildAgentContext(agent, context), agent.provider, agent.model, agent.toolContext).then((result) => {
         safeOnResult(result);
         return result;
-      }),
+      });
+    },
   ).then((settled) =>
     settled.map((entry, index) => {
       if (entry.status === "fulfilled") return entry.value;
@@ -237,7 +301,7 @@ async function executeGroup(
   return [...batchResults, ...toolResults];
 }
 
-function shouldUseToolsDuringAgentExecution(agent: ResolvedAgent): boolean {
+export function shouldUseToolsDuringAgentExecution(agent: ResolvedAgent): boolean {
   if (!agent.toolContext?.tools.length) return false;
   return !(agent.phase === "post_processing" && agent.type === "spotify");
 }
@@ -250,6 +314,8 @@ async function executePhase(
   phase: string,
   context: AgentContext,
   onResult?: AgentResultCallback,
+  onStart?: AgentStartCallback,
+  plannedBatchIds?: Map<string, string>,
 ): Promise<AgentResult[]> {
   const phaseAgents = agents.filter((a) => a.phase === phase);
   if (phaseAgents.length === 0) return [];
@@ -276,7 +342,7 @@ async function executePhase(
   const settled = await settleAgentJobsWithConcurrencyLimit(
     groups,
     AGENT_PHASE_MAX_CONCURRENT_GROUPS,
-    (group) => executeGroup(group, context, onResult),
+    (group) => executeGroup(group, context, onResult, onStart, plannedBatchIds),
   );
 
   const results: AgentResult[] = [];
@@ -338,9 +404,11 @@ export async function runPreGenerationAgents(
   context: AgentContext,
   onResult?: AgentResultCallback,
   agentTypeFilter?: (agentType: string) => boolean,
+  onStart?: AgentStartCallback,
+  plannedBatchIds?: Map<string, string>,
 ): Promise<AgentInjection[]> {
   const filtered = agentTypeFilter ? agents.filter((a) => agentTypeFilter(a.type)) : agents;
-  const results = await executePhase(filtered, "pre_generation", context, onResult);
+  const results = await executePhase(filtered, "pre_generation", context, onResult, onStart, plannedBatchIds);
 
   const injections: AgentInjection[] = [];
   for (const result of results) {
@@ -379,8 +447,10 @@ export async function runPostProcessingAgents(
   agents: ResolvedAgent[],
   context: AgentContext,
   onResult?: AgentResultCallback,
+  onStart?: AgentStartCallback,
+  plannedBatchIds?: Map<string, string>,
 ): Promise<AgentResult[]> {
-  return executePhase(agents, "post_processing", context, onResult);
+  return executePhase(agents, "post_processing", context, onResult, onStart, plannedBatchIds);
 }
 
 /**
@@ -390,8 +460,10 @@ export async function runParallelAgents(
   agents: ResolvedAgent[],
   context: AgentContext,
   onResult?: AgentResultCallback,
+  onStart?: AgentStartCallback,
+  plannedBatchIds?: Map<string, string>,
 ): Promise<AgentResult[]> {
-  return executePhase(agents, "parallel", context, onResult);
+  return executePhase(agents, "parallel", context, onResult, onStart, plannedBatchIds);
 }
 
 // ──────────────────────────────────────────────
@@ -418,6 +490,8 @@ export function createAgentPipeline(
   agents: ResolvedAgent[],
   baseContext: AgentContext,
   onResult?: AgentResultCallback,
+  onStart?: AgentStartCallback,
+  plannedBatchIds?: Map<string, string>,
 ) {
   const allResults: AgentResult[] = [];
   const preGenerationInjections: AgentInjection[] = [];
@@ -434,7 +508,14 @@ export function createAgentPipeline(
      * Returns context injection strings to prepend to the prompt.
      */
     async preGenerate(agentTypeFilter?: (agentType: string) => boolean): Promise<AgentInjection[]> {
-      const injections = await runPreGenerationAgents(agents, baseContext, wrappedOnResult, agentTypeFilter);
+      const injections = await runPreGenerationAgents(
+        agents,
+        baseContext,
+        wrappedOnResult,
+        agentTypeFilter,
+        onStart,
+        plannedBatchIds,
+      );
       preGenerationInjections.push(...injections);
       return injections;
     },
@@ -445,7 +526,7 @@ export function createAgentPipeline(
      * base context without mainResponse (since it doesn't exist yet).
      */
     async runParallel(): Promise<AgentResult[]> {
-      const results = await runParallelAgents(agents, baseContext, wrappedOnResult);
+      const results = await runParallelAgents(agents, baseContext, wrappedOnResult, onStart, plannedBatchIds);
       parallelPhaseResults.push(...results);
       return results;
     },
@@ -465,7 +546,7 @@ export function createAgentPipeline(
         parallelResults: options.parallelResults ?? parallelPhaseResults,
       };
 
-      return runPostProcessingAgents(agents, fullContext, wrappedOnResult);
+      return runPostProcessingAgents(agents, fullContext, wrappedOnResult, onStart, plannedBatchIds);
     },
 
     /** All results collected so far. */
@@ -473,4 +554,109 @@ export function createAgentPipeline(
       return allResults;
     },
   };
+}
+
+// ──────────────────────────────────────────────
+// Pre-flight batch planning (for widget previews)
+// ──────────────────────────────────────────────
+
+/**
+ * A single planned agent widget: the batchId reflects the exact group
+ * the pipeline will create at run time, so the client can render batch
+ * clusters right when the queue first appears — not after the first
+ * agent_start arrives.
+ */
+export interface PlannedAgentWidget {
+  agentId: string;
+  agentType: string;
+  agentName: string;
+  phase: string;
+  batchId: string | null;
+}
+
+export interface PlanAgentBatchesOptions {
+  /**
+   * Optional list of "virtual merges": entries where one representative
+   * agent (already present in `agents` under `representativeId`) speaks for
+   * additional widget-only members that should share its batchId even
+   * though they aren't in the runnable list. Used by the built-in rewrite
+   * merger (Continuity + Prose Guardian + Immersive HTML) so the client
+   * still shows one widget per original agent while the server fires a
+   * single LLM call.
+   */
+  mergedGroups?: Array<{
+    representativeId: string;
+    members: Array<{ agentType: string; agentName: string; phase: string }>;
+  }>;
+}
+
+/**
+ * Compute the exact same grouping the pipeline will apply at run time so
+ * we can hand batchId assignments to the client before any LLM call
+ * actually fires. This mirrors executePhase → groupByProviderModel →
+ * splitGroupForParallelJobs → executeGroup, including the "trulyBatched
+ * vs isolated" split and the "batch of one degrades to solo" rule. Tool
+ * agents always fire their own request → batchId = null.
+ */
+export function planAgentBatches(
+  agents: ResolvedAgent[],
+  options: PlanAgentBatchesOptions = {},
+): PlannedAgentWidget[] {
+  const widgetsById = new Map<string, PlannedAgentWidget>();
+  for (const agent of agents) {
+    widgetsById.set(agent.id, {
+      agentId: agent.id,
+      agentType: agent.type,
+      agentName: agent.name,
+      phase: agent.phase,
+      batchId: null,
+    });
+  }
+
+  const phases: AgentPhase[] = ["pre_generation", "parallel", "post_processing"];
+  for (const phase of phases) {
+    const phaseAgents = agents.filter((a) => a.phase === phase);
+    if (phaseAgents.length === 0) continue;
+    const groups = groupByProviderModel(phaseAgents).flatMap(splitGroupForParallelJobs);
+    for (const group of groups) {
+      const toolAgents = group.agents.filter(shouldUseToolsDuringAgentExecution);
+      const batchAgents = group.agents.filter((a) => !shouldUseToolsDuringAgentExecution(a));
+      const trulyBatched = batchAgents.filter((a) => !shouldRunAgentIndividually(a));
+      // Isolated batch members and tool agents each fire their own request.
+      // Only agents that actually share the single batched LLM call get an id.
+      const sharedBatchId = trulyBatched.length >= 2 ? randomUUID() : null;
+      if (sharedBatchId) {
+        for (const agent of trulyBatched) {
+          const widget = widgetsById.get(agent.id);
+          if (widget) widget.batchId = sharedBatchId;
+        }
+      }
+      // Fields intentionally unused below — kept to make it obvious that
+      // isolated and tool agents intentionally stay batchId = null.
+      void toolAgents;
+    }
+  }
+
+  // Attach merged-rewrite siblings. Each sibling gets a widget with the
+  // representative's phase/batchId so they cluster together in the UI.
+  const extras: PlannedAgentWidget[] = [];
+  for (const merge of options.mergedGroups ?? []) {
+    const representative = widgetsById.get(merge.representativeId);
+    if (!representative) continue;
+    // A merged built-in rewrite call is a batch by definition — assign an
+    // id if the executor didn't already produce one (e.g. when the group
+    // only contains the merged agent and no other batchable agent).
+    if (!representative.batchId) representative.batchId = randomUUID();
+    for (const member of merge.members) {
+      extras.push({
+        agentId: `${merge.representativeId}::${member.agentType}`,
+        agentType: member.agentType,
+        agentName: member.agentName,
+        phase: member.phase,
+        batchId: representative.batchId,
+      });
+    }
+  }
+
+  return [...widgetsById.values(), ...extras];
 }

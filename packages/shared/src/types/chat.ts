@@ -416,6 +416,8 @@ export interface ChatMetadata {
   appliedChatPresetId?: string | null;
   /** Custom prompt prefix used by the /impersonate slash command. */
   impersonatePrompt?: string | null;
+  /** How outgoing user messages are translated: not at all, automatically before send, or on-demand via a draft button. */
+  translationInputBehavior?: "off" | "auto" | "draft";
   /** Show a manual draft translation button beside the send control. */
   showInputTranslateButton?: boolean;
   /** Legacy shared translation target. Directional targets fall back to this value. */
@@ -430,6 +432,12 @@ export interface ChatMetadata {
   translationInputPrompt?: string | null;
   /** AI system prompt for incoming response translation. Supports {{targetLanguage}}. */
   translationOutputPrompt?: string | null;
+  /** Legacy shared max tokens for AI translation. Directional values fall back to this. */
+  translationMaxTokens?: number | null;
+  /** Max tokens for outgoing draft (input) AI translation. 0 = provider maximum, missing = default. */
+  translationInputMaxTokens?: number | null;
+  /** Max tokens for incoming response (output) AI translation. 0 = provider maximum, missing = default. */
+  translationOutputMaxTokens?: number | null;
   /** Show only the translated text in place of the original message once a translation exists. */
   translationDisplayOnly?: boolean;
   /** Allow roleplay characters to create direct-message conversation chats with hidden [dm] commands. */

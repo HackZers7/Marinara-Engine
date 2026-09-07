@@ -57,6 +57,7 @@ import { useGameStateStore } from "../../stores/game-state.store";
 import { useThrottledStreamBuffer } from "../../hooks/use-throttled-stream-buffer";
 import { useChatComposerFocused, useChatKeyboardOpen } from "../../hooks/use-visual-viewport-chat-bottom";
 import { useActiveLorebookEntries, useLorebooks } from "../../hooks/use-lorebooks";
+import { AgentTrackBar } from "../agents/AgentTrackBar";
 import { usePresetFull, usePresets } from "../../hooks/use-presets";
 import { ChatMessage } from "./ChatMessage";
 import { ChatInput } from "./ChatInput";
@@ -2151,6 +2152,9 @@ export function ChatRoleplaySurface({
                     isForking={isForkingScene}
                   />
                 )}
+
+                <AgentTrackBar chatId={activeChatId} />
+
                 <ChatInput
                   key={activeChatId}
                   mode={isRoleplay ? "roleplay" : "conversation"}

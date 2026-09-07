@@ -161,7 +161,7 @@ export function GameInput({
       return {};
     }
   }, [activeChat?.metadata]);
-  const showDraftTranslateButton = chatMetadata.showInputTranslateButton === true;
+  const showDraftTranslateButton = chatMetadata.translationInputBehavior === "draft";
 
   useEffect(() => {
     const draft = readGameInputDraft(storageKey);

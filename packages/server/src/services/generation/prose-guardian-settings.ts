@@ -6,7 +6,7 @@ export const HTML_PENDING_MESSAGE = "Immersive HTML is working!";
 export const TEXT_REWRITE_PENDING_MESSAGE = "Rewrite agents are working!";
 const LEGACY_PROSE_GUARDIAN_PROMPT_PREFIX =
   "Study the last few assistant messages and produce concrete, actionable writing directives";
-const REWRITE_AGENT_TYPES = new Set(["prose-guardian", "continuity", "html"]);
+export const REWRITE_AGENT_TYPES = new Set(["prose-guardian", "continuity", "html"]);
 
 function readString(value: unknown): string | null {
   return typeof value === "string" ? value : null;

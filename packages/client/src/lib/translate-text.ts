@@ -13,6 +13,7 @@ export async function translateText(text: string, direction: TranslationDirectio
     targetLanguage: isInput ? store.config.inputTargetLanguage : store.config.outputTargetLanguage,
     connectionId: store.config.connectionId,
     systemPrompt: isInput ? store.config.inputSystemPrompt : store.config.outputSystemPrompt,
+    maxTokens: isInput ? store.config.inputMaxTokens : store.config.outputMaxTokens,
     deeplApiKey: store.config.deeplApiKey,
     deeplxUrl: store.config.deeplxUrl,
   });
