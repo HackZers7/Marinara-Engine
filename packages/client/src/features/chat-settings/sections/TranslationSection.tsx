@@ -115,12 +115,16 @@ export function TranslationSection({ metadata, textConnections, onMetadataChange
               onRestore={() => onMetadataChange({ translationOutputPrompt: null })}
             />
             <TranslationMaxTokensField
-              label={`${localizeUi("ui.chatSettings.translationsection.outgoingMessagePrompt")} — Max Tokens`}
+              label={localizeUi("ui.chatSettings.translationsection.value1MaxTokens", {
+                value1: localizeUi("ui.chatSettings.translationsection.outgoingMessagePrompt"),
+              })}
               value={metadata.translationInputMaxTokens as number | undefined}
               onChange={(value) => onMetadataChange({ translationInputMaxTokens: value })}
             />
             <TranslationMaxTokensField
-              label={`${localizeUi("ui.chatSettings.translationsection.incomingResponsePrompt")} — Max Tokens`}
+              label={localizeUi("ui.chatSettings.translationsection.value1MaxTokens", {
+                value1: localizeUi("ui.chatSettings.translationsection.incomingResponsePrompt"),
+              })}
               value={metadata.translationOutputMaxTokens as number | undefined}
               onChange={(value) => onMetadataChange({ translationOutputMaxTokens: value })}
             />
@@ -295,12 +299,15 @@ function TranslationMaxTokensField({
   value: number | undefined;
   onChange: (value: number | null) => void;
 }) {
+  const { t: localizeUi } = useUiTranslation();
   return (
     <div>
       <label className="text-[0.6875rem] font-medium text-[var(--muted-foreground)]">
         {label}
         <HelpTooltip
-          text="Maximum tokens for AI translation. Leave empty for default (4096). Set to 0 for the provider's maximum."
+          text={localizeUi(
+            "ui.chatSettings.translationmaxtokensfield.maximumTokensForAiTranslationLeaveEmptyForDefault",
+          )}
           size="0.625rem"
         />
       </label>

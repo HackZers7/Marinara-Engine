@@ -8,6 +8,7 @@ import {
   TRANSLATION_AGENT_TYPE,
   renderAgentAnimation,
 } from "./agent-track-animations";
+import { useTranslation as useUiTranslation } from "react-i18next";
 
 // Re-exported for use-generate.ts, which emits track entries for the two
 // virtual agents. The canonical definitions now live in the animations module.
@@ -52,6 +53,7 @@ interface AgentTrackWidgetProps {
 }
 
 const AgentTrackWidget = memo(function AgentTrackWidget({ entry }: AgentTrackWidgetProps) {
+  const { t: localizeUi } = useUiTranslation();
   const { agentType, agentName, status } = entry;
   const color = STATUS_COLORS[status];
   const ringColor = STATUS_RINGS[status];
@@ -84,7 +86,7 @@ const AgentTrackWidget = memo(function AgentTrackWidget({ entry }: AgentTrackWid
       onMouseLeave={hideTip}
       onFocus={showTip}
       onBlur={hideTip}
-      title={`${agentName} — ${status}`}
+      title={localizeUi("ui.agents.agenttrackwidget.value1Value2", { value1: agentName, value2: status })}
     >
       {tipPos &&
         createPortal(
@@ -129,6 +131,7 @@ interface AgentTrackBatchClusterProps {
 }
 
 const AgentTrackBatchCluster = memo(function AgentTrackBatchCluster({ entries }: AgentTrackBatchClusterProps) {
+  const { t: localizeUi } = useUiTranslation();
   // Pick the dominant status colour so the container tracks the batch state.
   // Priority: failed > running > queued > completed. This mirrors how a user
   // reads the batch: any failure surfaces, otherwise show progress, finally
@@ -157,7 +160,7 @@ const AgentTrackBatchCluster = memo(function AgentTrackBatchCluster({ entries }:
       transition={{ type: "spring", stiffness: 260, damping: 24 }}
       className="relative mt-2 flex shrink-0 items-center gap-2 rounded-xl border-2 border-dashed px-2 pt-2.5 pb-1.5"
       style={{ borderColor, backgroundColor: fillColor }}
-      title={`Batched LLM request (${entries.length} agents)`}
+      title={localizeUi("ui.agents.agenttrackbatchcluster.batchedLlmRequestValue1Agents", { value1: entries.length })}
     >
       <span
         className="pointer-events-none absolute -top-2 left-2 whitespace-nowrap rounded-sm border px-1 text-[0.55rem] font-semibold uppercase tracking-wider"
@@ -167,7 +170,8 @@ const AgentTrackBatchCluster = memo(function AgentTrackBatchCluster({ entries }:
           backgroundColor: "var(--background)",
         }}
       >
-        batch ×{entries.length}
+        {localizeUi("ui.agents.agenttrackbatchcluster.batch")}
+        {entries.length}
       </span>
       {entries.map((entry) => (
         <AgentTrackWidget key={`${entry.phase}-${entry.agentType}-${entry.order}`} entry={entry} />
@@ -181,6 +185,7 @@ const AgentTrackBatchCluster = memo(function AgentTrackBatchCluster({ entries }:
 // ──────────────────────────────────────────────
 
 export function AgentTrackBar({ chatId }: { chatId: string }) {
+  const { t: localizeUi } = useUiTranslation();
   const agentTrackQueue = useAgentStore((s) => s.agentTrackQueue);
   const agentTrackChatId = useAgentStore((s) => s.agentTrackChatId);
   const clearAgentTrackQueue = useAgentStore((s) => s.clearAgentTrackQueue);
@@ -266,7 +271,9 @@ export function AgentTrackBar({ chatId }: { chatId: string }) {
               <span className="text-[0.625rem] font-bold text-[var(--foreground)]">
                 {completed}/{total}
               </span>
-              <span className="text-[0.5rem] text-[var(--muted-foreground)]">agents</span>
+              <span className="text-[0.5rem] text-[var(--muted-foreground)]">
+                {localizeUi("ui.agents.agenttrackbar.agents")}
+              </span>
             </div>
 
             <div className="h-8 w-px shrink-0 bg-[var(--border)]/40" />
