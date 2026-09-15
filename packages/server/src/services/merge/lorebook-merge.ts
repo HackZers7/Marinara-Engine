@@ -71,10 +71,11 @@ export type NormalizedMergeEntry = Omit<
  * verbatim envelope rows); the create/update lists hold the normalized
  * incoming items in "incoming-id space": matched items keep their local id,
  * added items keep their file id as a placeholder that apply resolves through
- * its created-id map. Deletion candidates are removed from the merged order
- * sequences up front — confirmed deletions drop out at apply, unconfirmed
- * ones sink to the bottom of their container (the reorder helpers append
- * missing ids).
+ * its created-id map. Incoming rows without an id get a unique synthetic
+ * placeholder so two id-less rows can never collide. When `confirmedDeletions`
+ * is given (apply recomputes the plan with it; preview does not), only those
+ * candidates are removed from the merged order sequences — unconfirmed
+ * candidates keep their slot, so locals never move relative to each other.
  */
 export interface LorebookMergePlan {
   preview: LorebookMergePreview;
@@ -90,8 +91,11 @@ export interface LorebookMergePlan {
   entrySequences: Array<{ folderId: string | null; entryIds: string[] }>;
 }
 
-// The four resolvers below mirror marinara.importer.ts's private lorebook
-// normalizers so a merge applies exactly the values a native import would.
+// ponytail: the four resolvers below mirror marinara.importer.ts's private
+// lorebook normalizers (inlined because those are typed against the importer's
+// private STWorldInfoEntry). Ceiling: two sources of truth for the same field
+// mapping. Upgrade path: export the normalizers from the importer and import
+// them here if the importer ever needs the merge shapes.
 
 function resolveNativeSelectiveLogic(value: unknown): "and" | "and_all" | "or" | "not" | "not_all" {
   return value === "and_all" || value === "or" || value === "not" || value === "not_all" ? value : "and";
@@ -139,10 +143,19 @@ function rowOrder(row: Row): number {
   return Number(row.order ?? 0);
 }
 
-function normalizeFolder(row: Row, incomingFolderIds: ReadonlySet<string>): NormalizedMergeFolder {
+/**
+ * Map key for an incoming row: its real id, or a unique synthetic placeholder
+ * when the file omits the id. Placeholders are >21 chars, so they can never
+ * collide with a real nanoid row id — two id-less rows each get their own.
+ */
+function rowKey(row: Row, kind: "entry" | "folder", index: number): string {
+  return typeof row.id === "string" && row.id ? row.id : `__merge_new_${kind}_${index}__`;
+}
+
+function normalizeFolder(row: Row, id: string, incomingFolderIds: ReadonlySet<string>): NormalizedMergeFolder {
   const rawParent = typeof row.parentFolderId === "string" ? row.parentFolderId : null;
   return {
-    id: String(row.id),
+    id,
     name: String(row.name ?? "Folder"),
     enabled: row.enabled !== false,
     parentFolderId: rawParent && incomingFolderIds.has(rawParent) ? rawParent : null,
@@ -150,10 +163,10 @@ function normalizeFolder(row: Row, incomingFolderIds: ReadonlySet<string>): Norm
   };
 }
 
-function normalizeEntry(row: Row, incomingFolderIds: ReadonlySet<string>): NormalizedMergeEntry {
+function normalizeEntry(row: Row, id: string, incomingFolderIds: ReadonlySet<string>): NormalizedMergeEntry {
   const rawFolderId = typeof row.folderId === "string" ? row.folderId : null;
   return {
-    id: String(row.id),
+    id,
     name: String(row.name ?? ""),
     content: String(row.content ?? ""),
     description: String(row.description ?? ""),
@@ -231,28 +244,30 @@ export function planLorebookMerge(
   currentFolders: Row[],
   incomingEntries: Row[],
   incomingFolders: Row[],
+  confirmedDeletions?: LorebookMergeConfirmDelete,
 ): LorebookMergePlan {
   const currentEntryIds = new Set(currentEntries.map((row) => String(row.id)));
   const currentFolderIds = new Set(currentFolders.map((row) => String(row.id)));
-  const incomingFolderIds = new Set(incomingFolders.map((row) => String(row.id)));
+  const incomingFolderIds = new Set(incomingFolders.map((row, index) => rowKey(row, "folder", index)));
 
   const normalizedEntryById = new Map<string, NormalizedMergeEntry>();
-  for (const row of incomingEntries) {
-    const entry = normalizeEntry(row, incomingFolderIds);
-    normalizedEntryById.set(entry.id, entry);
+  for (const [index, row] of incomingEntries.entries()) {
+    const key = rowKey(row, "entry", index);
+    normalizedEntryById.set(key, normalizeEntry(row, key, incomingFolderIds));
   }
 
   const createEntries: NormalizedMergeEntry[] = [];
   const updateEntries: NormalizedMergeEntry[] = [];
-  for (const row of incomingEntries) {
-    const entry = normalizedEntryById.get(String(row.id))!;
+  for (const [index, row] of incomingEntries.entries()) {
+    const entry = normalizedEntryById.get(rowKey(row, "entry", index))!;
     if (currentEntryIds.has(entry.id)) updateEntries.push(entry);
     else createEntries.push(entry);
   }
   const createFolders: NormalizedMergeFolder[] = [];
   const updateFolders: NormalizedMergeFolder[] = [];
-  for (const row of incomingFolders) {
-    const folder = normalizeFolder(row, incomingFolderIds);
+  for (const [index, row] of incomingFolders.entries()) {
+    const key = rowKey(row, "folder", index);
+    const folder = normalizeFolder(row, key, incomingFolderIds);
     if (currentFolderIds.has(folder.id)) updateFolders.push(folder);
     else createFolders.push(folder);
   }
@@ -261,13 +276,16 @@ export function planLorebookMerge(
   const foldersDiff = diffCollection(currentFolders, incomingFolders);
 
   // Current display order per container: current entries grouped by folderId
-  // and sorted by `order`, minus deletion candidates, minus matched entries
-  // whose folder changes (they are new arrivals in the target container).
+  // and sorted by `order`, minus CONFIRMED deletion candidates, minus matched
+  // entries whose folder changes (they are new arrivals in the target
+  // container). Unconfirmed candidates keep their slot — locals never move
+  // relative to each other.
   const deletableEntryIds = new Set(entriesDiff.deletable.map((row) => String(row.id)));
+  const confirmedEntryDeletions = new Set(confirmedDeletions?.entries ?? []);
   const currentSequences = new Map<string, string[]>();
   for (const row of [...currentEntries].sort((left, right) => rowOrder(left) - rowOrder(right))) {
     const id = String(row.id);
-    if (deletableEntryIds.has(id)) continue;
+    if (deletableEntryIds.has(id) && confirmedEntryDeletions.has(id)) continue;
     const rawFolderId = typeof row.folderId === "string" && row.folderId ? row.folderId : null;
     const incoming = normalizedEntryById.get(id);
     if (incoming && incoming.folderId !== rawFolderId) continue;
@@ -276,8 +294,8 @@ export function planLorebookMerge(
 
   // Incoming display order per container: the file's array order.
   const incomingSequences = new Map<string, string[]>();
-  for (const row of incomingEntries) {
-    const entry = normalizedEntryById.get(String(row.id))!;
+  for (const [index, row] of incomingEntries.entries()) {
+    const entry = normalizedEntryById.get(rowKey(row, "entry", index))!;
     pushId(incomingSequences, entry.folderId ?? ROOT_CONTAINER_KEY, entry.id);
   }
 
@@ -287,16 +305,17 @@ export function planLorebookMerge(
     entryIds: mergeSequences(currentSequences.get(key) ?? [], incomingSequences.get(key) ?? []),
   }));
 
-  // Folder order: current folders minus deletion candidates, woven with the
-  // file's folder order.
+  // Folder order: current folders minus confirmed deletion candidates, woven
+  // with the file's folder order.
   const deletableFolderIds = new Set(foldersDiff.deletable.map((row) => String(row.id)));
+  const confirmedFolderDeletions = new Set(confirmedDeletions?.folders ?? []);
   const currentFolderSequence = [...currentFolders]
     .sort((left, right) => rowOrder(left) - rowOrder(right))
     .map((row) => String(row.id))
-    .filter((id) => !deletableFolderIds.has(id));
+    .filter((id) => !(deletableFolderIds.has(id) && confirmedFolderDeletions.has(id)));
   const folderOrder = mergeSequences(
     currentFolderSequence,
-    incomingFolders.map((row) => String(row.id)),
+    incomingFolders.map((row, index) => rowKey(row, "folder", index)),
   );
 
   return {
@@ -411,10 +430,9 @@ export async function applyLorebookMerge(
   }
 
   // 4. Orders: resolve added-item placeholders to created ids, then let the
-  //    reorder helpers renumber (i+1)*10. Deletion candidates were removed
-  //    from the merged sequences by the plan — confirmed ones simply drop out,
-  //    unconfirmed ones sink to the bottom of their container (missing ids are
-  //    appended, ordered by their current order).
+  //    reorder helpers renumber (i+1)*10. The plan built these sequences with
+  //    confirmed deletions already removed, so every id the reorder helpers
+  //    receive is a real surviving or created item.
   const survivingFolderIds = new Set(
     ((await storage.listFolders(lorebookId)) as unknown as Array<{ id: string }>).map((row) => row.id),
   );

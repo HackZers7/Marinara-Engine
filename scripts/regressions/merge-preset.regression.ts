@@ -230,14 +230,45 @@ assert.equal((choiceBlocks.added[0] as Row).optionSort, "manual", "Invalid optio
 
 assert.deepEqual(
   plan.sectionOrder,
-  ["A", "B", "X", "C"],
-  "Spec example: current [A,X,C] + incoming [A,B,C] weaves B between A and X, deletion candidate X untouched",
+  ["A", "B", "X", "C", "B2"],
+  "Spec example: current [A,X,C] + incoming [A,B,C] weaves B between A and X, deletion candidate X untouched; B2 (an added section the file's order array never references) is appended instead of becoming an orphan",
 );
-assert.deepEqual(plan.groupOrder, ["G1", "G2"], "Unknown incoming order ids drop; local-only order ids survive");
+assert.deepEqual(
+  plan.groupOrder,
+  ["G1", "G2", "G3"],
+  "Unknown incoming order ids drop; local-only order ids survive; G3 (an added group the file's groupOrder never references, with an unknown parent) is appended instead of becoming an orphan",
+);
 assert.deepEqual(
   plan.choiceBlockOrder,
   ["V0", "V1", "V2"],
   "Choice-block order uses sortOrder ascending on both sides",
+);
+
+// ── Id-less incoming rows ──
+
+// Two id-less sections must not collide on String(undefined) — both are added
+// with unique synthetic placeholders, and both land at the end of the merged
+// order (the file's sectionOrder cannot reference id-less rows).
+const idlessPlan = planPresetMerge(
+  { preset: {}, sections: [], groups: [], choiceBlocks: [] },
+  {
+    preset: { sectionOrder: [], groupOrder: [] },
+    sections: [
+      { identifier: "a", name: "A" },
+      { identifier: "b", name: "B" },
+    ],
+    groups: [],
+    choiceBlocks: [],
+  },
+);
+assert.equal(idlessPlan.preview.sections.added.length, 2, "both id-less sections are added");
+const idlessIds = idlessPlan.preview.sections.added.map((section) => (section as Row).id);
+assert.notEqual(idlessIds[0], idlessIds[1], "synthetic placeholders are unique");
+for (const id of idlessIds) assert.match(String(id), /^__merge_new_section_\d+__$/);
+assert.deepEqual(
+  idlessPlan.sectionOrder,
+  [...idlessIds],
+  "id-less added sections are appended to the order instead of becoming orphans",
 );
 
 console.log("Preset merge plan regressions passed.");

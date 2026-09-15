@@ -20,6 +20,7 @@ import {
 } from "@marinara-engine/shared";
 import type { ExportEnvelope, PresetMergeConfirmDelete } from "@marinara-engine/shared";
 import { createPromptsStorage } from "../services/storage/prompts.storage.js";
+import { IMPORT_BODY_LIMIT_BYTES } from "./import.routes.js";
 import { applyPresetMerge, planPresetMerge, type PresetMergeSnapshot } from "../services/merge/preset-merge.js";
 import { assemblePrompt, type AssemblerInput } from "../services/prompt/index.js";
 import { cardPromptText } from "../services/prompt/card-text.js";
@@ -296,19 +297,39 @@ export async function promptsRoutes(app: FastifyInstance) {
     };
   }
 
-  app.post<{ Params: { id: string } }>("/:id/merge/preview", async (req, reply) => {
-    const preset = await storage.getById(req.params.id);
-    if (!preset) return reply.status(404).send({ error: "Preset not found" });
-    if (isStockMarinaraUniversalPreset(preset)) {
-      return reply.status(409).send({ error: STOCK_PRESET_READ_ONLY_ERROR });
-    }
-    const incoming = parsePresetMergeSnapshot(req.body);
-    if (!incoming) return reply.status(400).send({ error: "Invalid Marinara preset envelope" });
-    const current = await loadPresetMergeSnapshot(req.params.id);
-    return planPresetMerge(current, incoming).preview;
-  });
+  /** Accept only `{ sections?, groups?, choiceBlocks? }` id arrays; anything else means "delete nothing". */
+  function parsePresetMergeConfirmDelete(body: unknown): PresetMergeConfirmDelete | undefined {
+    const raw = (body as { confirmDelete?: unknown } | null)?.confirmDelete;
+    if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+    const idList = (value: unknown): string[] | undefined =>
+      Array.isArray(value) ? value.filter((id): id is string => typeof id === "string") : undefined;
+    const result: PresetMergeConfirmDelete = {};
+    const sections = idList((raw as Record<string, unknown>).sections);
+    const groups = idList((raw as Record<string, unknown>).groups);
+    const choiceBlocks = idList((raw as Record<string, unknown>).choiceBlocks);
+    if (sections) result.sections = sections;
+    if (groups) result.groups = groups;
+    if (choiceBlocks) result.choiceBlocks = choiceBlocks;
+    return result;
+  }
 
-  app.post<{ Params: { id: string } }>("/:id/merge", async (req, reply) => {
+  app.post<{ Params: { id: string } }>(
+    "/:id/merge/preview",
+    { bodyLimit: IMPORT_BODY_LIMIT_BYTES },
+    async (req, reply) => {
+      const preset = await storage.getById(req.params.id);
+      if (!preset) return reply.status(404).send({ error: "Preset not found" });
+      if (isStockMarinaraUniversalPreset(preset)) {
+        return reply.status(409).send({ error: STOCK_PRESET_READ_ONLY_ERROR });
+      }
+      const incoming = parsePresetMergeSnapshot(req.body);
+      if (!incoming) return reply.status(400).send({ error: "Invalid Marinara preset envelope" });
+      const current = await loadPresetMergeSnapshot(req.params.id);
+      return planPresetMerge(current, incoming).preview;
+    },
+  );
+
+  app.post<{ Params: { id: string } }>("/:id/merge", { bodyLimit: IMPORT_BODY_LIMIT_BYTES }, async (req, reply) => {
     const preset = await storage.getById(req.params.id);
     if (!preset) return reply.status(404).send({ error: "Preset not found" });
     if (isStockMarinaraUniversalPreset(preset)) {
@@ -316,7 +337,7 @@ export async function promptsRoutes(app: FastifyInstance) {
     }
     const incoming = parsePresetMergeSnapshot(req.body);
     if (!incoming) return reply.status(400).send({ error: "Invalid Marinara preset envelope" });
-    const confirmDelete = (req.body as { confirmDelete?: PresetMergeConfirmDelete }).confirmDelete;
+    const confirmDelete = parsePresetMergeConfirmDelete(req.body);
     const plan = planPresetMerge(await loadPresetMergeSnapshot(req.params.id), incoming);
     const result = await applyPresetMerge(storage, req.params.id, plan, confirmDelete);
     logger.info(

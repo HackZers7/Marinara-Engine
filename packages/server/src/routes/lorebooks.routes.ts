@@ -902,7 +902,9 @@ export async function lorebooksRoutes(app: FastifyInstance) {
     if (!incoming.ok) return reply.status(400).send({ error: incoming.error });
     const { confirmDelete } = req.body as LorebookMergeApplyPayload;
     const current = await loadLorebookMergeSnapshot(req.params.id);
-    const plan = planLorebookMerge(current.entries, current.folders, incoming.entries, incoming.folders);
+    // Recompute the plan WITH the confirmations so unconfirmed candidates keep
+    // their display slot instead of being dropped from the merged sequences.
+    const plan = planLorebookMerge(current.entries, current.folders, incoming.entries, incoming.folders, confirmDelete);
     const result = await applyLorebookMerge(storage, req.params.id, plan, confirmDelete);
     await syncCharacterBookFromLorebook(app.db, req.params.id);
     logger.info(

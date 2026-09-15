@@ -85,9 +85,8 @@ export interface PresetMergeConfirmDelete {
 }
 
 export interface CharacterMergeConfirmDelete {
-  /** Entries of the card's linked standalone lorebook. */
+  /** Entries of the card's linked standalone lorebook. The embedded book is flat — no folders. */
   entries?: string[];
-  folders?: string[];
 }
 
 export interface LorebookMergeApplyPayload {

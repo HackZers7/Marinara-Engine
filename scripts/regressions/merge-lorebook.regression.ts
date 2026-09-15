@@ -202,12 +202,44 @@ assert.deepEqual(
 );
 
 // Merged per-container sequences: M1 arrives in root after R1, leaves FL;
-// deletable D1 is already out of the sequences.
+// WITHOUT confirmations every deletion candidate (D1, folder FD) keeps its slot.
 const sequenceOf = (folderId: string | null) =>
   plan.entrySequences.find((sequence) => sequence.folderId === folderId)?.entryIds;
 assert.deepEqual(sequenceOf(null), ["R1", "M1", "N2"]);
 assert.deepEqual(sequenceOf("FL"), ["M2"]);
 assert.deepEqual(sequenceOf("FC"), ["N1"]);
-assert.deepEqual(plan.folderOrder, ["FL", "FN", "FC"]);
+assert.deepEqual(sequenceOf("FD"), ["D1"], "unconfirmed candidates must keep their slot");
+assert.deepEqual(plan.folderOrder, ["FL", "FN", "FC", "FD"]);
+
+// With confirmations the plan drops the confirmed candidates from the sequences.
+const confirmedPlan = planLorebookMerge(currentEntries, currentFolders, incomingEntries, incomingFolders, {
+  entries: ["D1"],
+  folders: ["FD"],
+});
+const confirmedSequenceOf = (folderId: string | null) =>
+  confirmedPlan.entrySequences.find((sequence) => sequence.folderId === folderId)?.entryIds;
+assert.deepEqual(confirmedSequenceOf(null), ["R1", "M1", "N2"]);
+assert.deepEqual(confirmedSequenceOf("FD"), undefined, "confirmed-deleted folder's container is gone");
+assert.deepEqual(confirmedPlan.folderOrder, ["FL", "FN", "FC"]);
+// The preview diffs are unaffected by confirmations — D1/FD stay deletable candidates.
+assert.deepEqual(
+  confirmedPlan.preview.entries.deletable.map((row) => row.id),
+  ["D1"],
+);
+assert.deepEqual(
+  confirmedPlan.preview.folders.deletable.map((row) => row.id),
+  ["FD"],
+);
+
+// Two id-less incoming rows must not collide on String(undefined) — each gets
+// its own synthetic placeholder and both are added and sequenced.
+const idlessPlan = planLorebookMerge([], [], [entryRow({ name: "a" }), entryRow({ name: "b" })], []);
+assert.equal(idlessPlan.preview.entries.added.length, 2);
+assert.equal(idlessPlan.createEntries.length, 2, "both id-less rows must be created");
+assert.notEqual(idlessPlan.createEntries[0]!.id, idlessPlan.createEntries[1]!.id);
+assert.deepEqual(idlessPlan.entrySequences[0]!.entryIds.length, 2);
+for (const created of idlessPlan.createEntries) {
+  assert.match(created.id, /^__merge_new_entry_\d+__$/, "placeholder ids are synthetic and unique");
+}
 
 console.log("Lorebook merge sequence interleave and plan regressions passed.");

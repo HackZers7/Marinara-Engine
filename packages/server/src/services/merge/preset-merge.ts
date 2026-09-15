@@ -224,41 +224,77 @@ function mergedOrder(currentOrder: string[], existingIds: ReadonlySet<string>, i
   return mergeSequences(current, incomingOrder);
 }
 
-export function planPresetMerge(current: PresetMergeSnapshot, incoming: PresetMergeSnapshot): PresetMergePlan {
-  const incomingGroupIds = new Set(incoming.groups.map((row) => String(row.id)));
+/**
+ * Give every incoming row without a string id a unique synthetic placeholder
+ * (>21 chars, so it can never collide with a real nanoid id): two id-less rows
+ * must not collapse onto String(undefined) === "undefined" in the id maps.
+ * Placeholders never appear in the file's order arrays, so appendUnplaced
+ * adds them (in file order) to the end of each merged sequence.
+ */
+function withPlaceholders(rows: Row[], kind: string): Row[] {
+  return rows.map((row, index) =>
+    typeof row.id === "string" && row.id ? row : { ...row, id: `__merge_new_${kind}_${index}__` },
+  );
+}
 
-  const groups = diffCollection(current.groups, incoming.groups, (row) => normalizeGroup(row, incomingGroupIds));
-  const sections = diffCollection(current.sections, incoming.sections, (row) =>
+/** Append ids known to the merge but never placed by the file's order arrays (added items the order omits). */
+function appendUnplaced(order: string[], idSpace: ReadonlyMap<string, string>): string[] {
+  const placed = new Set(order);
+  const extras = [...idSpace.keys()].filter((id) => !placed.has(id));
+  return extras.length > 0 ? [...order, ...extras] : order;
+}
+
+export function planPresetMerge(current: PresetMergeSnapshot, incoming: PresetMergeSnapshot): PresetMergePlan {
+  const incomingRows = {
+    groups: withPlaceholders(incoming.groups, "group"),
+    sections: withPlaceholders(incoming.sections, "section"),
+    choiceBlocks: withPlaceholders(incoming.choiceBlocks, "choice"),
+  };
+  const incomingGroupIds = new Set(incomingRows.groups.map((row) => String(row.id)));
+
+  const groups = diffCollection(current.groups, incomingRows.groups, (row) => normalizeGroup(row, incomingGroupIds));
+  const sections = diffCollection(current.sections, incomingRows.sections, (row) =>
     normalizeSection(row, incomingGroupIds),
   );
-  const choiceBlocks = diffCollection(current.choiceBlocks, incoming.choiceBlocks, normalizeChoiceBlock);
+  const choiceBlocks = diffCollection(current.choiceBlocks, incomingRows.choiceBlocks, normalizeChoiceBlock);
 
   // Orders. Incoming order entries are kept only when they name an item that
   // actually exists in the file ("dropping unknown ids"); in plan space the id
   // map is identity (matched keep the local id, added keep their file id).
+  // Added items the file's order array omits (id-less rows included) are
+  // appended in file order so they never become invisible orphans.
   const incomingSectionOrder = parseIdOrder(incoming.preset.sectionOrder).filter((id) =>
     sections.incomingIdSpace.has(id),
   );
-  const sectionOrder = mergedOrder(
-    parseIdOrder(current.preset.sectionOrder),
-    new Set(current.sections.map((row) => String(row.id))),
-    incomingSectionOrder,
+  const sectionOrder = appendUnplaced(
+    mergedOrder(
+      parseIdOrder(current.preset.sectionOrder),
+      new Set(current.sections.map((row) => String(row.id))),
+      incomingSectionOrder,
+    ),
+    sections.incomingIdSpace,
   );
 
   const incomingGroupOrder = parseIdOrder(incoming.preset.groupOrder).filter((id) => groups.incomingIdSpace.has(id));
-  const groupOrder = mergedOrder(
-    parseIdOrder(current.preset.groupOrder),
-    new Set(current.groups.map((row) => String(row.id))),
-    incomingGroupOrder,
+  const groupOrder = appendUnplaced(
+    mergedOrder(
+      parseIdOrder(current.preset.groupOrder),
+      new Set(current.groups.map((row) => String(row.id))),
+      incomingGroupOrder,
+    ),
+    groups.incomingIdSpace,
   );
 
-  const incomingChoiceOrder = choiceBlockOrder(incoming.choiceBlocks).filter((id) =>
+  const incomingChoiceOrder = choiceBlockOrder(incomingRows.choiceBlocks).filter((id) =>
     choiceBlocks.incomingIdSpace.has(id),
   );
-  const choiceOrder = mergedOrder(
-    choiceBlockOrder(current.choiceBlocks),
-    new Set(current.choiceBlocks.map((row) => String(row.id))),
-    incomingChoiceOrder,
+  const choiceOrder = appendUnplaced(
+    mergedOrder(
+      choiceBlockOrder(current.choiceBlocks),
+      new Set(current.choiceBlocks.map((row) => String(row.id))),
+      incomingChoiceOrder,
+    ),
+    choiceBlocks.incomingIdSpace,
   );
 
   return {
@@ -366,6 +402,11 @@ export async function applyPresetMerge(
     if (created) sectionMap.set(section.id, created.id);
   }
   for (const { incoming: section } of plan.preview.sections.updated) {
+    // ponytail: a matched section deliberately keeps its local ST `identifier`
+    // (updateSection's schema forbids rewriting it) — it is an external
+    // ST-compat reference, so keeping it mirrors the id-preservation doctrine.
+    // Upgrade path: allow `identifier` in updatePromptSectionSchema if a
+    // cross-tool identifier sync is ever needed.
     await storage.updateSection(section.id, {
       name: section.name,
       content: section.content,
