@@ -100,6 +100,7 @@ import { LorebookEntryRow } from "./LorebookEntryRow";
 import { LorebookFolderRow } from "./LorebookFolderRow";
 import { ExpandableTextarea, estimateTokens } from "./LorebookFormFields";
 import { ExportFormatDialog, type ExportFormatChoice } from "../ui/ExportFormatDialog";
+import { MergeImportDialog } from "../merge/MergeImportDialog";
 import { EditorTabNavigation } from "../ui/EditorTabNavigation";
 import { useEditorSections } from "../../hooks/use-editor-sections";
 import { useEditorLeaveSave } from "../../hooks/use-editor-leave-save";
@@ -433,6 +434,13 @@ export function LorebookEditor() {
   const updateFolder = useUpdateLorebookFolder();
   const reorderFolders = useReorderLorebookFolders();
   const transferEntries = useTransferLorebookEntries();
+  const queryClient = useQueryClient();
+
+  // A merge mutates the book's entries/folders server-side; refresh every
+  // lorebook query (they all share the lorebookKeys.all prefix).
+  const handleMerged = useCallback(() => {
+    queryClient.invalidateQueries({ queryKey: lorebookKeys.all });
+  }, [queryClient]);
 
   const lorebook = rawLorebook as Lorebook | undefined;
   const lorebooks = useMemo(() => (rawLorebooks ?? []) as Lorebook[], [rawLorebooks]);
@@ -1971,6 +1979,7 @@ export function LorebookEditor() {
               <rect x="3" y="15" width="14" height="2" rx="1" fill="currentColor" />
             </svg>
           </button>
+          <MergeImportDialog kind="lorebook" elementId={lorebook.id} onApplied={handleMerged} iconSize="0.875rem" />
           <button
             onClick={handleDelete}
             className="mari-editor-action inline-flex"

@@ -4,6 +4,8 @@ This file is the release-notes source of truth for Marinara Engine. Reuse these 
 
 ## [Unreleased]
 
+- Lorebooks, presets, character cards, and personas can merge a Marinara export file (`.marinara.json`) into the open editor instead of importing a copy: entries, folders, sections, groups, and choice blocks with matching ids are updated in place (keeping chat states, orderings, and other references intact), items new to the file are added in the file's order, and items missing from the file are offered for deletion in a confirmation popup. Card merges also update the embedded lorebook through its linked book and take an automatic card-version snapshot first, so a merge can be rolled back from version history.
+
 ## [2.4.6]
 
 - Shutdown regression checks use persisted cleanup results after terminal exit, avoiding false failures when a closed terminal discards its final log output (#6245).

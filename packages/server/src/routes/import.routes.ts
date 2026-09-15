@@ -32,7 +32,9 @@ import { assertInsideDir, safeCompareString, tokenForPath } from "../utils/secur
 
 const PICK_FOLDER_TIMEOUT_MS = 60_000; // 60s — prevents infinite hang on headless servers
 const FOLDER_TOKEN_TTL_MS = 15 * 60_000;
-const IMPORT_BODY_LIMIT_BYTES = 256 * 1024 * 1024;
+// Shared with the character/persona merge routes so a native envelope can be
+// POSTed to either path without hitting a smaller default body limit.
+export const IMPORT_BODY_LIMIT_BYTES = 256 * 1024 * 1024;
 const NATIVE_PACKAGE_UPLOAD_LIMIT_BYTES = 1024 * 1024 * 1024;
 const MAX_BATCH_IMPORT_FILES = 128;
 const NATIVE_PACKAGE_ENTRY_LIMIT_BYTES = 256 * 1024 * 1024;

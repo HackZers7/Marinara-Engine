@@ -73,6 +73,9 @@ import {
 import { logger, logDebugOverride } from "../lib/logger.js";
 import { isDebugAgentsEnabled } from "../config/runtime-config.js";
 import { parseLibraryPageQuery } from "../utils/list-pagination.js";
+import { IMPORT_BODY_LIMIT_BYTES } from "./import.routes.js";
+import { applyCharacterMerge, previewCharacterMerge } from "../services/merge/character-merge.js";
+import { applyPersonaMerge, previewPersonaMerge } from "../services/merge/persona-merge.js";
 import {
   resolveChatSummaryConnection,
   resolveChatSummaryTemperatureOptions,
@@ -883,6 +886,36 @@ export async function validateCharacterGalleryReferences<T extends Record<string
   };
 }
 
+/**
+ * Validate a merge-import envelope for the given entity type. Returns an error
+ * message, or null when the envelope is a well-formed native export of the
+ * expected type (deeper field validation happens in the merge services).
+ */
+function validateMergeEnvelope(value: unknown, expectedType: "marinara_character" | "marinara_persona"): string | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return "Merge envelope must be a JSON object";
+  const envelope = value as Record<string, unknown>;
+  if (envelope.type !== expectedType) return `Merge envelope type must be "${expectedType}"`;
+  if (envelope.version !== 1) return "Merge envelope version must be 1";
+  if (!envelope.data || typeof envelope.data !== "object" || Array.isArray(envelope.data)) {
+    return "Merge envelope data is missing";
+  }
+  if (expectedType === "marinara_character") {
+    const payload = envelope.data as Record<string, unknown>;
+    if (!payload.data || typeof payload.data !== "object" || Array.isArray(payload.data)) {
+      return "Character merge envelope is missing its V2 card data";
+    }
+  }
+  return null;
+}
+
+/** Entry ids the user confirmed for deletion; absent/invalid keys mean "delete none". */
+function parseMergeConfirmDelete(value: unknown): { entries?: string[] } {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const entries = (value as Record<string, unknown>).entries;
+  if (!Array.isArray(entries)) return {};
+  return { entries: entries.filter((entry): entry is string => typeof entry === "string") };
+}
+
 export async function charactersRoutes(app: FastifyInstance) {
   const storage = createCharactersStorage(app.db);
   const catalog = createCharacterCatalog(app.db);
@@ -1380,6 +1413,38 @@ export async function charactersRoutes(app: FastifyInstance) {
     if (result === "summary-exists") return reply.status(409).send({ error: "Character already has a summary" });
     return result;
   });
+
+  // ── Character Merge-Import ──
+  // Apply a native character envelope onto this existing card: file fields
+  // win, media is replaced only when provided, and the embedded book is merged
+  // into the card's linked standalone lorebook by entry-id stamps.
+
+  app.post<{ Params: { id: string }; Body: { envelope?: unknown } }>(
+    "/:id/merge/preview",
+    { bodyLimit: IMPORT_BODY_LIMIT_BYTES },
+    async (req, reply) => {
+      const envelopeError = validateMergeEnvelope(req.body?.envelope, "marinara_character");
+      if (envelopeError) return reply.status(400).send({ error: envelopeError });
+      const preview = await previewCharacterMerge(app.db, req.params.id, req.body!.envelope as ExportEnvelope);
+      if (!preview) return reply.status(404).send({ error: "Character not found" });
+      return preview;
+    },
+  );
+
+  app.post<{ Params: { id: string }; Body: { envelope?: unknown; confirmDelete?: unknown } }>(
+    "/:id/merge",
+    { bodyLimit: IMPORT_BODY_LIMIT_BYTES },
+    async (req, reply) => {
+      const envelopeError = validateMergeEnvelope(req.body?.envelope, "marinara_character");
+      if (envelopeError) return reply.status(400).send({ error: envelopeError });
+      const confirmDelete = parseMergeConfirmDelete(req.body?.confirmDelete);
+      const result = await enqueueUpdate(characterUpdateQueues, req.params.id, () =>
+        applyCharacterMerge(app.db, req.params.id, req.body!.envelope as ExportEnvelope, confirmDelete),
+      );
+      if (!result) return reply.status(404).send({ error: "Character not found" });
+      return result;
+    },
+  );
 
   app.patch<{ Params: { id: string }; Body: { paint?: unknown } }>("/:id/tracker-card-colors", async (req, reply) => {
     const body = req.body;
@@ -2440,6 +2505,36 @@ export async function charactersRoutes(app: FastifyInstance) {
     if (!updated) return reply.status(404).send({ error: "Persona not found" });
     return projectPersona(updated);
   });
+
+  // ── Persona Merge-Import ──
+  // Apply a native persona envelope onto this existing persona: file fields
+  // win, media is replaced only when provided (fields-only merge, no book).
+
+  app.post<{ Params: { id: string }; Body: { envelope?: unknown } }>(
+    "/personas/:id/merge/preview",
+    { bodyLimit: IMPORT_BODY_LIMIT_BYTES },
+    async (req, reply) => {
+      const envelopeError = validateMergeEnvelope(req.body?.envelope, "marinara_persona");
+      if (envelopeError) return reply.status(400).send({ error: envelopeError });
+      const preview = await previewPersonaMerge(app.db, req.params.id, req.body!.envelope as ExportEnvelope);
+      if (!preview) return reply.status(404).send({ error: "Persona not found" });
+      return preview;
+    },
+  );
+
+  app.post<{ Params: { id: string }; Body: { envelope?: unknown } }>(
+    "/personas/:id/merge",
+    { bodyLimit: IMPORT_BODY_LIMIT_BYTES },
+    async (req, reply) => {
+      const envelopeError = validateMergeEnvelope(req.body?.envelope, "marinara_persona");
+      if (envelopeError) return reply.status(400).send({ error: envelopeError });
+      const result = await enqueueUpdate(personaUpdateQueues, req.params.id, () =>
+        applyPersonaMerge(app.db, req.params.id, req.body!.envelope as ExportEnvelope),
+      );
+      if (!result) return reply.status(404).send({ error: "Persona not found" });
+      return result;
+    },
+  );
 
   app.patch<{ Params: { id: string } }>("/personas/:id/tracker-card-colors", async (req, reply) => {
     const body = (req.body ?? {}) as { paint?: unknown; portrait?: unknown };

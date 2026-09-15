@@ -71,7 +71,7 @@ function normalizeDefaultChoices(value: unknown): Record<string, string | string
 // Decode a base64 data URL into validated image bytes. Returns null if the
 // payload is missing, malformed, or not a recognized image type — so callers
 // can treat optional images as "skip this one" rather than failing the whole
-// import.
+// import. Also reused by the merge-import service for envelope media.
 function decodeImageDataUrl(dataUrl: unknown): { buffer: Buffer; ext: string } | null {
   if (typeof dataUrl !== "string" || dataUrl.length === 0) return null;
   let base64 = dataUrl;
@@ -115,7 +115,8 @@ export function embeddedSpriteSizesAreWithinLimits(byteLengths: readonly number[
 // Decode an `avatar` data URL carried in a native export, validate it as a
 // real image, and write it under data/avatars/. The filesystem path lets a
 // caller remove the file if attaching it to the imported row fails.
-async function saveAvatarFromDataUrl(dataUrl: unknown, prefix: string, id: string): Promise<SavedAvatar | null> {
+// Exported for the merge-import service (same envelope avatar semantics).
+export async function saveAvatarFromDataUrl(dataUrl: unknown, prefix: string, id: string): Promise<SavedAvatar | null> {
   if (dataUrl === undefined || dataUrl === null || dataUrl === "") return null;
   const decoded = decodeImageDataUrl(dataUrl);
   if (!decoded) {
@@ -298,7 +299,8 @@ async function restoreOwnerGallery(
   return characterSheetImageId;
 }
 
-function restoreCharacterGallery(
+// Exported for the merge-import service (native character gallery restore).
+export function restoreCharacterGallery(
   gallery: unknown,
   characterId: string,
   galleryStorage: ReturnType<typeof createCharacterGalleryStorage>,
@@ -308,7 +310,8 @@ function restoreCharacterGallery(
   );
 }
 
-function restorePersonaGallery(
+// Exported for the merge-import service (native persona gallery restore).
+export function restorePersonaGallery(
   gallery: unknown,
   personaId: string,
   galleryStorage: ReturnType<typeof createPersonaGalleryStorage>,
@@ -540,8 +543,9 @@ function issueField(issue: { path: PropertyKey[] }): string | undefined {
  * while dropping malformed ones before the same strict create boundary used by
  * direct writes. The tolerant normalizers are deliberately limited to known
  * structured fields; direct values remain strict or are omitted here.
+ * Exported for the merge-import service, which reuses the same boundary.
  */
-function parseNativePersonaInput(input: Record<string, unknown>) {
+export function parseNativePersonaInput(input: Record<string, unknown>) {
   const candidate = canonicalizeLegacyPersonaInput(input) as Record<string, unknown>;
   const strict = personaCreateInputSchema.safeParse(candidate);
   if (strict.success) return strict.data;

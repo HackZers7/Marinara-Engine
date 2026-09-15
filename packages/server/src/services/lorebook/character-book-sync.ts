@@ -70,7 +70,9 @@ function toCharacterBookEntry(entry: LoreEntryRow, index: number): CharacterBook
   return {
     keys: asStringArray(entry.keys),
     content: asString(entry.content),
-    extensions: {},
+    // Stamp the real standalone-entry id so merge-import can match an exported
+    // embedded book back onto the linked lorebook's rows (id-stable merge).
+    extensions: { marinara: { entryId: String(entry.id) } },
     enabled: asBoolean(entry.enabled),
     insertion_order: order,
     case_sensitive: asBoolean(entry.caseSensitive),

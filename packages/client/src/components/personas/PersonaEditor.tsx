@@ -101,6 +101,7 @@ import {
   useRestoreSpriteCleanupBackup,
   useSpriteCapabilities,
   spriteKeys,
+  characterKeys,
   type SpriteInfo,
 } from "../../hooks/use-characters";
 import { useQueryClient } from "@tanstack/react-query";
@@ -127,9 +128,11 @@ import {
   syncRpgHpFromPools,
   type CharacterData,
   type ConvoBehaviorConfig,
+  type MergeApplyResult,
   type Persona,
   type PersonaCardSnapshot,
   type PersonaCardVersion,
+  type PersonaMergeApplyResult,
   type PersonaStatBar,
   type PersonaStatsConfig,
   type PersonaUpdateInput,
@@ -138,6 +141,7 @@ import {
   type TrackerCardColorConfig,
 } from "@marinara-engine/shared";
 import { useQuoteFormatter } from "../../hooks/use-quote-formatter";
+import { MergeImportDialog } from "../merge/MergeImportDialog";
 import { LorebookAssignmentSection } from "../lorebooks/LorebookAssignmentSection";
 import { ConvoProfileFields } from "../characters/ConvoProfileFields";
 import { useTranslation, useTranslation as useUiTranslation } from "react-i18next";
@@ -1468,6 +1472,29 @@ export function PersonaEditor() {
     };
   }, [personaId]);
 
+  const queryClient = useQueryClient();
+  // A merge persists server-side while this editor keeps its own draft. Adopt
+  // the merged persona as the new draft WITHOUT moving the baseline, so the
+  // merged fields read as dirty and the user reviews and saves deliberately.
+  // The persona list/detail queries are intentionally not invalidated: a
+  // refetch would reconcile the draft against the already-merged server state
+  // and clear that review-dirty marker. Version history is safe to refresh.
+  const handleMerged = useCallback(
+    (result: MergeApplyResult) => {
+      const merged = result as PersonaMergeApplyResult;
+      if (!personaId || !rawPersona) return;
+      const mergedPersona = { ...rawPersona, ...merged.data } as Persona;
+      commitFormData(personaFormFromPersona(mergedPersona));
+      if (avatarCropOwnerRef.current !== mergedPersona.avatarPath) {
+        avatarCropOwnerRef.current = mergedPersona.avatarPath;
+      }
+      authoritativeAvatarPathRef.current = mergedPersona.avatarPath;
+      setAvatarPreview(mergedPersona.avatarPath);
+      queryClient.invalidateQueries({ queryKey: characterKeys.personaVersions(personaId) });
+    },
+    [commitFormData, personaId, queryClient, rawPersona],
+  );
+
   const updateField = useCallback(
     <K extends keyof PersonaFormData>(key: K, value: PersonaFormData[K]) => {
       const previous = formDataRef.current;
@@ -1870,6 +1897,8 @@ export function PersonaEditor() {
           <rect x="3" y="15" width="14" height="2" rx="1" fill="currentColor" />
         </svg>
       </button>
+
+      {personaId ? <MergeImportDialog kind="persona" elementId={personaId} onApplied={handleMerged} /> : null}
 
       <button
         type="button"

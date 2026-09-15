@@ -22,6 +22,7 @@ export * from "./types/persona.js";
 export * from "./types/avatar-crop.js";
 export * from "./types/regex.js";
 export * from "./types/export.js";
+export * from "./types/merge.js";
 export * from "./types/haptic.js";
 export * from "./types/theme.js";
 export * from "./types/chat-preset.js";

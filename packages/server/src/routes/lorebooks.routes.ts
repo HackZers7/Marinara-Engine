@@ -23,7 +23,8 @@ import {
   type LorebookEntry,
   type LorebookFolder,
 } from "@marinara-engine/shared";
-import type { ExportEnvelope } from "@marinara-engine/shared";
+import type { ExportEnvelope, LorebookMergeApplyPayload } from "@marinara-engine/shared";
+import { applyLorebookMerge, planLorebookMerge } from "../services/merge/lorebook-merge.js";
 import { createLorebooksStorage } from "../services/storage/lorebooks.storage.js";
 import { createChatsStorage } from "../services/storage/chats.storage.js";
 import { createCharactersStorage } from "../services/storage/characters.storage.js";
@@ -59,6 +60,7 @@ import {
 } from "../services/memory-recall-embedding.js";
 import { sidecarModelService } from "../services/sidecar/sidecar-model.service.js";
 import { normalizeTimestampOverrides } from "../services/import/import-timestamps.js";
+import { IMPORT_BODY_LIMIT_BYTES } from "./import.routes.js";
 import { DATA_DIR } from "../utils/data-dir.js";
 import { assertInsideDir, extensionFromImageMime, isAllowedImageBuffer } from "../utils/security.js";
 import { parseLibraryPageQuery } from "../utils/list-pagination.js";
@@ -838,6 +840,81 @@ export async function lorebooksRoutes(app: FastifyInstance) {
       return reply.status(400).send({ error: "folderIds array is required" });
     }
     return storage.reorderFolders(req.params.id, folderIds);
+  });
+
+  // ── Merge-import ──
+
+  /** Unpack `{ envelope: { type: "marinara_lorebook", version: 1, data: { entries, folders } } }`. */
+  function parseLorebookMergeEnvelope(
+    body: unknown,
+  ):
+    | { ok: true; entries: Array<Record<string, unknown>>; folders: Array<Record<string, unknown>> }
+    | { ok: false; error: string } {
+    const envelope = (body as { envelope?: unknown } | null)?.envelope;
+    if (envelope === null || typeof envelope !== "object") {
+      return { ok: false, error: "Invalid Marinara lorebook envelope: envelope object is required" };
+    }
+    const record = envelope as Record<string, unknown>;
+    if (record.type !== "marinara_lorebook") {
+      return { ok: false, error: "Invalid Marinara lorebook envelope: type must be marinara_lorebook" };
+    }
+    if (record.version !== 1) {
+      return { ok: false, error: "Invalid Marinara lorebook envelope: unsupported version" };
+    }
+    const data =
+      record.data !== null && typeof record.data === "object" ? (record.data as Record<string, unknown>) : null;
+    if (!data) return { ok: false, error: "Invalid Marinara lorebook envelope: missing data" };
+    const rows = (value: unknown) =>
+      Array.isArray(value)
+        ? (value.filter((row) => row !== null && typeof row === "object" && !Array.isArray(row)) as Array<
+            Record<string, unknown>
+          >)
+        : [];
+    return { ok: true, entries: rows(data.entries), folders: rows(data.folders) };
+  }
+
+  /** Local rows, as the merge plan expects them. */
+  async function loadLorebookMergeSnapshot(lorebookId: string) {
+    const [entries, folders] = await Promise.all([storage.listEntries(lorebookId), storage.listFolders(lorebookId)]);
+    return {
+      entries: entries as unknown as Array<Record<string, unknown>>,
+      folders: folders as unknown as Array<Record<string, unknown>>,
+    };
+  }
+
+  app.post<{ Params: { id: string } }>(
+    "/:id/merge/preview",
+    { bodyLimit: IMPORT_BODY_LIMIT_BYTES },
+    async (req, reply) => {
+      const lorebook = await storage.getById(req.params.id);
+      if (!lorebook) return reply.status(404).send({ error: "Lorebook not found" });
+      const incoming = parseLorebookMergeEnvelope(req.body);
+      if (!incoming.ok) return reply.status(400).send({ error: incoming.error });
+      const current = await loadLorebookMergeSnapshot(req.params.id);
+      return planLorebookMerge(current.entries, current.folders, incoming.entries, incoming.folders).preview;
+    },
+  );
+
+  app.post<{ Params: { id: string } }>("/:id/merge", { bodyLimit: IMPORT_BODY_LIMIT_BYTES }, async (req, reply) => {
+    const lorebook = await storage.getById(req.params.id);
+    if (!lorebook) return reply.status(404).send({ error: "Lorebook not found" });
+    const incoming = parseLorebookMergeEnvelope(req.body);
+    if (!incoming.ok) return reply.status(400).send({ error: incoming.error });
+    const { confirmDelete } = req.body as LorebookMergeApplyPayload;
+    const current = await loadLorebookMergeSnapshot(req.params.id);
+    // Recompute the plan WITH the confirmations so unconfirmed candidates keep
+    // their display slot instead of being dropped from the merged sequences.
+    const plan = planLorebookMerge(current.entries, current.folders, incoming.entries, incoming.folders, confirmDelete);
+    const result = await applyLorebookMerge(storage, req.params.id, plan, confirmDelete);
+    await syncCharacterBookFromLorebook(app.db, req.params.id);
+    logger.info(
+      "Merged lorebook %s: added %d, updated %d, deleted %d",
+      req.params.id,
+      result.added,
+      result.updated,
+      result.deleted,
+    );
+    return result;
   });
 
   // ── Search ──
