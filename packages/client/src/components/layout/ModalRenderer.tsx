@@ -52,6 +52,9 @@ const AgentWriteApprovalModal = lazy(() =>
 const DocsViewerModal = lazy(() =>
   import("../modals/DocsViewerModal").then((module) => ({ default: module.DocsViewerModal })),
 );
+const AgentTrackViewerModal = lazy(() =>
+  import("../modals/AgentTrackViewerModal").then((module) => ({ default: module.AgentTrackViewerModal })),
+);
 const AboutMeViewerModal = lazy(() =>
   import("../modals/AboutMeViewerModal").then((module) => ({ default: module.AboutMeViewerModal })),
 );
@@ -129,6 +132,16 @@ export function ModalRenderer() {
     case "docs-viewer":
       content = (
         <DocsViewerModal open onClose={closeModal} initialDoc={(modal?.props?.initialDoc as string | null) ?? null} />
+      );
+      break;
+    case "agent-track-viewer":
+      content = (
+        <AgentTrackViewerModal
+          open
+          onClose={closeModal}
+          title={(modal?.props?.title as string) ?? ""}
+          content={(modal?.props?.content as string) ?? ""}
+        />
       );
       break;
     case "about-me-viewer":

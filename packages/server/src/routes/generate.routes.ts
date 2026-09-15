@@ -2098,6 +2098,7 @@ export async function generateRoutes(app: FastifyInstance) {
           );
           const routingContext: AgentContext = {
             sequentialExecution: chatMode === "game" && chatMeta.gameSequentialAgents === true,
+            captureAgentReasoning: chatMeta.captureAgentReasoning === true,
             chatId: input.chatId,
             chatMode,
             wrapFormat: normalizePromptWrapFormat(resolvedPreset?.wrapFormat),
@@ -4451,6 +4452,7 @@ export async function generateRoutes(app: FastifyInstance) {
 
         const agentContext: AgentContext = {
           sequentialExecution: chatMode === "game" && chatMeta.gameSequentialAgents === true,
+          captureAgentReasoning: chatMeta.captureAgentReasoning === true,
           chatId: input.chatId,
           chatMode,
           wrapFormat,

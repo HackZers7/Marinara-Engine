@@ -342,6 +342,7 @@ type AgentResultEventPayload = {
   success: boolean;
   error: string | null;
   durationMs: number;
+  reasoning?: string | null;
   chatId?: string;
   messageId?: string | null;
   swipeIndex?: number | null;
@@ -2168,7 +2169,11 @@ export function useGenerate() {
               // AgentTrackBar decides its own visibility from agentTrackChatId,
               // and gating this behind isActiveChat leaves widgets stuck at
               // "running" if the user switches chats mid-generation.
-              markAgentTrackCompleted(result.agentType, result.success);
+              markAgentTrackCompleted(result.agentType, result.success, {
+                data: result.data,
+                error: result.error,
+                reasoning: result.reasoning ?? null,
+              });
 
               // Only update agent/game/UI stores for the active chat so a
               // background generation doesn't corrupt what the user sees.
@@ -2977,7 +2982,7 @@ export function useGenerate() {
                 illustrationSettled = true;
               }
               const failure = toAgentFailure(errData);
-              markAgentTrackFailed(failure.agentType);
+              markAgentTrackFailed(failure.agentType, failure.error);
               const failureState = useAgentStore.getState();
               const existingFailures =
                 failureState.failedAgentChatId && failureState.failedAgentChatId !== params.chatId
@@ -3657,7 +3662,7 @@ export function useGenerate() {
             }
             if (meta.autoTranslate && outputTranslationConfig) {
               const store = useTranslationStore.getState();
-              const translationJobs: Array<Promise<boolean>> = [];
+              const translationJobs: Array<Promise<{ ok: boolean; text: string | null; error: string | null }>> = [];
               for (const [id, msg] of persistedMessages) {
                 const textToTranslate = isGameGeneration
                   ? stripGmTagsKeepReadables(msg.content ?? "").trim()
@@ -3669,8 +3674,12 @@ export function useGenerate() {
                   !store.hiddenTranslationIds[id]
                 ) {
                   const job = translateMessage(qc, id, textToTranslate, outputTranslationConfig, params.chatId).then(
-                    () => true,
-                    () => false,
+                    (translatedText) => ({ ok: true as const, text: translatedText, error: null as string | null }),
+                    (err: unknown) => ({
+                      ok: false as const,
+                      text: null as string | null,
+                      error: err instanceof Error ? err.message : String(err),
+                    }),
                   );
                   translationJobs.push(job);
                 }
@@ -3689,8 +3698,17 @@ export function useGenerate() {
               if (translationJobs.length > 0) {
                 markAgentTrackRunning(TRANSLATION_AGENT_TYPE);
                 void Promise.all(translationJobs).then((outcomes) => {
-                  const anySuccess = outcomes.some(Boolean);
-                  markAgentTrackCompleted(TRANSLATION_AGENT_TYPE, anySuccess);
+                  const anySuccess = outcomes.some((outcome) => outcome.ok);
+                  const texts = outcomes
+                    .filter((outcome) => outcome.ok && outcome.text)
+                    .map((outcome) => outcome.text as string);
+                  const errors = outcomes
+                    .filter((outcome) => !outcome.ok && outcome.error)
+                    .map((outcome) => outcome.error as string);
+                  markAgentTrackCompleted(TRANSLATION_AGENT_TYPE, anySuccess, {
+                    data: texts.length > 0 ? texts : null,
+                    error: anySuccess ? null : errors.length > 0 ? errors.join("\n") : null,
+                  });
                 });
               } else {
                 removeAgentTrackEntry(params.chatId, TRANSLATION_AGENT_TYPE);
@@ -3897,7 +3915,11 @@ export function useGenerate() {
                 }
               }
 
-              markAgentTrackCompleted(result.agentType, result.success);
+              markAgentTrackCompleted(result.agentType, result.success, {
+                data: result.data,
+                error: result.error,
+                reasoning: result.reasoning ?? null,
+              });
               if (shouldApplyVisibleResult) {
                 addResult(result.agentType, {
                   agentId: result.agentType,
@@ -4153,7 +4175,7 @@ export function useGenerate() {
               };
               hasError = true;
               const failure = toAgentFailure(errData);
-              markAgentTrackFailed(failure.agentType);
+              markAgentTrackFailed(failure.agentType, failure.error);
               const mergedFailures = mergeAgentFailures(failedRetryFailures, [failure]);
               failedRetryFailures.splice(0, failedRetryFailures.length, ...mergedFailures);
               setFailedAgentFailures(failedRetryFailures, chatId);

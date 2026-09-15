@@ -1147,6 +1147,7 @@ async function buildRetryAgentContext(args: {
         }
       : {}),
     streaming,
+    captureAgentReasoning: chatMeta.captureAgentReasoning === true,
     memory: {},
     lorebookEntryCounts: promptMacroContext.lorebookEntryCounts,
   };
@@ -5260,6 +5261,7 @@ export async function registerRetryAgentsRoute(
             success: result.success,
             error: result.error,
             durationMs: result.durationMs,
+            ...(result.reasoning ? { reasoning: result.reasoning } : {}),
             chatId,
             messageId: historicalTarget?.messageId ?? (retryMessageId || null),
             swipeIndex: historicalTarget?.swipeIndex ?? (retryMessageId ? retrySwipeIndex : null),
@@ -5290,6 +5292,7 @@ export async function registerRetryAgentsRoute(
             success: entry.result.success,
             error: entry.result.error,
             durationMs: entry.result.durationMs,
+            ...(entry.result.reasoning ? { reasoning: entry.result.reasoning } : {}),
             chatId,
             messageId: entry.messageId,
             swipeIndex: entry.swipeIndex,

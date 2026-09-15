@@ -4,7 +4,14 @@
 import { existsSync, readdirSync, statSync, type Dirent } from "node:fs";
 import { buildCharacterAppearanceReferenceBlock } from "../image/character-prompts.js";
 import { basename, extname, join, relative, resolve } from "node:path";
-import type { BaseLLMProvider, ChatMessage, LLMToolDefinition, LLMToolCall, LLMUsage } from "../llm/base-provider.js";
+import type {
+  BaseLLMProvider,
+  ChatCompletionResult,
+  ChatMessage,
+  LLMToolDefinition,
+  LLMToolCall,
+  LLMUsage,
+} from "../llm/base-provider.js";
 import type {
   AgentResult,
   AgentContext,
@@ -758,6 +765,7 @@ export async function executeAgent(
   toolContext?: AgentToolContext,
 ): Promise<AgentResult> {
   const startTime = Date.now();
+  const reasoningCapture = createAgentReasoningCapture(context.captureAgentReasoning);
 
   try {
     if (config.isCustomAgent && getAgentContextSources(config).previousOutput) {
@@ -794,7 +802,7 @@ export async function executeAgent(
     );
     const streamResponses = context.streaming !== false;
     const customParameters = agentCustomParameters(config);
-    const reasoningOverride = jsonAgentReasoningOverride(config);
+    const reasoningOverride = agentReasoningOverride(config, context.captureAgentReasoning);
     const responseFormatOverride = jsonAgentResponseFormatOverride(config, model);
 
     // If tools are available, use the tool call loop.
@@ -812,6 +820,7 @@ export async function executeAgent(
         maxTokens,
         toolContext,
         reasoningOverride,
+        reasoningCapture,
         streamResponses,
         startTime,
         context,
@@ -869,10 +878,12 @@ export async function executeAgent(
             responseText += chunk;
           }
         : undefined,
+      onThinking: reasoningCapture.onThinking,
       signal: agentCallSignal(context.signal, config.type === "illustrator" ? "illustrator" : undefined),
     });
 
     if (!responseText && result.content) responseText = result.content;
+    reasoningCapture.collect(result);
     responseText = responseText.trim();
     logger.info(`[agent] ${config.type} done (${responseText.length} chars, ${Date.now() - startTime}ms)`);
     logger.debug(`[agent] ${config.type} raw response: ${responseText.slice(0, 500)}`);
@@ -921,10 +932,12 @@ export async function executeAgent(
               retryResponseText += chunk;
             }
           : undefined,
+        onThinking: reasoningCapture.onThinking,
         signal: agentCallSignal(context.signal, config.type === "illustrator" ? "illustrator" : undefined),
       });
       totalTokens += retryResult.usage?.totalTokens ?? 0;
       if (!retryResponseText && retryResult.content) retryResponseText = retryResult.content;
+      reasoningCapture.collect(retryResult);
       responseText = retryResponseText.trim();
       logger.info(
         "[agent] %s JSON retry done (%d chars, %dms)",
@@ -949,6 +962,7 @@ export async function executeAgent(
     const structured = invalidJson
       ? { data: parsed.data, valid: false, error: invalidJsonAgentError(parsed.type) }
       : resolveStructuredAgentResult(config, context, parsed.data);
+    const capturedReasoning = reasoningCapture.finalize();
     return {
       agentId: config.id,
       agentType: config.type,
@@ -958,6 +972,7 @@ export async function executeAgent(
       durationMs: Date.now() - startTime,
       success: structured.valid,
       error: structured.error ?? null,
+      ...(capturedReasoning ? { reasoning: capturedReasoning } : {}),
     };
   } catch (err) {
     emitAgentDebug(context, {
@@ -972,7 +987,9 @@ export async function executeAgent(
       durationMs: Date.now() - startTime,
       error: extractErrorMessage(err),
     });
-    return makeError(config, extractErrorMessage(err), startTime);
+    const errorResult = makeError(config, extractErrorMessage(err), startTime);
+    const capturedReasoning = reasoningCapture.finalize();
+    return capturedReasoning ? { ...errorResult, reasoning: capturedReasoning } : errorResult;
   }
 }
 
@@ -1169,6 +1186,7 @@ async function executeAgentWithTools(
   maxTokens: number,
   toolContext: AgentToolContext,
   reasoningOverride: JsonReasoningOverride,
+  reasoningCapture: ReturnType<typeof createAgentReasoningCapture>,
   streamResponses: boolean,
   startTime: number,
   context: AgentContext,
@@ -1211,10 +1229,12 @@ async function executeAgentWithTools(
       suppressModelParameters: config.suppressModelParameters,
       stream: streamResponses,
       tools: toolContext.tools,
+      onThinking: reasoningCapture.onThinking,
       signal: nextCallSignal(),
     });
 
     totalTokens += result.usage?.totalTokens ?? 0;
+    reasoningCapture.collect(result);
     emitAgentDebug(context, {
       stage: "response",
       ...agentDebugBase(config, model, temperature, maxTokens),
@@ -1236,6 +1256,7 @@ async function executeAgentWithTools(
       const structured = invalidJson
         ? { data: parsed.data, valid: false, error: invalidJsonAgentError(parsed.type) }
         : resolveStructuredAgentResult(config, context, parsed.data);
+      const capturedReasoning = reasoningCapture.finalize();
       return {
         agentId: config.id,
         agentType: config.type,
@@ -1245,6 +1266,7 @@ async function executeAgentWithTools(
         durationMs: Date.now() - startTime,
         success: structured.valid,
         error: structured.error ?? null,
+        ...(capturedReasoning ? { reasoning: capturedReasoning } : {}),
       };
     }
 
@@ -1304,9 +1326,11 @@ async function executeAgentWithTools(
     ...responseFormatOverride,
     suppressModelParameters: config.suppressModelParameters,
     stream: streamResponses,
+    onThinking: reasoningCapture.onThinking,
     signal: nextCallSignal(),
   });
   totalTokens += finalResult.usage?.totalTokens ?? 0;
+  reasoningCapture.collect(finalResult);
   const responseText = finalResult.content?.trim() ?? "";
   emitAgentDebug(context, {
     stage: "response",
@@ -1324,6 +1348,7 @@ async function executeAgentWithTools(
   const structured = invalidJson
     ? { data: parsed.data, valid: false, error: invalidJsonAgentError(parsed.type) }
     : resolveStructuredAgentResult(config, context, parsed.data);
+  const capturedReasoning = reasoningCapture.finalize();
   return {
     agentId: config.id,
     agentType: config.type,
@@ -1333,6 +1358,7 @@ async function executeAgentWithTools(
     durationMs: Date.now() - startTime,
     success: structured.valid,
     error: structured.error ?? null,
+    ...(capturedReasoning ? { reasoning: capturedReasoning } : {}),
   };
 }
 
@@ -1470,7 +1496,12 @@ export async function executeAgentBatch(
   const perAgentTokens = configs.map((c) => normalizeAgentMaxTokens(c.settings.maxTokens));
   const temperature = resolveAgentTemperature(configs[0]!);
   const customParameters = agentCustomParameters(configs[0]!);
-  const reasoningOverride = jsonResponseReasoningOverride(configs[0]!.enabledParameters);
+  const reasoningOverride = context.captureAgentReasoning
+    ? { captureReasoning: true }
+    : jsonResponseReasoningOverride(configs[0]!.enabledParameters);
+  // One shared capture for the batch call — the batch members share a single
+  // LLM response, so its reasoning is attached to every parsed member result.
+  const reasoningCapture = createAgentReasoningCapture(context.captureAgentReasoning);
   // A batch response is always one JSON map keyed by agent name, so on the
   // sidecar the whole call is grammar-constrained regardless of member types.
   const responseFormatOverride = localSidecarJsonResponseFormat(model);
@@ -1564,6 +1595,7 @@ export async function executeAgentBatch(
               responseText += chunk;
             }
           : undefined,
+        onThinking: reasoningCapture.onThinking,
         signal: agentCallSignal(
           context.signal,
           configs.some((config) => config.type === "illustrator") ? "illustrator" : undefined,
@@ -1574,6 +1606,7 @@ export async function executeAgentBatch(
     // chatComplete also accumulates content, but streaming via onToken is
     // the primary path — use whichever is populated.
     if (!responseText && result.content) responseText = result.content;
+    reasoningCapture.collect(result);
     responseText = responseText.trim();
     const durationMs = Date.now() - startTime;
     const totalTokens = result.usage?.totalTokens ?? 0;
@@ -1599,6 +1632,10 @@ export async function executeAgentBatch(
 
     // Parse the batched response into individual results
     const { parsed, failed } = parseBatchResponse(configs, responseText, durationMs, totalTokens);
+    const batchReasoning = reasoningCapture.finalize();
+    if (batchReasoning) {
+      for (const entry of parsed) entry.reasoning = batchReasoning;
+    }
 
     logger.info(
       "[agent-batch] Batch parse: %d parsed, %d failed %s",
@@ -3412,6 +3449,8 @@ export function resolveAgentResultType(config: Pick<AgentExecConfig, "type" | "s
 type JsonReasoningOverride = {
   reasoningEffort?: "none";
   enabledParameters?: GenerationParameterSendMap;
+  /** Ask the provider to expose reasoning summaries (ChatOptions flag). */
+  captureReasoning?: boolean;
 };
 
 function jsonResponseReasoningOverride(
@@ -3429,6 +3468,70 @@ function jsonAgentReasoningOverride(
 ): JsonReasoningOverride {
   if (!agentResponseIsJson(config)) return {};
   return jsonResponseReasoningOverride(config.enabledParameters);
+}
+
+/**
+ * When the client asked for reasoning capture, stop suppressing reasoning and
+ * let the connection's own settings stand (ChatOptions.captureReasoning asks
+ * providers that support it to expose reasoning summaries). Otherwise keep the
+ * JSON agents' reasoning-suppressed default.
+ */
+function agentReasoningOverride(
+  config: Pick<AgentExecConfig, "type" | "settings" | "enabledParameters">,
+  captureAgentReasoning: boolean | undefined,
+): JsonReasoningOverride {
+  if (captureAgentReasoning) return { captureReasoning: true };
+  return jsonAgentReasoningOverride(config);
+}
+
+/**
+ * Best-effort reasoning text from provider-native metadata on a non-streaming
+ * response (DeepSeek `reasoning_content`, OpenRouter `reasoning` /
+ * `reasoning_details`). Mirrors the fields OpenAIProvider preserves for replay.
+ */
+function extractProviderReasoningText(metadata: Record<string, unknown> | undefined): string {
+  if (!metadata) return "";
+  if (typeof metadata.reasoning_content === "string") return metadata.reasoning_content;
+  if (typeof metadata.reasoning === "string") return metadata.reasoning;
+  if (Array.isArray(metadata.reasoning_details)) {
+    let text = "";
+    for (const item of metadata.reasoning_details) {
+      if (typeof item !== "object" || item === null) continue;
+      const detail = item as Record<string, unknown>;
+      if (detail.type === "reasoning.text" && typeof detail.text === "string") text += detail.text;
+      else if (detail.type === "reasoning.summary" && typeof detail.summary === "string") text += detail.summary;
+    }
+    return text;
+  }
+  return "";
+}
+
+/**
+ * Accumulates provider reasoning for one agent call: streaming chunks arrive
+ * via onThinking (forwarded by completeAgentCall), non-streaming responses
+ * carry provider-native metadata. Streaming text wins so the two sources are
+ * never concatenated into a duplicate.
+ */
+function createAgentReasoningCapture(enabled: boolean | undefined): {
+  onThinking: ((chunk: string) => void) | undefined;
+  collect: (result: ChatCompletionResult) => void;
+  finalize: () => string | null;
+} {
+  if (!enabled) return { onThinking: undefined, collect: () => {}, finalize: () => null };
+  let text = "";
+  return {
+    onThinking: (chunk: string) => {
+      text += chunk;
+    },
+    collect: (result) => {
+      if (text) return;
+      text = extractProviderReasoningText(result.providerMetadata);
+    },
+    finalize: () => {
+      const trimmed = text.trim();
+      return trimmed || null;
+    },
+  };
 }
 
 type JsonResponseFormatOverride = { responseFormat?: { type: "json_object" } };

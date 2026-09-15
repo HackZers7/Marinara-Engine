@@ -1,35 +1,23 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { motion, AnimatePresence } from "framer-motion";
+import { ChevronDown, ChevronUp } from "lucide-react";
+import { toast } from "sonner";
 import { useAgentStore, type AgentTrackEntry, type AgentTrackStatus } from "../../stores/agent.store";
 import {
   AGENT_TRACK_KEYFRAMES,
   MAIN_GENERATION_AGENT_TYPE,
+  STATUS_COLORS,
+  STATUS_RINGS,
   TRANSLATION_AGENT_TYPE,
   renderAgentAnimation,
 } from "./agent-track-animations";
+import { AgentTrackResultPopup } from "./AgentTrackResultPopup";
 import { useTranslation as useUiTranslation } from "react-i18next";
 
 // Re-exported for use-generate.ts, which emits track entries for the two
 // virtual agents. The canonical definitions now live in the animations module.
 export { MAIN_GENERATION_AGENT_TYPE, TRANSLATION_AGENT_TYPE };
-
-// ──────────────────────────────────────────────
-// Status colours
-// ──────────────────────────────────────────────
-const STATUS_COLORS: Record<AgentTrackStatus, string> = {
-  queued: "var(--marinara-agent-track-queued, #a78bfa)",
-  running: "var(--marinara-agent-track-running, #60a5fa)",
-  completed: "var(--marinara-agent-track-completed, #34d399)",
-  failed: "var(--marinara-agent-track-failed, #f87171)",
-};
-
-const STATUS_RINGS: Record<AgentTrackStatus, string> = {
-  queued: "var(--marinara-agent-track-queued-ring, rgba(167,139,250,0.2))",
-  running: "var(--marinara-agent-track-running-ring, rgba(96,165,250,0.25))",
-  completed: "var(--marinara-agent-track-completed-ring, rgba(52,211,153,0.2))",
-  failed: "var(--marinara-agent-track-failed-ring, rgba(248,113,113,0.2))",
-};
 
 // Virtual phases position pseudo-agents (main-response generation,
 // auto-translation) between real agent phases. The main-response runs
@@ -59,19 +47,55 @@ const AgentTrackWidget = memo(function AgentTrackWidget({ entry }: AgentTrackWid
   const ringColor = STATUS_RINGS[status];
   const isDone = status === "completed" || status === "failed";
 
-  // Portal-based tooltip — the track bar clips content with overflow-hidden
-  // (needed for the height enter/exit animation), so an in-tree tooltip
-  // slides under the top border. Anchor to viewport coords via portal.
+  // Settled widgets open the rich result popup (hover, or click to pin —
+  // the only pointer gesture on touch); running/queued keep the simple tooltip.
   const anchorRef = useRef<HTMLDivElement | null>(null);
+  const popupPanelRef = useRef<HTMLDivElement | null>(null);
   const [tipPos, setTipPos] = useState<{ left: number; top: number } | null>(null);
+  const [popupOpen, setPopupOpen] = useState(false);
+  const [pinned, setPinned] = useState(false);
 
+  const closePopup = useCallback(() => {
+    setPopupOpen(false);
+    setPinned(false);
+  }, []);
   const showTip = useCallback(() => {
+    if (isDone) {
+      setPopupOpen(true);
+      return;
+    }
     const el = anchorRef.current;
     if (!el) return;
     const rect = el.getBoundingClientRect();
     setTipPos({ left: rect.left + rect.width / 2, top: rect.top });
-  }, []);
-  const hideTip = useCallback(() => setTipPos(null), []);
+  }, [isDone]);
+  // Hover-out closes only when the pointer is not travelling into the
+  // portalled popup panel — otherwise its buttons would be unreachable.
+  const handleLeave = useCallback(
+    (event: { relatedTarget: EventTarget | null }) => {
+      if (event.relatedTarget instanceof Node && popupPanelRef.current?.contains(event.relatedTarget)) return;
+      if (!pinned) {
+        setTipPos(null);
+        setPopupOpen(false);
+      }
+    },
+    [pinned],
+  );
+  const handleBlur = useCallback(() => {
+    if (!pinned) {
+      setTipPos(null);
+      setPopupOpen(false);
+    }
+  }, [pinned]);
+  const togglePin = useCallback(() => {
+    if (!isDone) return;
+    setPinned((current) => {
+      const next = !current;
+      if (next) setPopupOpen(true);
+      else closePopup();
+      return next;
+    });
+  }, [isDone, closePopup]);
 
   return (
     <motion.div
@@ -81,12 +105,17 @@ const AgentTrackWidget = memo(function AgentTrackWidget({ entry }: AgentTrackWid
       animate={{ opacity: 1, scale: 1, y: 0 }}
       exit={{ opacity: 0, scale: 0.5, y: -10 }}
       transition={{ type: "spring", stiffness: 300, damping: 25 }}
-      className="relative flex shrink-0 flex-col items-center"
+      className={`relative flex shrink-0 flex-col items-center ${isDone ? "cursor-pointer" : ""}`}
       onMouseEnter={showTip}
-      onMouseLeave={hideTip}
+      onMouseLeave={handleLeave}
       onFocus={showTip}
-      onBlur={hideTip}
-      title={localizeUi("ui.agents.agenttrackwidget.value1Value2", { value1: agentName, value2: status })}
+      onBlur={handleBlur}
+      onClick={togglePin}
+      title={
+        isDone
+          ? undefined
+          : localizeUi("ui.agents.agenttrackwidget.value1Value2", { value1: agentName, value2: status })
+      }
     >
       {tipPos &&
         createPortal(
@@ -99,6 +128,16 @@ const AgentTrackWidget = memo(function AgentTrackWidget({ entry }: AgentTrackWid
           </div>,
           document.body,
         )}
+
+      {popupOpen && isDone && (
+        <AgentTrackResultPopup
+          entry={entry}
+          anchor={anchorRef.current}
+          panelRef={popupPanelRef}
+          pinned={pinned}
+          onClose={closePopup}
+        />
+      )}
 
       {/* Circular widget — 44px outer */}
       <div
@@ -147,8 +186,8 @@ const AgentTrackBatchCluster = memo(function AgentTrackBatchCluster({ entries }:
 
   // Very translucent fill in the border colour so the cluster reads as a
   // single "capsule" without competing with the widgets themselves.
-  // Uses color-mix so it works with both hex colours and CSS variables
-  // (STATUS_COLORS is a var(...) reference).
+  // Uses color-mix so it works with both hex colors and CSS variables
+  // (STATUS_COLORS is a var() reference).
   const fillColor = `color-mix(in srgb, ${borderColor} 10%, transparent)`;
 
   return (
@@ -188,7 +227,8 @@ export function AgentTrackBar({ chatId }: { chatId: string }) {
   const { t: localizeUi } = useUiTranslation();
   const agentTrackQueue = useAgentStore((s) => s.agentTrackQueue);
   const agentTrackChatId = useAgentStore((s) => s.agentTrackChatId);
-  const clearAgentTrackQueue = useAgentStore((s) => s.clearAgentTrackQueue);
+  const agentTrackHidden = useAgentStore((s) => s.agentTrackHidden);
+  const setAgentTrackHidden = useAgentStore((s) => s.setAgentTrackHidden);
 
   const sorted = useMemo(() => {
     // Compute a stable group key per entry: agents sharing a batchId land in
@@ -246,14 +286,17 @@ export function AgentTrackBar({ chatId }: { chatId: string }) {
   const completed = sorted.filter((e) => e.status === "completed" || e.status === "failed").length;
   const total = sorted.length;
   const allDone = total > 0 && completed === total;
-  const visible = agentTrackChatId === chatId && agentTrackQueue.length > 0;
+  const ownsChat = agentTrackChatId === chatId;
+  // The bar stays until the user hides it with the chevron; a new queue
+  // un-hides it (setAgentTrackQueue resets the flag).
+  const visible = ownsChat && agentTrackQueue.length > 0 && !agentTrackHidden;
 
-  // Auto-clear 5s after all agents finish so the bar animates away.
-  useEffect(() => {
-    if (!allDone) return;
-    const timer = setTimeout(() => clearAgentTrackQueue(), 5000);
-    return () => clearTimeout(timer);
-  }, [allDone, clearAgentTrackQueue]);
+  // Re-showing a manually hidden bar when the queue has already been cleared
+  // (chat switch, replaced turn) has nothing to expand — say so and keep the stub.
+  const handleShow = useCallback(() => {
+    if (useAgentStore.getState().agentTrackQueue.length > 0) setAgentTrackHidden(false);
+    else toast.info(localizeUi("ui.agents.agenttrackbar.nothingToShow"));
+  }, [setAgentTrackHidden, localizeUi]);
 
   return (
     <>
@@ -261,6 +304,7 @@ export function AgentTrackBar({ chatId }: { chatId: string }) {
       <AnimatePresence>
         {visible && (
           <motion.div
+            key="track-bar"
             initial={{ height: 0, opacity: 0, y: 40 }}
             animate={{ height: "auto", opacity: 1, y: 0 }}
             exit={{ height: 0, opacity: 0, y: 40 }}
@@ -289,6 +333,37 @@ export function AgentTrackBar({ chatId }: { chatId: string }) {
                 })}
               </AnimatePresence>
             </div>
+
+            <button
+              type="button"
+              onClick={() => setAgentTrackHidden(true)}
+              aria-label={localizeUi("ui.agents.agenttrackbar.hide")}
+              title={localizeUi("ui.agents.agenttrackbar.hide")}
+              className="ml-1 shrink-0 rounded-md p-1 text-[var(--muted-foreground)] transition-colors hover:bg-[var(--secondary)] hover:text-[var(--foreground)] active:scale-90"
+            >
+              <ChevronDown size="0.875rem" />
+            </button>
+          </motion.div>
+        )}
+        {ownsChat && agentTrackHidden && (
+          <motion.div
+            key="track-bar-stub"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.2 }}
+            className="flex items-center px-3 py-1"
+          >
+            <button
+              type="button"
+              onClick={handleShow}
+              aria-label={localizeUi("ui.agents.agenttrackbar.show")}
+              title={localizeUi("ui.agents.agenttrackbar.show")}
+              className="flex h-7 w-7 items-center justify-center rounded-full border-2 bg-[var(--secondary)] text-[var(--muted-foreground)] transition-colors hover:text-[var(--foreground)] active:scale-90"
+              style={{ borderColor: allDone ? STATUS_COLORS.completed : STATUS_COLORS.running }}
+            >
+              <ChevronUp size="0.875rem" />
+            </button>
           </motion.div>
         )}
       </AnimatePresence>

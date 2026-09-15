@@ -12,7 +12,7 @@ import { useTranslationStore, type TranslationConfig } from "../stores/translati
 import { chatKeys, replaceCachedMessage } from "./use-chats";
 
 const translationPersistenceQueues = new Map<string, Promise<void>>();
-const pendingTranslations = new Map<string, Promise<void>>();
+const pendingTranslations = new Map<string, Promise<string>>();
 
 export function getChatTranslationConfig(chatId: string, metadata: unknown): TranslationConfig {
   const chatMeta = parseChatMetadata(metadata);
@@ -96,7 +96,7 @@ export function translateMessage(
   text: string,
   config: TranslationConfig,
   chatId?: string,
-): Promise<void> {
+): Promise<string> {
   const requestChatId = chatId ?? config.chatId;
   const key = `${requestChatId ?? ""}:${messageId}`;
   const pending = pendingTranslations.get(key);
@@ -129,6 +129,7 @@ export function translateMessage(
         translationHidden: false,
       }).catch(() => {});
     }
+    return translatedText;
   })();
   pendingTranslations.set(key, request);
   void request

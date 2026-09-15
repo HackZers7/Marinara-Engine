@@ -72,6 +72,14 @@ export interface AgentDebugEntry {
 
 export type AgentTrackStatus = "queued" | "running" | "completed" | "failed";
 
+/** What a settled widget keeps for its hover popup (collected JSON, error, reasoning). */
+export interface AgentTrackEntryResult {
+  /** Collected output JSON; translation entries carry an array of translated texts. */
+  data: unknown;
+  error: string | null;
+  reasoning: string | null;
+}
+
 export interface AgentTrackEntry {
   agentType: string;
   agentName: string;
@@ -85,6 +93,8 @@ export interface AgentTrackEntry {
    * emits `agent_start` — unknown until then.
    */
   batchId: string | null;
+  /** Settled result payload for the popup; null until the entry completes or fails. */
+  result: AgentTrackEntryResult | null;
 }
 
 function logAgentDebugToBrowserConsole(entry: AgentDebugEntry) {
@@ -195,6 +205,8 @@ interface AgentState {
   agentTrackQueue: AgentTrackEntry[];
   /** Chat ID the current track queue belongs to. */
   agentTrackChatId: string | null;
+  /** Manual hide state for the track bar (chevron down); a new queue un-hides it. */
+  agentTrackHidden: boolean;
 
   // Actions
   setActiveAgents: (agents: string[]) => void;
@@ -259,11 +271,16 @@ interface AgentState {
   removeAgentTrackEntry: (chatId: string, agentType: string) => void;
   markAgentTrackRunning: (agentType: string, batchId?: string | null) => void;
   markAgentTrackPhaseRunning: (phase: string) => void;
-  markAgentTrackCompleted: (agentType: string, success: boolean) => void;
-  markAgentTrackFailed: (agentType: string) => void;
+  markAgentTrackCompleted: (
+    agentType: string,
+    success: boolean,
+    result?: Partial<AgentTrackEntryResult> | null,
+  ) => void;
+  markAgentTrackFailed: (agentType: string, error?: string | null) => void;
   /** Mark every queued/running entry as failed — used when generation aborts. */
   settleAgentTrackQueueAsFailed: (chatId: string) => void;
   clearAgentTrackQueue: () => void;
+  setAgentTrackHidden: (hidden: boolean) => void;
   /** Clear chat-runtime Agent state while retaining Professor Mari's chat-scoped continuation UI. */
   resetForChatChange: () => void;
   reset: () => void;
@@ -303,6 +320,7 @@ type AgentDataState = Pick<
   | "pendingAgentWriteApprovals"
   | "agentTrackQueue"
   | "agentTrackChatId"
+  | "agentTrackHidden"
 >;
 
 function createInitialAgentDataState(): AgentDataState {
@@ -339,6 +357,7 @@ function createInitialAgentDataState(): AgentDataState {
     pendingAgentWriteApprovals: [],
     agentTrackQueue: [],
     agentTrackChatId: null,
+    agentTrackHidden: false,
   };
 }
 
@@ -584,6 +603,9 @@ export const useAgentStore = create<AgentState>((set, get) => ({
   setAgentTrackQueue: (chatId, agents) =>
     set({
       agentTrackChatId: chatId,
+      // A fresh queue un-hides the bar: new agent activity outranks a
+      // previous manual "hide".
+      agentTrackHidden: false,
       agentTrackQueue: agents.map((a, index) => ({
         agentType: a.agentType,
         agentName: a.agentName,
@@ -594,6 +616,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
         // UI shows the correct batch grouping immediately in "queued" state
         // rather than waiting for the first agent_start to arrive.
         batchId: a.batchId ?? null,
+        result: null,
       })),
     }),
 
@@ -615,6 +638,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
             status: (a.status ?? "queued") as AgentTrackStatus,
             order: nextOrder + i,
             batchId: null,
+            result: null,
           })),
         ],
       };
@@ -664,22 +688,30 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       };
     }),
 
-  markAgentTrackCompleted: (agentType, success) =>
+  markAgentTrackCompleted: (agentType, success, result = null) =>
     set((s) => ({
       // Only flip the addressed entry. The server drives phase transitions via
       // agent_start events, so the store must not "promote" siblings on its own.
       agentTrackQueue: s.agentTrackQueue.map((entry) =>
         entry.agentType === agentType && entry.status !== "completed" && entry.status !== "failed"
-          ? { ...entry, status: success ? ("completed" as const) : ("failed" as const) }
+          ? {
+              ...entry,
+              status: success ? ("completed" as const) : ("failed" as const),
+              result: result ? { data: null, error: null, reasoning: null, ...result } : entry.result,
+            }
           : entry,
       ),
     })),
 
-  markAgentTrackFailed: (agentType) =>
+  markAgentTrackFailed: (agentType, error = null) =>
     set((s) => ({
       agentTrackQueue: s.agentTrackQueue.map((entry) =>
         entry.agentType === agentType && entry.status !== "completed" && entry.status !== "failed"
-          ? { ...entry, status: "failed" as const }
+          ? {
+              ...entry,
+              status: "failed" as const,
+              result: { data: null, error, reasoning: null },
+            }
           : entry,
       ),
     })),
@@ -698,7 +730,9 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       };
     }),
 
-  clearAgentTrackQueue: () => set({ agentTrackQueue: [], agentTrackChatId: null }),
+  clearAgentTrackQueue: () => set({ agentTrackQueue: [], agentTrackChatId: null, agentTrackHidden: false }),
+
+  setAgentTrackHidden: (hidden) => set({ agentTrackHidden: hidden }),
 
   resetForChatChange: () =>
     set((state) => ({

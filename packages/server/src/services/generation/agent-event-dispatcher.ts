@@ -33,6 +33,7 @@ export function createAgentEventDispatcher({
         success: result.success,
         error: result.error,
         durationMs: result.durationMs,
+        ...(result.reasoning ? { reasoning: result.reasoning } : {}),
         ...(getOwnership?.(result) ?? {}),
       },
     });

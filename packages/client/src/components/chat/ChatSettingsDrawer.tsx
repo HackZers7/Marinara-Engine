@@ -7408,6 +7408,18 @@ export function ChatSettingsDrawer({
                     />
                   )}
                   <AgentSettingsToggle
+                    label={localizeUi("chat.settings.agents.captureReasoning")}
+                    description={localizeUi("chat.settings.agents.captureReasoningHelp")}
+                    enabled={metadata.captureAgentReasoning === true}
+                    surface="secondary"
+                    onToggle={() =>
+                      updateMeta.mutate({
+                        id: chat.id,
+                        captureAgentReasoning: metadata.captureAgentReasoning !== true,
+                      })
+                    }
+                  />
+                  <AgentSettingsToggle
                     label={localizeUi("ui.chat.chatsettingsdrawer.reviewAgentOutputs")}
                     description={
                       agentWriteApprovalRequired

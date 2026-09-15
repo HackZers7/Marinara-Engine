@@ -274,6 +274,11 @@ export interface AgentResult {
   /** Whether the agent succeeded */
   success: boolean;
   error: string | null;
+  /**
+   * Provider reasoning text captured during the agent's LLM call.
+   * Only present when the client asked for capture (AgentContext.captureAgentReasoning).
+   */
+  reasoning?: string | null;
 }
 
 export type AgentWriteApprovalKind = "character_card_create" | "lorebook_update" | "summary_update";
@@ -348,6 +353,13 @@ export interface AgentTaskProgress {
 export interface AgentContext {
   /** Serialize model calls for Game chats sharing limited GPU memory. */
   sequentialExecution?: boolean;
+  /**
+   * Ask providers to expose reasoning during agent LLM calls and attach the
+   * captured text to each AgentResult. Opt-in per chat via its metadata
+   * (Chat Settings → Agents); when unset, JSON agents keep their
+   * reasoning-suppressed behavior.
+   */
+  captureAgentReasoning?: boolean;
   /**
    * Prose to read instead of the recent messages.
    *
