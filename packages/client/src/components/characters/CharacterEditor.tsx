@@ -52,6 +52,7 @@ import {
   useRenameCharacterVersion,
   useResetCharacterVersions,
   spriteKeys,
+  characterKeys,
   type CharacterCallVideoGenerationInput,
   type CharacterGalleryClip,
   type CharacterGalleryImage,
@@ -132,6 +133,7 @@ import { Modal } from "../ui/Modal";
 import { SpriteFrameEditor } from "../ui/SpriteFrameEditor";
 import { SpriteWandCleanupEditor } from "../ui/SpriteWandCleanupEditor";
 import { ExportFormatDialog, type ExportFormatChoice } from "../ui/ExportFormatDialog";
+import { MergeImportDialog } from "../merge/MergeImportDialog";
 import { EditorTabNavigation } from "../ui/EditorTabNavigation";
 import { useEditorSections } from "../../hooks/use-editor-sections";
 import { useEditorLeaveSave } from "../../hooks/use-editor-leave-save";
@@ -146,9 +148,11 @@ import {
   syncRpgHpFromPools,
   type CharacterCardVersion,
   type CharacterData,
+  type CharacterMergeApplyResult,
   type CharacterTrackerCustomFieldDefault,
   type ConversationCallCharacterVideoClipKind,
   type ConvoBehaviorConfig,
+  type MergeApplyResult,
   type RPGStatPool,
   type RPGStatsConfig,
 } from "@marinara-engine/shared";
@@ -346,6 +350,26 @@ export function CharacterEditor() {
     editRevisionRef.current += 1;
     setDirtyState(true);
   }, [setDirtyState]);
+  const queryClient = useQueryClient();
+  // A merge persists server-side while this editor keeps its own card draft.
+  // Adopt the merged card into formData and stay dirty so the user reviews the
+  // result and saves deliberately (the resync effect skips while dirty).
+  const handleMerged = useCallback(
+    (result: MergeApplyResult) => {
+      const merged = result as CharacterMergeApplyResult;
+      setFormData(merged.data as CharacterData);
+      markDirty();
+      if (characterId) {
+        queryClient.invalidateQueries({ queryKey: characterKeys.detail(characterId) });
+        queryClient.invalidateQueries({ queryKey: characterKeys.versions(characterId) });
+      }
+      if (merged.bookApplied) {
+        // The merge also rewrote the linked standalone lorebook's entries.
+        queryClient.invalidateQueries({ queryKey: lorebookKeys.all });
+      }
+    },
+    [characterId, markDirty, queryClient],
+  );
   useEffect(() => {
     dirtyRef.current = dirty;
     setEditorDirty(dirty);
@@ -955,6 +979,8 @@ export function CharacterEditor() {
           <rect x="3" y="15" width="14" height="2" rx="1" fill="currentColor" />
         </svg>
       </button>
+
+      {characterId ? <MergeImportDialog kind="character" elementId={characterId} onApplied={handleMerged} /> : null}
 
       <button
         type="button"

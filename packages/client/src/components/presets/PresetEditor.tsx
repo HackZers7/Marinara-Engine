@@ -39,7 +39,10 @@ import {
   useDeleteVariable,
   useReorderVariables,
   useUploadPresetImage,
+  presetKeys,
 } from "../../hooks/use-presets";
+import { useQueryClient } from "@tanstack/react-query";
+import { MergeImportDialog } from "../merge/MergeImportDialog";
 import {
   ArrowDown,
   ArrowLeft,
@@ -293,6 +296,13 @@ export function PresetEditor() {
   const updateVariable = useUpdateVariable();
   const deleteVariable = useDeleteVariable();
   const reorderVariables = useReorderVariables();
+  const queryClient = useQueryClient();
+
+  // A merge mutates the preset's sections/groups/choices server-side; refresh
+  // every preset query (they all share the presetKeys.all prefix).
+  const handleMerged = useCallback(() => {
+    queryClient.invalidateQueries({ queryKey: presetKeys.all });
+  }, [queryClient]);
 
   const [activeTab, setActiveTab] = useState<TabId>(() => presetDetailInitialTab ?? "overview");
   const { contentRef, scrollToSection } = useEditorSections(
@@ -638,6 +648,7 @@ export function PresetEditor() {
               <rect x="3" y="15" width="14" height="2" rx="1" fill="currentColor" />
             </svg>
           </button>
+          <MergeImportDialog kind="preset" elementId={presetDetailId} onApplied={handleMerged} iconSize="0.9375rem" />
           <button onClick={handleDelete} className="mari-editor-action inline-flex">
             <Trash2 size="0.9375rem" />
           </button>

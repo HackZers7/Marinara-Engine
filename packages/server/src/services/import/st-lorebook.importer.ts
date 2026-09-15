@@ -170,28 +170,30 @@ function asEntryList(entries: STWorldInfo["entries"]): STWorldInfoEntry[] {
   return [];
 }
 
-function asStringArray(raw: unknown): string[] {
+// Exported for the character merge-import service, which mirrors this file's
+// V2-character-book → standalone-entry field mapping (see services/merge/character-merge.ts).
+export function asStringArray(raw: unknown): string[] {
   if (Array.isArray(raw)) return raw.map(String).filter(Boolean);
   if (typeof raw === "string" && raw.trim()) return [raw];
   return [];
 }
 
-function nonEmptyString(...values: unknown[]): string | null {
+export function nonEmptyString(...values: unknown[]): string | null {
   for (const value of values) {
     if (typeof value === "string" && value.trim()) return value;
   }
   return null;
 }
 
-function normalizeString(value: unknown): string {
+export function normalizeString(value: unknown): string {
   return typeof value === "string" ? value : String(value ?? "");
 }
 
-function asNumber(value: unknown, fallback: number): number {
+export function asNumber(value: unknown, fallback: number): number {
   return typeof value === "number" && Number.isFinite(value) ? value : fallback;
 }
 
-function asNullableNumber(value: unknown): number | null {
+export function asNullableNumber(value: unknown): number | null {
   const parsed = typeof value === "number" ? value : typeof value === "string" && value.trim() ? Number(value) : null;
   return parsed !== null && Number.isFinite(parsed) ? parsed : null;
 }
@@ -252,11 +254,11 @@ function parseSlashDelimitedRegex(value: string): { source: string } | null {
   return source ? { source } : null;
 }
 
-function hasSlashDelimitedRegex(keys: string[]): boolean {
+export function hasSlashDelimitedRegex(keys: string[]): boolean {
   return keys.some((key) => parseSlashDelimitedRegex(key) !== null);
 }
 
-function normalizeRegexKeys(
+export function normalizeRegexKeys(
   keys: string[],
   options: { useRegex: boolean; entryUsesRegex: boolean; matchWholeWords: boolean },
 ): string[] {

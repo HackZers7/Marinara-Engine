@@ -18,8 +18,9 @@ import {
   normalizeAdvancedMemorySettings,
   type LorebookEntryTimingState,
 } from "@marinara-engine/shared";
-import type { ExportEnvelope } from "@marinara-engine/shared";
+import type { ExportEnvelope, PresetMergeConfirmDelete } from "@marinara-engine/shared";
 import { createPromptsStorage } from "../services/storage/prompts.storage.js";
+import { applyPresetMerge, planPresetMerge, type PresetMergeSnapshot } from "../services/merge/preset-merge.js";
 import { assemblePrompt, type AssemblerInput } from "../services/prompt/index.js";
 import { cardPromptText } from "../services/prompt/card-text.js";
 import { resolveLorebookScopeExclusions } from "../services/lorebook/game-lorebook-scope.js";
@@ -252,6 +253,80 @@ export async function promptsRoutes(app: FastifyInstance) {
     if (!existing) return reply.status(404).send({ error: "Preset not found" });
     const updated = await storage.setDefault(req.params.id);
     return updated;
+  });
+
+  // ── Merge-import ──
+
+  /** Local rows plus the preset row, as the merge plan expects them. */
+  async function loadPresetMergeSnapshot(presetId: string): Promise<PresetMergeSnapshot> {
+    const preset = await storage.getById(presetId);
+    if (!preset) throw new Error("Preset not found");
+    const [sections, groups, choiceBlocks] = await Promise.all([
+      storage.listSections(presetId),
+      storage.listGroups(presetId),
+      storage.listChoiceBlocksForPreset(presetId),
+    ]);
+    return {
+      preset: preset as unknown as Record<string, unknown>,
+      sections: sections as unknown as Record<string, unknown>[],
+      groups: groups as unknown as Record<string, unknown>[],
+      choiceBlocks: choiceBlocks as unknown as Record<string, unknown>[],
+    };
+  }
+
+  /** Unpack `{ envelope: { type: "marinara_preset", data: { preset, sections, groups, choiceBlocks } } }`. */
+  function parsePresetMergeSnapshot(body: unknown): PresetMergeSnapshot | null {
+    const envelope = (body as { envelope?: unknown } | null)?.envelope;
+    const data =
+      envelope !== null &&
+      typeof envelope === "object" &&
+      (envelope as Record<string, unknown>).type === "marinara_preset"
+        ? (envelope as Record<string, unknown>).data
+        : undefined;
+    const record = data !== null && typeof data === "object" ? (data as Record<string, unknown>) : null;
+    if (!record || record.preset === null || typeof record.preset !== "object") return null;
+    const rows = (value: unknown) => (Array.isArray(value) ? (value as Record<string, unknown>[]) : []);
+    return {
+      preset: record.preset as Record<string, unknown>,
+      sections: rows(record.sections).filter((row) => row !== null && typeof row === "object" && !Array.isArray(row)),
+      groups: rows(record.groups).filter((row) => row !== null && typeof row === "object" && !Array.isArray(row)),
+      choiceBlocks: rows(record.choiceBlocks).filter(
+        (row) => row !== null && typeof row === "object" && !Array.isArray(row),
+      ),
+    };
+  }
+
+  app.post<{ Params: { id: string } }>("/:id/merge/preview", async (req, reply) => {
+    const preset = await storage.getById(req.params.id);
+    if (!preset) return reply.status(404).send({ error: "Preset not found" });
+    if (isStockMarinaraUniversalPreset(preset)) {
+      return reply.status(409).send({ error: STOCK_PRESET_READ_ONLY_ERROR });
+    }
+    const incoming = parsePresetMergeSnapshot(req.body);
+    if (!incoming) return reply.status(400).send({ error: "Invalid Marinara preset envelope" });
+    const current = await loadPresetMergeSnapshot(req.params.id);
+    return planPresetMerge(current, incoming).preview;
+  });
+
+  app.post<{ Params: { id: string } }>("/:id/merge", async (req, reply) => {
+    const preset = await storage.getById(req.params.id);
+    if (!preset) return reply.status(404).send({ error: "Preset not found" });
+    if (isStockMarinaraUniversalPreset(preset)) {
+      return reply.status(409).send({ error: STOCK_PRESET_READ_ONLY_ERROR });
+    }
+    const incoming = parsePresetMergeSnapshot(req.body);
+    if (!incoming) return reply.status(400).send({ error: "Invalid Marinara preset envelope" });
+    const confirmDelete = (req.body as { confirmDelete?: PresetMergeConfirmDelete }).confirmDelete;
+    const plan = planPresetMerge(await loadPresetMergeSnapshot(req.params.id), incoming);
+    const result = await applyPresetMerge(storage, req.params.id, plan, confirmDelete);
+    logger.info(
+      "Merged preset %s: added %d, updated %d, deleted %d",
+      req.params.id,
+      result.added,
+      result.updated,
+      result.deleted,
+    );
+    return result;
   });
 
   // ── Export ──
