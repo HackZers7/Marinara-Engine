@@ -1,4 +1,4 @@
-import { memo, useCallback, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { motion, AnimatePresence } from "framer-motion";
 import { ChevronDown, ChevronUp } from "lucide-react";
@@ -40,6 +40,11 @@ interface AgentTrackWidgetProps {
   entry: AgentTrackEntry;
 }
 
+// Hover-out closes after this grace period so a fast pointer crossing the gap
+// between widget and portalled panel (where relatedTarget is already outside
+// both) does not kill the popup before the user reaches it.
+const POPUP_CLOSE_GRACE_MS = 160;
+
 const AgentTrackWidget = memo(function AgentTrackWidget({ entry }: AgentTrackWidgetProps) {
   const { t: localizeUi } = useUiTranslation();
   const { agentType, agentName, status } = entry;
@@ -51,15 +56,25 @@ const AgentTrackWidget = memo(function AgentTrackWidget({ entry }: AgentTrackWid
   // the only pointer gesture on touch); running/queued keep the simple tooltip.
   const anchorRef = useRef<HTMLDivElement | null>(null);
   const popupPanelRef = useRef<HTMLDivElement | null>(null);
+  const closeTimerRef = useRef<number | null>(null);
   const [tipPos, setTipPos] = useState<{ left: number; top: number } | null>(null);
   const [popupOpen, setPopupOpen] = useState(false);
   const [pinned, setPinned] = useState(false);
 
+  const cancelPendingClose = useCallback(() => {
+    if (closeTimerRef.current !== null) {
+      window.clearTimeout(closeTimerRef.current);
+      closeTimerRef.current = null;
+    }
+  }, []);
   const closePopup = useCallback(() => {
+    cancelPendingClose();
     setPopupOpen(false);
     setPinned(false);
-  }, []);
+  }, [cancelPendingClose]);
+  useEffect(() => cancelPendingClose, [cancelPendingClose]);
   const showTip = useCallback(() => {
+    cancelPendingClose();
     if (isDone) {
       setPopupOpen(true);
       return;
@@ -68,34 +83,46 @@ const AgentTrackWidget = memo(function AgentTrackWidget({ entry }: AgentTrackWid
     if (!el) return;
     const rect = el.getBoundingClientRect();
     setTipPos({ left: rect.left + rect.width / 2, top: rect.top });
-  }, [isDone]);
-  // Hover-out closes only when the pointer is not travelling into the
-  // portalled popup panel — otherwise its buttons would be unreachable.
+  }, [isDone, cancelPendingClose]);
+  // Hover-out schedules the close from both the widget and the portalled
+  // panel; entering either again cancels it — otherwise its buttons would be
+  // unreachable when the pointer skips across the gap in one event.
+  const scheduleClose = useCallback(() => {
+    if (pinned) return;
+    cancelPendingClose();
+    closeTimerRef.current = window.setTimeout(() => {
+      closeTimerRef.current = null;
+      setTipPos(null);
+      setPopupOpen(false);
+    }, POPUP_CLOSE_GRACE_MS);
+  }, [pinned, cancelPendingClose]);
   const handleLeave = useCallback(
     (event: { relatedTarget: EventTarget | null }) => {
       if (event.relatedTarget instanceof Node && popupPanelRef.current?.contains(event.relatedTarget)) return;
-      if (!pinned) {
-        setTipPos(null);
-        setPopupOpen(false);
-      }
+      scheduleClose();
     },
-    [pinned],
+    [scheduleClose],
   );
   const handleBlur = useCallback(() => {
     if (!pinned) {
+      cancelPendingClose();
       setTipPos(null);
       setPopupOpen(false);
     }
-  }, [pinned]);
+  }, [pinned, cancelPendingClose]);
   const togglePin = useCallback(() => {
     if (!isDone) return;
     setPinned((current) => {
       const next = !current;
-      if (next) setPopupOpen(true);
-      else closePopup();
+      if (next) {
+        cancelPendingClose();
+        setPopupOpen(true);
+      } else {
+        closePopup();
+      }
       return next;
     });
-  }, [isDone, closePopup]);
+  }, [isDone, closePopup, cancelPendingClose]);
 
   return (
     <motion.div
@@ -135,6 +162,8 @@ const AgentTrackWidget = memo(function AgentTrackWidget({ entry }: AgentTrackWid
           anchor={anchorRef.current}
           panelRef={popupPanelRef}
           pinned={pinned}
+          onPanelEnter={cancelPendingClose}
+          onPanelLeave={scheduleClose}
           onClose={closePopup}
         />
       )}
@@ -145,7 +174,7 @@ const AgentTrackWidget = memo(function AgentTrackWidget({ entry }: AgentTrackWid
         style={{
           borderColor: color,
           backgroundColor: ringColor,
-          boxShadow: status === "running" ? `0 0 8px ${color}40` : "none",
+          boxShadow: status === "running" ? `0 0 8px color-mix(in srgb, ${color} 40%, transparent)` : "none",
           overflow: "hidden",
         }}
       >
@@ -352,7 +381,7 @@ export function AgentTrackBar({ chatId }: { chatId: string }) {
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
             transition={{ duration: 0.2 }}
-            className="flex items-center px-3 py-1"
+            className="flex items-center justify-end px-3 py-1"
           >
             <button
               type="button"

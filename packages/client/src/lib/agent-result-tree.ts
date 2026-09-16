@@ -22,14 +22,20 @@ export const AGENT_RESULT_TREE_MAX_LEAF_CHARS = 80;
 /** Guard against pathological payloads; the viewer shows the full JSON anyway. */
 export const AGENT_RESULT_TREE_MAX_CHILDREN = 50;
 
-function describeLeaf(value: unknown, maxLeafChars: number): { text: string; truncated: boolean } {
+function describeLeaf(
+  value: unknown,
+  maxLeafChars: number,
+  preserveNewlines: boolean,
+): { text: string; truncated: boolean } {
   let raw: string;
   if (typeof value === "string") raw = value;
   else if (value === null) raw = "null";
   else if (value === undefined) raw = "undefined";
   else if (typeof value === "bigint") raw = `${value}n`;
   else raw = String(value);
-  raw = raw.replace(/\s+/g, " ").trim();
+  // Popup leaves collapse all whitespace onto one line; the fullscreen
+  // readable mode keeps embedded newlines so multi-line prose stays legible.
+  raw = preserveNewlines ? raw.trim() : raw.replace(/\s+/g, " ").trim();
   if (raw.length <= maxLeafChars) return { text: raw, truncated: false };
   return { text: `${raw.slice(0, Math.max(0, maxLeafChars - 1))}…`, truncated: true };
 }
@@ -38,11 +44,12 @@ function appendNodeChildren(
   node: AgentResultTreeNode,
   entries: Array<[string, unknown]>,
   maxLeafChars: number,
+  preserveNewlines: boolean,
   seen: WeakSet<object>,
 ) {
   const visible = entries.slice(0, AGENT_RESULT_TREE_MAX_CHILDREN);
   node.children = visible.map(([childKey, childValue]) =>
-    buildAgentResultNode(childKey, childValue, maxLeafChars, seen),
+    buildAgentResultNode(childKey, childValue, maxLeafChars, preserveNewlines, seen),
   );
   const hidden = entries.length - visible.length;
   if (hidden > 0) {
@@ -60,6 +67,7 @@ function buildAgentResultNode(
   key: string,
   value: unknown,
   maxLeafChars: number,
+  preserveNewlines: boolean,
   seen: WeakSet<object>,
 ): AgentResultTreeNode {
   if (value !== null && typeof value === "object") {
@@ -71,23 +79,26 @@ function buildAgentResultNode(
     const entries = Array.isArray(value)
       ? value.map((item, index) => [String(index), item] as [string, unknown])
       : Object.entries(value as Record<string, unknown>);
-    appendNodeChildren(node, entries, maxLeafChars, seen);
+    appendNodeChildren(node, entries, maxLeafChars, preserveNewlines, seen);
     seen.delete(value);
     return node;
   }
-  const { text, truncated } = describeLeaf(value, maxLeafChars);
+  const { text, truncated } = describeLeaf(value, maxLeafChars, preserveNewlines);
   return { key, text, truncated, children: null };
 }
 
 /**
  * Flattens an arbitrary agent result payload into a display tree for the
  * hover popup: objects expand into named children, arrays into indexed ones,
- * leaves collapse into truncated single-line strings. The fullscreen viewer
- * shows the raw pretty-printed JSON instead.
+ * leaves collapse into truncated single-line strings. The fullscreen viewer's
+ * readable mode passes `Number.POSITIVE_INFINITY` plus `preserveNewlines` to
+ * show every leaf in full with real line breaks; its raw mode shows the
+ * pretty-printed JSON instead.
  */
 export function buildAgentResultTree(
   value: unknown,
   maxLeafChars: number = AGENT_RESULT_TREE_MAX_LEAF_CHARS,
+  preserveNewlines = false,
 ): AgentResultTreeNode[] {
-  return [buildAgentResultNode("", value, maxLeafChars, new WeakSet())];
+  return [buildAgentResultNode("", value, maxLeafChars, preserveNewlines, new WeakSet())];
 }

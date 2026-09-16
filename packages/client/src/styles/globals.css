@@ -419,6 +419,17 @@
   --pastel-lavender: #e8d5ff;
   --pastel-periwinkle: #c8bfff;
 
+  /* Agent track widget status colors follow the theme palette (§1 semantic
+     notes: components reference these, themes override the palette vars). */
+  --marinara-agent-track-queued: var(--y2k-lavender);
+  --marinara-agent-track-queued-ring: color-mix(in srgb, var(--y2k-lavender) 20%, transparent);
+  --marinara-agent-track-running: var(--y2k-blue);
+  --marinara-agent-track-running-ring: color-mix(in srgb, var(--y2k-blue) 25%, transparent);
+  --marinara-agent-track-completed: var(--y2k-mint);
+  --marinara-agent-track-completed-ring: color-mix(in srgb, var(--y2k-mint) 20%, transparent);
+  --marinara-agent-track-failed: var(--pastel-coral);
+  --marinara-agent-track-failed-ring: color-mix(in srgb, var(--pastel-coral) 20%, transparent);
+
   --rgb-red: #ff6b9d;
   --rgb-orange: #ffb088;
   --rgb-yellow: #ffe799;
@@ -524,6 +535,17 @@
   --y2k-peach: #e8a070;
   --y2k-lavender: #b088e0;
   --y2k-yellow: #d4b84a;
+
+  /* Agent track widget status colors follow the theme palette (§1 semantic
+     notes: components reference these, themes override the palette vars). */
+  --marinara-agent-track-queued: var(--y2k-lavender);
+  --marinara-agent-track-queued-ring: color-mix(in srgb, var(--y2k-lavender) 20%, transparent);
+  --marinara-agent-track-running: var(--y2k-blue);
+  --marinara-agent-track-running-ring: color-mix(in srgb, var(--y2k-blue) 25%, transparent);
+  --marinara-agent-track-completed: var(--y2k-mint);
+  --marinara-agent-track-completed-ring: color-mix(in srgb, var(--y2k-mint) 20%, transparent);
+  --marinara-agent-track-failed: var(--y2k-peach);
+  --marinara-agent-track-failed-ring: color-mix(in srgb, var(--y2k-peach) 25%, transparent);
 }
 
 /* ─────────────────────────────────────────────

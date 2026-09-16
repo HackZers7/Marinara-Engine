@@ -141,6 +141,7 @@ export function ModalRenderer() {
           onClose={closeModal}
           title={(modal?.props?.title as string) ?? ""}
           content={(modal?.props?.content as string) ?? ""}
+          data={modal?.props?.data}
         />
       );
       break;

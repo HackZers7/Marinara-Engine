@@ -20,13 +20,30 @@ interface AgentTrackResultPopupProps {
   panelRef: RefObject<HTMLDivElement | null>;
   /** Whether the user click-pinned the popup — hover-out must not close it then. */
   pinned: boolean;
+  /** Called when the pointer enters the panel; lets the widget cancel a pending hover-out close. */
+  onPanelEnter?: () => void;
+  /** Called when the pointer leaves the panel without heading back to the widget; lets the widget apply its grace delay. */
+  onPanelLeave?: () => void;
   onClose: () => void;
 }
 
 const PILL_BUTTON_CLASS =
   "inline-flex items-center gap-1 rounded-md px-2 py-1 text-[0.6875rem] font-medium ring-1 ring-[var(--border)] transition-colors hover:bg-[var(--secondary)] active:scale-95";
 
-function TreeView({ nodes, depth }: { nodes: AgentResultTreeNode[]; depth: number }) {
+/**
+ * Parsed agent result as an indented tree. `readable` (fullscreen viewer) keeps
+ * embedded newlines inside leaf values and wraps long lines; the popup default
+ * stays single-line and truncated.
+ */
+export function ResultTreeView({
+  nodes,
+  depth,
+  readable = false,
+}: {
+  nodes: AgentResultTreeNode[];
+  depth: number;
+  readable?: boolean;
+}) {
   const { t: localizeUi } = useUiTranslation();
   return (
     <div className={depth > 0 ? "ml-2 border-l border-[var(--border)] pl-2" : undefined}>
@@ -51,13 +68,23 @@ function TreeView({ nodes, depth }: { nodes: AgentResultTreeNode[]; depth: numbe
             ) : (
               <>
                 {node.key !== "" && <span className="font-semibold">{node.key}: </span>}
-                <span className={node.truncated ? "text-[var(--muted-foreground)]" : "text-[var(--foreground)]"}>
+                <span
+                  className={
+                    readable
+                      ? "whitespace-pre-wrap break-words text-[var(--foreground)]"
+                      : node.truncated
+                        ? "text-[var(--muted-foreground)]"
+                        : "text-[var(--foreground)]"
+                  }
+                >
                   {node.text}
                 </span>
               </>
             )}
           </span>
-          {node.children && node.children.length > 0 && <TreeView nodes={node.children} depth={depth + 1} />}
+          {node.children && node.children.length > 0 && (
+            <ResultTreeView nodes={node.children} depth={depth + 1} readable={readable} />
+          )}
         </div>
       ))}
     </div>
@@ -73,7 +100,15 @@ function serializeResult(value: unknown): string {
   }
 }
 
-export function AgentTrackResultPopup({ entry, anchor, panelRef, pinned, onClose }: AgentTrackResultPopupProps) {
+export function AgentTrackResultPopup({
+  entry,
+  anchor,
+  panelRef,
+  pinned,
+  onPanelEnter,
+  onPanelLeave,
+  onClose,
+}: AgentTrackResultPopupProps) {
   const { t: localizeUi } = useUiTranslation();
 
   useLayoutEffect(() => {
@@ -112,9 +147,11 @@ export function AgentTrackResultPopup({ entry, anchor, panelRef, pinned, onClose
   const dataJson = failed ? "" : serializeResult(result?.data);
   const reasoning = result?.reasoning ?? null;
   const hasData = !failed && result?.data != null;
-  const openViewer = (title: string, content: string) => {
+  const openViewer = (title: string, content: string, data?: unknown) => {
     onClose();
-    useUIStore.getState().openModal("agent-track-viewer", { title, content });
+    useUIStore
+      .getState()
+      .openModal("agent-track-viewer", data === undefined ? { title, content } : { title, content, data });
   };
 
   const copyContent = async () => {
@@ -127,11 +164,13 @@ export function AgentTrackResultPopup({ entry, anchor, panelRef, pinned, onClose
   return createPortal(
     <div
       ref={panelRef}
+      onMouseEnter={onPanelEnter}
       onMouseLeave={(event) => {
         // Moving from the panel back onto the widget keeps the popup open —
         // the widget's own leave handler would otherwise look like a close.
         if (event.relatedTarget instanceof Node && anchor?.contains(event.relatedTarget)) return;
-        if (!pinned) onClose();
+        if (onPanelLeave) onPanelLeave();
+        else if (!pinned) onClose();
       }}
       className="fixed z-[9999] flex w-80 max-w-[calc(100vw-1rem)] flex-col rounded-lg bg-[var(--popover)] text-[var(--popover-foreground)] shadow-xl ring-1 ring-[var(--border)]"
       style={{ visibility: "hidden" }}
@@ -150,7 +189,7 @@ export function AgentTrackResultPopup({ entry, anchor, panelRef, pinned, onClose
         {failed ? (
           <p className="whitespace-pre-wrap break-words font-mono text-xs leading-relaxed">{errorText}</p>
         ) : hasData ? (
-          <TreeView nodes={buildAgentResultTree(result?.data)} depth={0} />
+          <ResultTreeView nodes={buildAgentResultTree(result?.data)} depth={0} />
         ) : (
           <p className="text-xs text-[var(--muted-foreground)]">{localizeUi("ui.agents.agenttrackpopup.noData")}</p>
         )}
@@ -161,15 +200,16 @@ export function AgentTrackResultPopup({ entry, anchor, panelRef, pinned, onClose
           <button
             type="button"
             onClick={() =>
-              openViewer(
-                localizeUi(
-                  failed ? "ui.agents.agenttrackviewer.titleError" : "ui.agents.agenttrackviewer.titleResult",
-                  {
-                    value1: entry.agentName,
-                  },
-                ),
-                failed ? (errorText ?? "") : dataJson,
-              )
+              failed
+                ? openViewer(
+                    localizeUi("ui.agents.agenttrackviewer.titleError", { value1: entry.agentName }),
+                    errorText ?? "",
+                  )
+                : openViewer(
+                    localizeUi("ui.agents.agenttrackviewer.titleResult", { value1: entry.agentName }),
+                    dataJson,
+                    result?.data,
+                  )
             }
             className={PILL_BUTTON_CLASS}
           >

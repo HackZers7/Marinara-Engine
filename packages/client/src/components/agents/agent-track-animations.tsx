@@ -26,20 +26,21 @@ export const TRANSLATION_AGENT_TYPE = "__translation__";
 export const VIRTUAL_AGENT_TYPES = new Set<string>([MAIN_GENERATION_AGENT_TYPE, TRANSLATION_AGENT_TYPE]);
 
 // ──────────────────────────────────────────────
-// Status colours
+// Status colours — theme palette variables defined in globals.css (§2 dark /
+// §3 light); visual themes recolor them by overriding the palette vars.
 // ──────────────────────────────────────────────
 export const STATUS_COLORS: Record<AgentTrackStatus, string> = {
-  queued: "var(--marinara-agent-track-queued, #a78bfa)",
-  running: "var(--marinara-agent-track-running, #60a5fa)",
-  completed: "var(--marinara-agent-track-completed, #34d399)",
-  failed: "var(--marinara-agent-track-failed, #f87171)",
+  queued: "var(--marinara-agent-track-queued)",
+  running: "var(--marinara-agent-track-running)",
+  completed: "var(--marinara-agent-track-completed)",
+  failed: "var(--marinara-agent-track-failed)",
 };
 
 export const STATUS_RINGS: Record<AgentTrackStatus, string> = {
-  queued: "var(--marinara-agent-track-queued-ring, rgba(167,139,250,0.2))",
-  running: "var(--marinara-agent-track-running-ring, rgba(96,165,250,0.25))",
-  completed: "var(--marinara-agent-track-completed-ring, rgba(52,211,153,0.2))",
-  failed: "var(--marinara-agent-track-failed-ring, rgba(248,113,113,0.2))",
+  queued: "var(--marinara-agent-track-queued-ring)",
+  running: "var(--marinara-agent-track-running-ring)",
+  completed: "var(--marinara-agent-track-completed-ring)",
+  failed: "var(--marinara-agent-track-failed-ring)",
 };
 
 // ──────────────────────────────────────────────

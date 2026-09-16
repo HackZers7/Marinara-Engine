@@ -311,6 +311,12 @@ export interface ChatMetadata {
   enableAgents: boolean;
   /** Attach shared chat-summary context to Roleplay agents only when true. Missing/false excludes summaries. */
   attachSummariesToAgents?: boolean;
+  /**
+   * When true, agent LLM calls ask the connection to expose reasoning and the
+   * captured text rides on agent results for the chat's agent widget popups.
+   * Missing/false keeps the agents' reasoning-suppressed default.
+   */
+  captureAgentReasoning?: boolean;
   /** When true, agent output proposals such as lorebook, summary, and card updates require user review. */
   agentWriteApprovalRequired?: boolean;
   /** Per-agent enable overrides (agentId → boolean) */

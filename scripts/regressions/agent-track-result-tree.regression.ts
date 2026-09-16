@@ -48,6 +48,28 @@ import {
   assert.equal(leaf?.text, "abcdefg…");
 }
 
+// Readable mode (fullscreen viewer): preserveNewlines keeps embedded line
+// breaks, and an infinite char limit never truncates.
+{
+  const [root] = buildAgentResultTree(
+    { text: "first line\nsecond line\n\nfourth line", tail: "y".repeat(AGENT_RESULT_TREE_MAX_LEAF_CHARS + 40) },
+    Number.POSITIVE_INFINITY,
+    true,
+  );
+  const leaves = Object.fromEntries(root?.children?.map((child) => [child.key, child]) ?? []);
+  assert.equal(leaves.text?.truncated, false);
+  assert.equal(leaves.text?.text, "first line\nsecond line\n\nfourth line");
+  assert.equal(leaves.tail?.truncated, false);
+  assert.equal(leaves.tail?.text.length, AGENT_RESULT_TREE_MAX_LEAF_CHARS + 40);
+}
+
+// Readable mode still trims outer whitespace but does not collapse inner runs.
+{
+  const [root] = buildAgentResultTree({ text: "  a\n\nb  " }, AGENT_RESULT_TREE_MAX_LEAF_CHARS, true);
+  const leaf = root?.children?.[0];
+  assert.equal(leaf?.text, "a\n\nb");
+}
+
 // Circular references degrade to a localized marker instead of hanging the popup.
 {
   const payload: Record<string, unknown> = { name: "loop" };
