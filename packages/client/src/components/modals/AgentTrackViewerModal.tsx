@@ -41,8 +41,18 @@ export function AgentTrackViewerModal({ open, onClose, title, content, data }: A
   };
 
   return (
-    <Modal open={open} onClose={onClose} title={title} width="max-w-4xl" mobileFullscreen>
-      <div className="flex h-full flex-col gap-2">
+    <Modal
+      open={open}
+      onClose={onClose}
+      title={title}
+      width="max-w-4xl"
+      mobileFullscreen
+      contentClassName="flex flex-col"
+    >
+      {/* flex-1 min-h-0 instead of h-full: a percentage height stays auto inside the
+          modal's max-height-capped panel, so the panes would grow past the viewer and
+          their overflow scrollers would silently stop working. */}
+      <div className="flex min-h-0 flex-1 flex-col gap-2">
         <div className="flex items-center gap-2">
           {hasTree && (
             <div
@@ -83,7 +93,7 @@ export function AgentTrackViewerModal({ open, onClose, title, content, data }: A
             <ResultTreeView nodes={buildAgentResultTree(data, Number.POSITIVE_INFINITY, true)} depth={0} readable />
           </div>
         ) : (
-          <pre className="min-h-0 flex-1 whitespace-pre-wrap break-words rounded-md bg-[var(--secondary)] p-3 font-mono text-xs leading-relaxed">
+          <pre className="min-h-0 flex-1 overflow-y-auto whitespace-pre-wrap break-words rounded-md bg-[var(--secondary)] p-3 font-mono text-xs leading-relaxed">
             {content}
           </pre>
         )}
