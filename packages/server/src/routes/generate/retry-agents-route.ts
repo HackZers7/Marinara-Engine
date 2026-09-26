@@ -1149,6 +1149,9 @@ async function buildRetryAgentContext(args: {
     streaming,
     captureAgentReasoning: chatMeta.captureAgentReasoning === true,
     memory: {},
+    // Same store retry prompt re-rendering resolves against; renders copy it
+    // (see buildAgentPromptMacroContext), so agent setvars stay render-local.
+    chatMacroVariables: retryMacroVariables,
     lorebookEntryCounts: promptMacroContext.lorebookEntryCounts,
   };
 

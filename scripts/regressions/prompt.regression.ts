@@ -95,6 +95,7 @@ import {
   normalizeCyoaChoiceOutput,
   normalizeCyoaDialogueQuotes,
 } from "../../packages/server/src/services/agents/cyoa-choice-normalization.js";
+import { renderAgentPromptTemplate } from "../../packages/server/src/services/agents/agent-executor.js";
 
 const personaA = {
   id: "noodle-account-a",
@@ -12930,6 +12931,46 @@ Use HTML sparingly and diegetically. Do not replace normal prose/dialogue unless
           chatStyleProfileId: "chat-style",
         }),
         "chat-style",
+      );
+    },
+  },
+  {
+    name: "agent prompt templates read chat macro variables via {{getvar::}}",
+    async run() {
+      const chatMacroVariables = { rpg_system: "Enabled", mood: "dark" };
+      const context = makeRegressionAgentContext({ chatMacroVariables });
+
+      // A {{setvar::…}} bridge written by preset sections reaches agent templates.
+      assert.equal(renderAgentPromptTemplate("{{getvar::rpg_system}}", {}, context), "Enabled");
+      assert.equal(renderAgentPromptTemplate("{{getvar::mood}}", {}, context), "dark");
+
+      // Conditionals over the bridged value pick the matching branch.
+      assert.equal(
+        renderAgentPromptTemplate('{{#if {{getvar::rpg_system}} == "Enabled"}}on{{else}}off{{/if}}', {}, context),
+        "on",
+      );
+
+      // setvar inside an agent template stays render-local: readable within the
+      // same render, never written back into the chat's persisted store.
+      assert.equal(renderAgentPromptTemplate("{{setvar::leak::yes}}{{getvar::leak}}", {}, context), "yes");
+      assert.equal(chatMacroVariables.leak, undefined);
+
+      // Without chat macro variables the previous behavior holds: getvar resolves empty.
+      assert.equal(renderAgentPromptTemplate("{{getvar::rpg_system}}", {}, makeRegressionAgentContext()), "");
+
+      // Both generation paths must hand the chat's macro variables to agents.
+      const generationRoutesSource = readFileSync(
+        new URL("../../packages/server/src/routes/generate.routes.ts", import.meta.url),
+        "utf8",
+      );
+      const retryAgentsRouteSource = readFileSync(
+        new URL("../../packages/server/src/routes/generate/retry-agents-route.ts", import.meta.url),
+        "utf8",
+      );
+      assert.match(generationRoutesSource, /const agentContext: AgentContext = \{[^]*?chatMacroVariables,/u);
+      assert.match(
+        retryAgentsRouteSource,
+        /const agentContext: AgentContext = \{[^]*?chatMacroVariables: retryMacroVariables,/u,
       );
     },
   },

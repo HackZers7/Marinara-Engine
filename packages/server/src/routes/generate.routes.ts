@@ -4514,6 +4514,9 @@ export async function generateRoutes(app: FastifyInstance) {
                 }
               : null,
           memory: {},
+          // Same object the assembler mutates via setvar, so agents read this
+          // turn's bridge writes; renders copy it (see buildAgentPromptMacroContext).
+          chatMacroVariables,
           lorebookEntryCounts: promptMacroContext.lorebookEntryCounts,
           writableLorebookIds: null,
           chatSummary: shouldAttachSummariesToAgents(chatMode, chatMeta) ? activeChatSummary : null,

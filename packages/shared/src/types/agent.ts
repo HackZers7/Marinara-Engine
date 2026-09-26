@@ -461,6 +461,13 @@ export interface AgentContext {
   /** Per-lorebook total entry counts (for {{lorebooksize::ID}} macro in agent prompts). */
   lorebookEntryCounts?: Record<string, number>;
   /**
+   * Chat-local macro variables (written by {{setvar::…}} in preset sections and
+   * persisted on the chat), readable in agent prompt templates via {{getvar::…}}.
+   * Rendered against a per-render copy, so {{setvar::…}} inside an agent
+   * template stays render-local and never writes back to the chat.
+   */
+  chatMacroVariables?: Record<string, string>;
+  /**
    * Semantic source material resolved for custom agents that opt into vector access.
    * The runtime keeps this out of ordinary agent prompts and injects it only for
    * agents with the `access_vectors` capability.

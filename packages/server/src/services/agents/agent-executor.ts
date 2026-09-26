@@ -267,6 +267,9 @@ export function buildAgentPromptMacroContext(
     char: value(characters.join(", ") || "Assistant"),
     characters: characters.map(value),
     variables: {},
+    // Copy per render: {{getvar::…}} in agent templates reads the chat's setvar
+    // store, while {{setvar::…}} inside a template stays render-local.
+    localVariables: { ...(context.chatMacroVariables ?? {}) },
     agentData: context.previousOutput ? { [context.previousOutput.agentType]: value(context.previousOutput.text) } : {},
     lastInput: latestUserMessage ? value(latestUserMessage.content) : "",
     chatId: value(context.chatId),
