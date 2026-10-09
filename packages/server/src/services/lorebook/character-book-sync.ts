@@ -21,6 +21,7 @@
 import { like } from "../../db/file-query.js";
 import type { DB } from "../../db/connection.js";
 import type { CharacterBook, CharacterBookEntry } from "@marinara-engine/shared";
+import { parseLorebookDecisionActivation } from "@marinara-engine/shared";
 import { characters } from "../../db/schema/index.js";
 import { createLorebooksStorage } from "../storage/lorebooks.storage.js";
 import { createCharactersStorage } from "../storage/characters.storage.js";
@@ -71,8 +72,12 @@ function toCharacterBookEntry(entry: LoreEntryRow, index: number): CharacterBook
     keys: asStringArray(entry.keys),
     content: asString(entry.content),
     // Stamp the real standalone-entry id so merge-import can match an exported
-    // embedded book back onto the linked lorebook's rows (id-stable merge).
-    extensions: { marinara: { entryId: String(entry.id) } },
+    // embedded book back onto the linked lorebook's rows (id-stable merge),
+    // and carry the entry's images through the embedded book.
+    extensions: {
+      marinara: { entryId: String(entry.id) },
+      ...(Array.isArray(entry.images) && entry.images.length ? { marinaraImages: entry.images } : {}),
+    },
     enabled: asBoolean(entry.enabled),
     insertion_order: order,
     case_sensitive: asBoolean(entry.caseSensitive),
@@ -109,6 +114,8 @@ function toCharacterBookEntry(entry: LoreEntryRow, index: number): CharacterBook
     delayUntilRecursion: asBoolean(entry.delayUntilRecursion),
     vectorized: !asBoolean(entry.excludeFromVectorization),
     excludeFromVectorization: asBoolean(entry.excludeFromVectorization),
+    // Marinara extension (#6570), passed back through on import.
+    ...parseLorebookDecisionActivation(entry),
   };
 }
 

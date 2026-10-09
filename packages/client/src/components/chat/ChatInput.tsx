@@ -201,7 +201,7 @@ interface ChatInputProps {
     options?: { immediate?: boolean },
   ) => void | Promise<void>;
   onPeekPrompt?: () => void;
-  onIllustrate?: (prompt?: string) => void | Promise<void>;
+  onIllustrate?: (prompt?: string, messageRange?: [string, string]) => void | Promise<void>;
   combatAgentEnabled?: boolean;
   onStartEncounter?: () => void;
   interactionsLocked?: boolean;
@@ -1328,7 +1328,7 @@ export const ChatInput = memo(function ChatInput({
       let rollbackFailed = false;
       if (createdMessageId) {
         try {
-          await deleteMessage.mutateAsync(createdMessageId);
+          await deleteMessage.mutateAsync({ messageId: createdMessageId, skipTrash: true });
         } catch {
           rollbackFailed = true;
         }
@@ -1703,27 +1703,28 @@ export const ChatInput = memo(function ChatInput({
     [syncInputState],
   );
 
-  // Character picker: trigger a response from a specific character (manual mode)
+  // An omitted target asks the existing Smart selector for this response only.
   const handleCharacterResponse = useCallback(
-    async (characterId: string) => {
+    async (characterId?: string) => {
       if (!activeChatId || isInputBusy) return;
       setCharPickerOpen(false);
       setCharPickerPos(null);
-      if (responseQueue.includes(characterId)) {
+      if (characterId && responseQueue.includes(characterId)) {
         removeFromResponseQueue(activeChatId, characterId);
       }
       const guideText = getValue();
+      const responder = characterId ? { forCharacterId: characterId } : { smartResponse: true };
       try {
         await generateWithNarrativeDirector(
           guideGenerations && hasInput
             ? {
                 chatId: activeChatId,
                 connectionId: null,
-                forCharacterId: characterId,
+                ...responder,
                 generationGuide: buildGuidedGenerationInstructionMessage(guideText),
                 generationGuideSource: "guide",
               }
-            : { chatId: activeChatId, connectionId: null, forCharacterId: characterId },
+            : { chatId: activeChatId, connectionId: null, ...responder },
         );
       } catch (error) {
         const msg = error instanceof Error ? error.message : "Generation failed";
@@ -1844,7 +1845,10 @@ export const ChatInput = memo(function ChatInput({
     <div className="mari-chat-input chat-input-container px-3 pb-3">
       {/* Slash command autocomplete popup */}
       {completions.length > 0 && (
-        <div className="mb-2 max-h-[min(18rem,45dvh)] overflow-y-auto rounded-xl border border-foreground/10 bg-[var(--card)] shadow-xl backdrop-blur-xl [-webkit-overflow-scrolling:touch]">
+        <div
+          data-chat-input-popup="commands"
+          className="mari-chat-style-surface mari-chat-input-popup mb-2 max-h-[min(18rem,45dvh)] overflow-y-auto rounded-xl border border-foreground/10 bg-[var(--card)] shadow-xl backdrop-blur-xl [-webkit-overflow-scrolling:touch]"
+        >
           {completions.map((cmd, i) => (
             <button
               key={cmd.name}
@@ -1938,7 +1942,8 @@ export const ChatInput = memo(function ChatInput({
               {pushStoryMenuOpen && (
                 <div
                   role="menu"
-                  className="absolute bottom-full left-1/2 z-50 mb-2 w-64 -translate-x-1/2 rounded-xl border border-[var(--marinara-chat-chrome-panel-border)] bg-[var(--card)] p-1 shadow-2xl"
+                  data-chat-input-popup="story"
+                  className="mari-chat-style-surface mari-chat-input-popup absolute bottom-full left-1/2 z-50 mb-2 w-64 -translate-x-1/2 rounded-xl border border-[var(--marinara-chat-chrome-panel-border)] bg-[var(--card)] p-1 shadow-2xl"
                 >
                   <button
                     type="button"
@@ -2095,6 +2100,7 @@ export const ChatInput = memo(function ChatInput({
         <textarea
           ref={textareaRef}
           data-chat-composer="true"
+          data-chat-id={activeChatId}
           onInput={handleInput}
           onKeyDown={handleKeyDown}
           onKeyUp={handleKeyUp}
@@ -2110,6 +2116,10 @@ export const ChatInput = memo(function ChatInput({
           autoCorrect="on"
           className="mari-chat-input-textarea max-h-[12.5rem] min-w-0 flex-1 resize-none bg-transparent py-0 text-sm leading-normal text-foreground/90 placeholder:text-foreground/30 outline-none disabled:cursor-not-allowed disabled:opacity-40"
         />
+
+        {showQuickRepliesMenu && quickReplyActions.length > 0 && (
+          <QuickReplyMenu actions={quickReplyActions} disabled={!activeChatId || isInputBusy || isReadingAttachments} />
+        )}
 
         {/* Emoji picker */}
         <div className="relative hidden shrink-0 sm:block">
@@ -2128,6 +2138,7 @@ export const ChatInput = memo(function ChatInput({
             <Smile size="1.125rem" />
           </button>
           <EmojiPicker
+            popupClassName="mari-chat-style-surface mari-chat-input-popup"
             open={emojiOpen}
             onClose={() => setEmojiOpen(false)}
             onSelect={handleEmojiSelect}
@@ -2185,10 +2196,6 @@ export const ChatInput = memo(function ChatInput({
           />
         )}
 
-        {showQuickRepliesMenu && quickReplyActions.length > 0 && (
-          <QuickReplyMenu actions={quickReplyActions} disabled={!activeChatId || isInputBusy || isReadingAttachments} />
-        )}
-
         {/* Send / Stop button */}
 
         <button
@@ -2226,7 +2233,8 @@ export const ChatInput = memo(function ChatInput({
         createPortal(
           <div
             ref={charPickerMenuRef}
-            className="fixed z-[9999] flex min-w-[220px] max-w-[280px] max-h-[320px] flex-col overflow-hidden rounded-xl border border-foreground/10 bg-[var(--card)] shadow-2xl"
+            data-chat-input-popup="character"
+            className="mari-chat-style-surface mari-chat-input-popup fixed z-[9999] flex min-w-[220px] max-w-[280px] max-h-[320px] flex-col overflow-hidden rounded-xl border border-foreground/10 bg-[var(--card)] shadow-2xl"
             style={
               charPickerPos ? { left: charPickerPos.left, top: charPickerPos.top } : { visibility: "hidden" as const }
             }
@@ -2235,6 +2243,17 @@ export const ChatInput = memo(function ChatInput({
               {localizeUi("ui.chat.chatinput.triggerResponse")}
             </div>
             <div className="overflow-y-auto p-1">
+              {mode === "roleplay" && (groupResponseOrder === "smart" || groupResponseOrder === "manual") && (
+                <button
+                  onClick={() => handleCharacterResponse()}
+                  className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-left transition-all hover:bg-foreground/10"
+                >
+                  <span className="flex h-7 w-7 shrink-0 items-center justify-center text-[var(--primary)]">
+                    <Users size="1rem" aria-hidden="true" />
+                  </span>
+                  <span className="text-sm">{localizeUi("ui.chat.chatinput.smartResponse")}</span>
+                </button>
+              )}
               {activeChatCharacters!.map((char) => {
                 const queuedOrder = queuedResponseOrder.get(char.id);
                 return (

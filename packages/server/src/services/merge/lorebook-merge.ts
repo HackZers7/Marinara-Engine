@@ -53,7 +53,16 @@ export type NormalizedMergeFolder = {
 /** An incoming entry normalized for createEntry / updateEntry (server-managed fields stripped). */
 export type NormalizedMergeEntry = Omit<
   CreateLorebookEntryInput,
-  "lorebookId" | "folderId" | "position" | "relationships" | "dynamicState" | "activationConditions" | "schedule"
+  // Export envelopes carry images as embedded data URLs, which the entry-image
+  // path schema rejects; merges leave images untouched instead of restoring them.
+  | "lorebookId"
+  | "folderId"
+  | "position"
+  | "relationships"
+  | "dynamicState"
+  | "activationConditions"
+  | "schedule"
+  | "images"
 > & {
   id: string;
   /** Incoming-id space, same remap rules as NormalizedMergeFolder.parentFolderId. */

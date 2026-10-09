@@ -182,7 +182,15 @@ export function planBookMerge(currentEntries: CardDataRecord[], incomingBookEntr
  */
 type ConvertedBookEntry = Omit<
   CreateLorebookEntryInput,
-  "lorebookId" | "folderId" | "relationships" | "dynamicState" | "activationConditions" | "schedule" | "position"
+  // Embedded V2 books carry images as extensions.marinaraImages, not this field.
+  | "lorebookId"
+  | "folderId"
+  | "relationships"
+  | "dynamicState"
+  | "activationConditions"
+  | "schedule"
+  | "position"
+  | "images"
 > & { position: LorebookEntryPosition };
 
 function convertBookEntry(entry: CardDataRecord, index: number): ConvertedBookEntry {

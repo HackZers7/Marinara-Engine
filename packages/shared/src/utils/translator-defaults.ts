@@ -10,8 +10,9 @@ const stringKeys = [
   "translationDeeplxUrl",
 ] as const;
 const promptKeys = ["translationPrompt", "translationInputPrompt", "translationOutputPrompt"] as const;
+const numberKeys = ["translationInputMaxTokens", "translationOutputMaxTokens", "translationMaxTokens"] as const;
 const booleanKeys = ["autoTranslate", "translateInput", "showInputTranslateButton", "translationDisplayOnly"] as const;
-export const TRANSLATOR_SETTINGS_KEYS = [...stringKeys, ...promptKeys, ...booleanKeys] as const;
+export const TRANSLATOR_SETTINGS_KEYS = [...stringKeys, ...promptKeys, ...numberKeys, ...booleanKeys] as const;
 
 /** Keep only reusable translator settings, including explicit false, empty and prompt-reset values. */
 export function normalizeTranslatorSettings(value: unknown): Record<string, unknown> {
@@ -31,6 +32,9 @@ export function normalizeTranslatorSettings(value: unknown): Record<string, unkn
   for (const key of promptKeys) {
     if (source[key] === null || typeof source[key] === "string") settings[key] = source[key];
   }
+  for (const key of numberKeys) {
+    if (typeof source[key] === "number") settings[key] = source[key];
+  }
   for (const key of booleanKeys) {
     if (typeof source[key] === "boolean") settings[key] = source[key];
   }
@@ -45,4 +49,61 @@ export function normalizeTranslatorSettings(value: unknown): Record<string, unkn
     if (!(key in settings) && "translationPrompt" in settings) settings[key] = settings.translationPrompt;
   }
   return settings;
+}
+
+export interface TranslationConfig {
+  chatId?: string;
+  provider: "ai" | "deeplx" | "deepl" | "google";
+  inputTargetLanguage: string;
+  outputTargetLanguage: string;
+  connectionId?: string;
+  inputSystemPrompt?: string;
+  outputSystemPrompt?: string;
+  inputMaxTokens?: number;
+  outputMaxTokens?: number;
+  deeplApiKey?: string;
+  deeplxUrl?: string;
+}
+
+export function getChatTranslationConfig(chatId: string, metadata: unknown): TranslationConfig {
+  const chatMeta = normalizeTranslatorSettings(metadata);
+  const legacyTargetLanguage =
+    (typeof chatMeta.translationTargetLang === "string" ? chatMeta.translationTargetLang.trim() : "") || "en";
+  const legacySystemPrompt = typeof chatMeta.translationPrompt === "string" ? chatMeta.translationPrompt : undefined;
+  const inputSystemPrompt =
+    chatMeta.translationInputPrompt === undefined
+      ? legacySystemPrompt
+      : typeof chatMeta.translationInputPrompt === "string"
+        ? chatMeta.translationInputPrompt
+        : undefined;
+  const outputSystemPrompt =
+    chatMeta.translationOutputPrompt === undefined
+      ? legacySystemPrompt
+      : typeof chatMeta.translationOutputPrompt === "string"
+        ? chatMeta.translationOutputPrompt
+        : undefined;
+  return {
+    chatId,
+    provider: (chatMeta.translationProvider as TranslationConfig["provider"] | undefined) ?? "google",
+    // Cleared fields retain the legacy/default language.
+    inputTargetLanguage:
+      (typeof chatMeta.translationInputTargetLang === "string" ? chatMeta.translationInputTargetLang.trim() : "") ||
+      legacyTargetLanguage,
+    outputTargetLanguage:
+      (typeof chatMeta.translationOutputTargetLang === "string" ? chatMeta.translationOutputTargetLang.trim() : "") ||
+      legacyTargetLanguage,
+    connectionId: chatMeta.translationConnectionId as string | undefined,
+    inputSystemPrompt,
+    outputSystemPrompt,
+    inputMaxTokens:
+      typeof chatMeta.translationInputMaxTokens === "number" ? chatMeta.translationInputMaxTokens : undefined,
+    outputMaxTokens:
+      typeof chatMeta.translationOutputMaxTokens === "number"
+        ? chatMeta.translationOutputMaxTokens
+        : typeof chatMeta.translationMaxTokens === "number"
+          ? chatMeta.translationMaxTokens
+          : undefined,
+    deeplApiKey: chatMeta.translationDeeplApiKey as string | undefined,
+    deeplxUrl: chatMeta.translationDeeplxUrl as string | undefined,
+  };
 }

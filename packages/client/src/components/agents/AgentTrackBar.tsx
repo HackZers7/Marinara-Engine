@@ -290,8 +290,7 @@ export function AgentTrackBar({ chatId }: { chatId: string }) {
   // through as solo items.
   const clusters = useMemo(() => {
     type Cluster =
-      | { kind: "solo"; entry: AgentTrackEntry }
-      | { kind: "batch"; batchId: string; entries: AgentTrackEntry[] };
+      { kind: "solo"; entry: AgentTrackEntry } | { kind: "batch"; batchId: string; entries: AgentTrackEntry[] };
     const out: Cluster[] = [];
     for (const entry of sorted) {
       if (entry.batchId) {
