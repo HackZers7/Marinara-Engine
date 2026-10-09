@@ -1255,7 +1255,12 @@ async function generateOpenAI(baseUrl: string, apiKey: string, request: ImageGen
   const references = openAIReferenceImages(request);
   const prompt = openAITextPrompt(request);
 
-  if (usesGptImageApi && references.length > 0) {
+  // Reference-driven generation goes through /v1/images/edits for every model,
+  // not only the GPT Image family: OpenAI-compatible editing backends (SGLang
+  // Qwen-Image-Edit, xAI-style gateways) reject reference-less /generations
+  // requests with "requires an image_path input". Gating on the model name
+  // silently dropped the references and turned an edit into a plain T2I call.
+  if (references.length > 0) {
     const formData = new FormData();
     formData.append("prompt", prompt);
     formData.append("n", "1");
