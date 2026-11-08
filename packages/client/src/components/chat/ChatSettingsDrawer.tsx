@@ -8276,6 +8276,18 @@ export function ChatSettingsDrawer({
                       </div>
                     </div>
                   )}
+                  <AgentSettingsToggle
+                    label={localizeUi("chat.settings.agents.captureReasoning")}
+                    description={localizeUi("chat.settings.agents.captureReasoningHelp")}
+                    enabled={metadata.captureAgentReasoning === true}
+                    surface="secondary"
+                    onToggle={() =>
+                      updateMeta.mutate({
+                        id: chat.id,
+                        captureAgentReasoning: metadata.captureAgentReasoning !== true,
+                      })
+                    }
+                  />
                   {isRoleplayMode ? (
                     <div data-trackers-control>
                       <AgentSettingsCard
@@ -8293,17 +8305,6 @@ export function ChatSettingsDrawer({
                             updateMeta.mutate({
                               id: chat.id,
                               attachSummariesToAgents: metadata.attachSummariesToAgents !== true,
-                            })
-                          }
-                        />
-                        <AgentSettingsToggle
-                          label={localizeUi("chat.settings.agents.captureReasoning")}
-                          description={localizeUi("chat.settings.agents.captureReasoningHelp")}
-                          enabled={metadata.captureAgentReasoning === true}
-                          onToggle={() =>
-                            updateMeta.mutate({
-                              id: chat.id,
-                              captureAgentReasoning: metadata.captureAgentReasoning !== true,
                             })
                           }
                         />
@@ -8367,21 +8368,7 @@ export function ChatSettingsDrawer({
                       </AgentSettingsCard>
                     </div>
                   ) : (
-                    <>
-                      {renderReviewAgentOutputsToggle("secondary")}
-                      <AgentSettingsToggle
-                        label={localizeUi("chat.settings.agents.captureReasoning")}
-                        description={localizeUi("chat.settings.agents.captureReasoningHelp")}
-                        enabled={metadata.captureAgentReasoning === true}
-                        surface="secondary"
-                        onToggle={() =>
-                          updateMeta.mutate({
-                            id: chat.id,
-                            captureAgentReasoning: metadata.captureAgentReasoning !== true,
-                          })
-                        }
-                      />
-                    </>
+                    renderReviewAgentOutputsToggle("secondary")
                   )}
                   {isRoleplayMode && (activeGeneration || stoppingGeneration) && (
                     <button

@@ -305,13 +305,13 @@ function supportsGeminiThinkingDisable(model: string): boolean {
 
 export function resolveGeminiThinkingConfig(
   model: string,
-  options: Pick<ChatOptions, "enableThinking" | "reasoningEffort">,
+  options: Pick<ChatOptions, "enableThinking" | "reasoningEffort" | "captureReasoning">,
   maxOutputTokens: number,
 ): Record<string, unknown> | undefined {
   if (options.reasoningEffort === "none") {
     return supportsGeminiThinkingDisable(model) ? { thinkingBudget: 0, includeThoughts: false } : undefined;
   }
-  if (!options.enableThinking && !options.reasoningEffort) return undefined;
+  if (!options.enableThinking && !options.reasoningEffort && !options.captureReasoning) return undefined;
 
   if (isGeminiThinkingLevelModel(model)) {
     const levelMap = { low: "low", medium: "medium", high: "high", xhigh: "high", max: "high" } as const;

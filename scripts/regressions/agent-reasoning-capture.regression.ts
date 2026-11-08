@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import type { AgentContext } from "../../packages/shared/src/types/agent.ts";
-import { executeAgent, executeAgentBatch } from "../../packages/server/src/services/agents/agent-executor.ts";
+import {
+  agentRequestOptions,
+  executeAgent,
+  executeAgentBatch,
+} from "../../packages/server/src/services/agents/agent-executor.ts";
+import { resolveGeminiThinkingConfig } from "../../packages/server/src/services/llm/providers/google.provider.ts";
 import {
   BaseLLMProvider,
   type ChatCompletionResult,
@@ -95,6 +101,16 @@ class ReasoningProvider extends BaseLLMProvider {
   assert.equal(result.reasoning, "stream thoughts");
 }
 
+// Capture on, Gemini: the agent's capture flag must produce an explicit
+// includeThoughts request even when the connection has no reasoning level set.
+{
+  const options = agentRequestOptions(jsonAgentConfig, true, true);
+  assert.deepEqual(resolveGeminiThinkingConfig("gemini-2.5-flash", options, 4096), {
+    thinkingBudget: 2048,
+    includeThoughts: true,
+  });
+}
+
 // Capture on, non-streaming: reasoning comes from provider-native metadata.
 {
   const provider = new ReasoningProvider({
@@ -123,6 +139,20 @@ class ReasoningProvider extends BaseLLMProvider {
   for (const entry of results) assert.equal(entry.reasoning, "batch thoughts");
   assert.equal(provider.calls[0]!.options.reasoningEffort, undefined);
   assert.equal(provider.calls[0]!.options.captureReasoning, true);
+}
+
+// The capture control belongs to the top-level Agents settings, before the
+// collapsed roleplay Trackers control card; otherwise it looks missing.
+{
+  const drawerSource = readFileSync(
+    new URL("../../packages/client/src/components/chat/ChatSettingsDrawer.tsx", import.meta.url),
+    "utf8",
+  );
+  const captureControl = drawerSource.indexOf('label={localizeUi("chat.settings.agents.captureReasoning")}');
+  const trackersControl = drawerSource.indexOf('id={`${chat.id}:trackers-control`}');
+  assert.ok(captureControl >= 0, "Capture agent reasoning control exists");
+  assert.ok(trackersControl >= 0, "Roleplay trackers control exists");
+  assert.ok(captureControl < trackersControl, "Capture agent reasoning is visible outside the collapsed trackers card");
 }
 
 console.info("Agent reasoning capture regression passed.");
