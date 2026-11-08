@@ -63,6 +63,7 @@ class ReasoningProvider extends BaseLLMProvider {
         toolCalls: [],
         finishReason: "stop",
         usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+        ...(this.payload.metadata ? { providerMetadata: this.payload.metadata } : {}),
       };
     }
     return {
@@ -126,6 +127,24 @@ class ReasoningProvider extends BaseLLMProvider {
   assert.equal(result.reasoning, "metadata thoughts");
 }
 
+// Capture on with a non-streaming UI: the agent wrapper keeps the provider
+// stream alive for its inactivity timeout, suppresses visible text callbacks,
+// but still collects the explicitly requested reasoning.
+{
+  const provider = new ReasoningProvider({
+    content: JSON.stringify({ location: "Road" }),
+    reasoningChunk: "quiet UI thoughts",
+  });
+  const result = await executeAgent(
+    jsonAgentConfig,
+    context({ captureAgentReasoning: true, streaming: false }),
+    provider,
+    "test-model",
+  );
+  assert.equal(provider.calls[0]!.options.onToken, undefined);
+  assert.equal(result.reasoning, "quiet UI thoughts");
+}
+
 // Batch: members share one LLM response, so its reasoning lands on every
 // parsed member result and the suppression override is skipped there too.
 {
@@ -149,7 +168,7 @@ class ReasoningProvider extends BaseLLMProvider {
     "utf8",
   );
   const captureControl = drawerSource.indexOf('label={localizeUi("chat.settings.agents.captureReasoning")}');
-  const trackersControl = drawerSource.indexOf('id={`${chat.id}:trackers-control`}');
+  const trackersControl = drawerSource.indexOf("id={`${chat.id}:trackers-control`}");
   assert.ok(captureControl >= 0, "Capture agent reasoning control exists");
   assert.ok(trackersControl >= 0, "Roleplay trackers control exists");
   assert.ok(captureControl < trackersControl, "Capture agent reasoning is visible outside the collapsed trackers card");

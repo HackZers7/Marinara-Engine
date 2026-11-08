@@ -133,7 +133,7 @@ export function MergeImportDialog({ kind, elementId, onApplied, iconSize = "1rem
   const handleFile = useCallback(
     async (file: File) => {
       setPhase("comparing");
-      let parsedEnvelope: ExportEnvelope | null = null;
+      let parsedEnvelope: ExportEnvelope | null;
       try {
         parsedEnvelope = sniffMergeEnvelope(JSON.parse(await file.text()), kind);
       } catch {
